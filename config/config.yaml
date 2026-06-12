@@ -1,0 +1,84 @@
+# wo-bot-control Configuration
+# Author: Antonio Leung
+# GitHub: https://github.com/al96169/wo-bot-control
+# Package: com.antonioleung.wobot.control
+
+# App Info
+app:
+  package: "com.antonioleung.wobot.control"
+  author: "Antonio Leung"
+  github: "https://github.com/al96169/wo-bot-control"
+  license: "MIT"
+
+# Robot Info
+robot:
+  id: "wobot-001"
+  name: "My Robot"
+  model: "jetson-nano"
+  version: "1.0.0"
+
+# Server Settings
+server:
+  host: "0.0.0.0"
+  port: 8765
+  http_port: 8000
+
+# mDNS Discovery
+mdns:
+  enabled: false
+  service_type: "_wobot._tcp.local."
+  port: 8765
+
+# Status Update
+status:
+  update_interval: 1.0  # seconds
+  subscribe_events:
+    - "status"
+    - "camera_status"
+    - "module_status"
+
+# Motion Control
+motion:
+  drive_type: "mecanum"  # mecanum, differential, ackermann
+  max_linear_speed: 1.0
+  max_angular_speed: 1.0
+  default_mode: "manual"  # manual, semi, auto
+  # 硬件后端: mock / serial / gpio
+  hardware_type: "mock"
+  # serial 后端配置
+  serial_port: "/dev/ttyTHS0"
+  serial_baudrate: 115200
+  # GPIO 引脚映射 (Jetson BOARD 编号)
+  gpio_pins:
+    front_left:  {pwm: 32, dir1: 33, dir2: 35}
+    front_right: {pwm: 36, dir1: 37, dir2: 38}
+    rear_left:   {pwm: 40, dir1: 41, dir2: 43}
+    rear_right:  {pwm: 12, dir1: 13, dir2: 15}
+
+# Camera
+camera:
+  enabled: false
+  default_camera: 0
+  resolution:
+    width: 640
+    height: 480
+  fps: 30
+  stream_type: "mjpeg"  # mjpeg, webrtc
+
+# Modules
+modules:
+  auto_load: true
+  module_dir: "src/modules/extension"
+
+# Logging
+logging:
+  level: "INFO"
+  file: "logs/wobot.log"
+  max_size: "10MB"
+  backup_count: 5
+
+# Security
+security:
+  auth_enabled: false
+  # 当 auth_enabled=true 时，客户端需通过 URL query ?token=xxx 或首条 auth 消息认证
+  token: "change-me-to-a-secure-random-string"

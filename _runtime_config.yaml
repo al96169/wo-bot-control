@@ -1,0 +1,40 @@
+app:
+  author: Antonio Leung
+  github: https://github.com/al96169/wo-bot-control
+  license: MIT
+  package: com.antonioleung.wobot.control
+camera:
+  enabled: false
+logging:
+  backup_count: 5
+  file: logs/wobot.log
+  level: INFO
+  max_size: 10MB
+mdns:
+  enabled: false
+modules:
+  auto_load: true
+  module_dir: src/modules/extension
+motion:
+  default_mode: manual
+  drive_type: mecanum
+  max_angular_speed: 1.0
+  max_linear_speed: 1.0
+robot:
+  id: wobot-001
+  model: jetson-nano
+  name: My Robot
+  version: 1.0.0
+security:
+  auth_enabled: false
+  token: ''
+server:
+  host: 0.0.0.0
+  http_port: 8000
+  port: 8765
+status:
+  subscribe_events:
+  - status
+  - camera_status
+  - module_status
+  update_interval: 1.0
