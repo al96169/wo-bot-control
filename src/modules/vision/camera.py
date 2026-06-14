@@ -56,6 +56,9 @@ class CameraManager:
     def _detect_cameras(self):
         """检测可用摄像头：画面1(左)=USB, 画面2(右)=CSI
         若只有 1 个物理设备则克隆为 2 个逻辑摄像头（帧共享）"""
+        # 清理上次运行遗留的 gst-launch-1.0 孤儿进程（避免 CSI 被占用）
+        self._cleanup_orphaned_csi()
+
         # CSI 摄像头 (GStreamer nvarguscamerasrc，回退到 V4L2 /dev/video0)
         csi_cameras = self._detect_csi_cameras()
 
@@ -95,6 +98,32 @@ class CameraManager:
         else:
             if self.logger:
                 self.logger.info(f"Detected {physical_count} cameras")
+
+    def _cleanup_orphaned_csi(self):
+        """清理上次运行遗留的 gst-launch-1.0 孤儿进程"""
+        try:
+            # 通过进程名匹配：gst-launch-1.0 且参数含 csi_cam 或 nvarguscamerasrc
+            result = subprocess.run(
+                ['pgrep', '-f', 'gst-launch-1.0.*nvarguscamerasrc'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.stdout.strip():
+                pids = result.stdout.strip().split('\n')
+                for pid in pids:
+                    try:
+                        os.kill(int(pid), 9)
+                    except Exception:
+                        pass
+                # 清理旧帧文件
+                for f in glob.glob('/tmp/csi_cam*_f*.jpg'):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
+                if self.logger:
+                    self.logger.info(f"Cleaned up {len(pids)} orphaned CSI subprocess(es)")
+        except Exception:
+            pass
 
     def _detect_csi_cameras(self) -> List[dict]:
         """检测 CSI 摄像头：GStreamer → v4l2-ctl → gst-inspect 三级回退"""
@@ -332,6 +361,9 @@ class CameraStream:
             return
 
         # 热恢复：设备已打开，直接重启采集循环
+        # CSI 需额外检查子进程是否存活
+        if self._csi_proc is not None and self._csi_proc.poll() is not None:
+            self._csi_proc = None  # 已死，回退冷启动
         if self.cap is not None or self._csi_proc is not None:
             self.running = True
             self._capture_task = asyncio.create_task(self._capture_loop())
