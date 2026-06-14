@@ -97,10 +97,8 @@ class CameraManager:
                 self.logger.info(f"Detected {physical_count} cameras")
 
     def _detect_csi_cameras(self) -> List[dict]:
-        """检测 CSI 摄像头：GStreamer nvarguscamerasrc，回退到 V4L2 /dev/video0
-        注意：V4L2 回退仅用于检测存在性，启动时仍强制使用 nvarguscamerasrc"""
+        """检测 CSI 摄像头：GStreamer → v4l2-ctl → gst-inspect 三级回退"""
         cameras = []
-
         csi_pipeline = (
             "nvarguscamerasrc sensor_id=0 ! "
             "video/x-raw(memory:NVMM), width=640, height=480, format=NV12, framerate=30/1 ! "
@@ -109,43 +107,52 @@ class CameraManager:
             "appsink"
         )
 
-        # 方式 1: nvarguscamerasrc 直接检测
+        # 方式 1: GStreamer 直接检测
         try:
             cap = cv2.VideoCapture(csi_pipeline, cv2.CAP_GSTREAMER)
             if cap.isOpened():
                 cameras.append({
-                    "id": 0,
-                    "name": "CSI Camera",
-                    "type": "csi",
-                    "device": "/dev/video0",
-                    "pipeline": csi_pipeline,
-                    "status": "available",
+                    "id": 0, "name": "CSI Camera", "type": "csi",
+                    "device": "/dev/video0", "pipeline": csi_pipeline, "status": "available",
                 })
                 cap.release()
                 return cameras
             cap.release()
-        except Exception as e:
-            if self.logger:
-                self.logger.debug(f"CSI nvarguscamerasrc detection error: {e}")
+        except Exception:
+            pass
 
-        # 方式 2: V4L2 回退检测存在性
+        # 方式 2: v4l2-ctl 检测（检查 /dev/video0 的驱动是否为 tegra-video）
         try:
-            cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-            if cap.isOpened():
-                # 检测到了，但启动时强制使用 nvarguscamerasrc
+            result = subprocess.run(
+                ['v4l2-ctl', '-d', '/dev/video0', '-D'],
+                capture_output=True, text=True, timeout=5
+            )
+            if 'tegra-video' in result.stdout or 'imx219' in result.stdout.lower():
                 cameras.append({
-                    "id": 0,
-                    "name": "CSI Camera",
-                    "type": "csi",
-                    "device": "/dev/video0",
-                    "pipeline": csi_pipeline,  # 存入 nvarguscamerasrc pipeline
-                    "use_nvargussrc": True,      # 标记：启动时强制走 NV 路径
-                    "status": "available",
+                    "id": 0, "name": "CSI Camera", "type": "csi",
+                    "device": "/dev/video0", "pipeline": csi_pipeline, "status": "available",
                 })
-                cap.release()
-        except Exception as e:
-            if self.logger:
-                self.logger.debug(f"CSI V4L2 detection error: {e}")
+                if self.logger:
+                    self.logger.info("CSI camera detected via v4l2-ctl (tegra-video/imx219)")
+                return cameras
+        except Exception:
+            pass
+
+        # 方式 3: gst-inspect 检测 nvarguscamerasrc 插件存在性
+        try:
+            result = subprocess.run(
+                ['gst-inspect-1.0', 'nvarguscamerasrc'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                cameras.append({
+                    "id": 0, "name": "CSI Camera", "type": "csi",
+                    "device": "/dev/video0", "pipeline": csi_pipeline, "status": "available",
+                })
+                if self.logger:
+                    self.logger.info("CSI camera detected via gst-inspect (nvarguscamerasrc available)")
+        except Exception:
+            pass
 
         return cameras
 
@@ -547,7 +554,11 @@ class CameraStream:
                 if files:
                     latest = max(files, key=os.path.getmtime)
                     if latest != last_file:
-                        frame = cv2.imread(latest)
+                        try:
+                            frame = cv2.imread(latest)
+                        except FileNotFoundError:
+                            # multifilesink 轮转覆盖时旧文件可能被删除，忽略
+                            continue
                         if frame is not None and frame.size > 0:
                             self.current_frame = frame
                             self._frame_seq += 1
