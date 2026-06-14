@@ -89,6 +89,7 @@ class MessageHandler:
 
         try:
             if action == "center":
+                self._stop_gimbal_loop()
                 await self.gimbal_controller.center()
                 return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
             elif action == "get_state":

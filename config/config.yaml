@@ -76,8 +76,10 @@ gimbal:
   tilt_channel: 3               # 俯仰云台 servo_id (3号位)
   pan_min: 0                    # 角度限制 (Rosmaster 0-180)
   pan_max: 180
+  pan_center: 90               # 回中位置，默认为 (pan_min + pan_max) / 2
   tilt_min: 30                  # -60° 映射到 30
   tilt_max: 150                 # +60° 映射到 150
+  tilt_center: 90               # 回中位置，默认为 (tilt_min + tilt_max) / 2
   pan_invert: false             # 反转水平方向（实际部署时按硬件接线设为 true/false）
   tilt_invert: false            # 反转俯仰方向 (摇杆向上→舵机逆时针)
   step: 3.0                     # 增量模式每步移动角度

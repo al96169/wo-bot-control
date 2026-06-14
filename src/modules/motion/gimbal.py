@@ -356,6 +356,10 @@ class GimbalController:
         self.tilt_min = self.config.get("tilt_min", 30)
         self.tilt_max = self.config.get("tilt_max", 150)
 
+        # 回中位置（可配置，默认为范围中点）
+        self.pan_center = self.config.get("pan_center", (self.pan_min + self.pan_max) / 2)
+        self.tilt_center = self.config.get("tilt_center", (self.tilt_min + self.tilt_max) / 2)
+
         # 方向反转
         self.pan_invert = self.config.get("pan_invert", False)
         self.tilt_invert = self.config.get("tilt_invert", False)
@@ -509,10 +513,12 @@ class GimbalController:
         return True
 
     async def center(self) -> None:
-        """云台居中"""
-        await self.set_pan(90)
-        await self.set_tilt(90)
-        self.logger.info("Gimbal centered (pan=90°, tilt=90°)")
+        """云台回中 — 使用可配置的 pan_center / tilt_center"""
+        await self.set_pan(self.pan_center)
+        await self.set_tilt(self.tilt_center)
+        self.logger.info(
+            f"Gimbal centered (pan={self.pan_center}°, tilt={self.tilt_center}°)"
+        )
 
     async def stop(self) -> None:
         """停止云台（保持当前位置，释放硬件）"""
