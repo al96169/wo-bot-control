@@ -9,6 +9,7 @@ import pty
 import re
 import select
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -32,6 +33,10 @@ class MessageHandler:
         self.logger = logger
         # 持久 Shell 会话工作目录（初始为进程当前目录）
         self._shell_cwd = os.getcwd()
+        # 云台速度控制：客户端发速度(-1.0~+1.0)，服务端持续循环移动
+        self._gimbal_speed = {"pan": 0.0, "tilt": 0.0}
+        self._gimbal_running = threading.Event()
+        self._gimbal_task: Optional[asyncio.Task] = None
 
     async def handle(self, msg_type: str, msg_data: dict) -> Optional[dict]:
         """处理消息"""
@@ -89,7 +94,7 @@ class MessageHandler:
             elif action == "get_state":
                 return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
             elif action == "move":
-                # 增量控制: {action: "move", pan_delta: -1.0, tilt_delta: 0.5}
+                # 增量控制 (兼容旧版，每帧一发): {action: "move", pan_delta: -1.0, tilt_delta: 0.5}
                 step = float(data.get("step", 1.0))
                 pan_delta = float(data.get("pan_delta", 0) or 0)
                 tilt_delta = float(data.get("tilt_delta", 0) or 0)
@@ -111,6 +116,24 @@ class MessageHandler:
                         state["limit"] = "max" if pan_r["pan"] == self.gimbal_controller.pan_max else "min"
 
                 return resp
+            elif action == "move_begin":
+                # 开始持续移动: {action: "move_begin", pan_speed: 0.5, tilt_speed: -0.3}
+                self._gimbal_speed["pan"] = float(data.get("pan_speed", 0) or 0)
+                self._gimbal_speed["tilt"] = float(data.get("tilt_speed", 0) or 0)
+                self._start_gimbal_loop()
+                return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
+            elif action == "move_update":
+                # 更新移动速度: {action: "move_update", pan_speed: 0.5, tilt_speed: -0.3}
+                self._gimbal_speed["pan"] = float(data.get("pan_speed", 0) or 0)
+                self._gimbal_speed["tilt"] = float(data.get("tilt_speed", 0) or 0)
+                # 不返回 status，避免大量响应阻塞
+                return None
+            elif action == "move_end":
+                # 停止持续移动
+                self._gimbal_speed["pan"] = 0.0
+                self._gimbal_speed["tilt"] = 0.0
+                self._stop_gimbal_loop()
+                return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
             else:
                 # 绝对角度控制 (兼容旧版)
                 axis = data.get("axis", "pan")
@@ -124,6 +147,59 @@ class MessageHandler:
                 return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
+
+    def _start_gimbal_loop(self):
+        """启动云台持续移动循环 — 整个循环放进一个 executor 线程，消除逐 tick 调度抖动"""
+        if self._gimbal_running.is_set():
+            return
+        self._gimbal_running.set()
+        loop = asyncio.get_event_loop()
+        self._gimbal_task = loop.run_in_executor(None, self._gimbal_thread_fn)
+
+    def _stop_gimbal_loop(self):
+        """停止云台持续移动循环"""
+        self._gimbal_running.clear()
+        self._gimbal_task = None
+
+    def _gimbal_thread_fn(self):
+        """云台移动线程：全同步执行，小步高频，舵机来不及完成单步→视觉平滑"""
+        gc = self.gimbal_controller
+        step_per_tick = 1.5  # 满速约 75°/s (1.5° × 50Hz)
+
+        try:
+            while self._gimbal_running.is_set():
+                pan_spd = self._gimbal_speed.get("pan", 0)
+                tilt_spd = self._gimbal_speed.get("tilt", 0)
+
+                if pan_spd == 0 and tilt_spd == 0:
+                    time.sleep(0.05)
+                    continue
+
+                pan_delta = pan_spd * step_per_tick
+                tilt_delta = tilt_spd * step_per_tick
+
+                # 限位
+                state = gc.get_state()
+                p, t = state["pan"], state["tilt"]
+                if p <= gc.pan_min and pan_delta < 0:
+                    pan_delta = 0
+                elif p >= gc.pan_max and pan_delta > 0:
+                    pan_delta = 0
+                if t <= gc.tilt_min and tilt_delta < 0:
+                    tilt_delta = 0
+                elif t >= gc.tilt_max and tilt_delta > 0:
+                    tilt_delta = 0
+
+                try:
+                    gc.move_pan_tilt_sync(pan_delta, tilt_delta, 1.0)
+                except Exception:
+                    pass
+
+                time.sleep(0.02)  # 20ms → 50Hz 微步
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Gimbal thread error: {e}")
 
     async def _handle_emergency_stop(self, data: dict) -> dict:
         """处理急停"""

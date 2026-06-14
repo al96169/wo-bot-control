@@ -19,6 +19,11 @@ class GimbalInterface(ABC):
         """设置舵机角度 (0-180)"""
         ...
 
+    async def set_angles(self, pan_angle: float, tilt_angle: float) -> None:
+        """同时设置水平和俯仰角度（默认回退到两次 set_angle）"""
+        await self.set_angle(0, pan_angle)
+        await self.set_angle(1, tilt_angle)
+
     @abstractmethod
     async def release(self) -> None:
         """释放所有舵机（停止 PWM 信号）"""
@@ -287,6 +292,41 @@ class RosmasterGimbal(GimbalInterface):
         except Exception as e:
             logger.error(f"Rosmaster set_angle(ch={channel}, servo={servo_id}, {angle}°) failed: {e}")
 
+    async def set_angles(self, pan_angle: float, tilt_angle: float) -> None:
+        """同时设置 pan 和 tilt — 单次 run_in_executor 避免双倍开销"""
+        self._ensure_init()
+        if self._bot is None:
+            return
+
+        pan = max(0, min(180, pan_angle))
+        tilt = max(0, min(180, tilt_angle))
+        self._current_angles[0] = pan
+        self._current_angles[1] = tilt
+
+        def _write_both():
+            self._bot.set_pwm_servo(self.pan_channel, int(pan))
+            self._bot.set_pwm_servo(self.tilt_channel, int(tilt))
+
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, _write_both)
+        except Exception as e:
+            logger.error(f"Rosmaster set_angles(pan={pan}°, tilt={tilt}°) failed: {e}")
+
+    def set_angles_sync(self, pan_angle: float, tilt_angle: float) -> None:
+        """同步版双轴写入 — 用于 executor 线程内直接调用，避免逐 tick executor 调度抖动
+        round() 替代 int() 消除 0.75°/tick 时的节拍效应（每4tick卡一次），
+        set_pwm_servo_all 单包发送替代两次 set_pwm_servo 节省 2ms sleep"""
+        self._ensure_init()
+        if self._bot is None:
+            return
+        self._current_angles[0] = max(0, min(180, pan_angle))
+        self._current_angles[1] = max(0, min(180, tilt_angle))
+        # 四路角度: s1,s2 未用=255, s3=tilt, s4=pan
+        s1 = s2 = 255
+        s3 = round(tilt_angle) if self.tilt_channel == 3 else 255
+        s4 = round(pan_angle) if self.pan_channel == 4 else 255
+        self._bot.set_pwm_servo_all(s1, s2, s3, s4)
+
     async def release(self) -> None:
         if self._bot:
             self._bot = None
@@ -427,6 +467,46 @@ class GimbalController:
             if self.on_limit:
                 await self.on_limit("tilt", self.tilt_max, "max")
         return result
+
+    async def move_pan_tilt(self, pan_delta: float, tilt_delta: float, step: float = 1.0) -> dict:
+        """同时增量移动两轴 — 单次串口写入，避免两次 run_in_executor 延迟叠加"""
+        # 计算新角度并限位
+        pan_new = self.pan_angle + pan_delta * step
+        tilt_new = self.tilt_angle + tilt_delta * step
+        pan_clamped = max(self.pan_min, min(self.pan_max, pan_new))
+        tilt_clamped = max(self.tilt_min, min(self.tilt_max, tilt_new))
+
+        pan_old, tilt_old = self.pan_angle, self.tilt_angle
+        self.pan_angle = pan_clamped
+        self.tilt_angle = tilt_clamped
+
+        pan_actual = 180 - pan_clamped if self.pan_invert else pan_clamped
+        tilt_actual = 180 - tilt_clamped if self.tilt_invert else tilt_clamped
+
+        await self._hardware.set_angles(pan_actual, tilt_actual)
+
+        result = {"changed": True, "pan": self.pan_angle, "tilt": self.tilt_angle}
+        # 限位检查
+        if (pan_clamped == self.pan_min and pan_old > self.pan_min) or \
+           (pan_clamped == self.pan_max and pan_old < self.pan_max):
+            result["limit"] = True
+        if (tilt_clamped == self.tilt_min and tilt_old > self.tilt_min) or \
+           (tilt_clamped == self.tilt_max and tilt_old < self.tilt_max):
+            result["limit"] = True
+        return result
+
+    def move_pan_tilt_sync(self, pan_delta: float, tilt_delta: float, step: float = 1.0) -> bool:
+        """同步版双轴增量移动 — 用于 executor 线程内直接调用"""
+        pan_new = self.pan_angle + pan_delta * step
+        tilt_new = self.tilt_angle + tilt_delta * step
+        self.pan_angle = max(self.pan_min, min(self.pan_max, pan_new))
+        self.tilt_angle = max(self.tilt_min, min(self.tilt_max, tilt_new))
+
+        pan_actual = 180 - self.pan_angle if self.pan_invert else self.pan_angle
+        tilt_actual = 180 - self.tilt_angle if self.tilt_invert else self.tilt_angle
+
+        self._hardware.set_angles_sync(pan_actual, tilt_actual)
+        return True
 
     async def center(self) -> None:
         """云台居中"""
