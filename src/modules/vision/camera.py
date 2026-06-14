@@ -584,13 +584,14 @@ class CameraStream:
             try:
                 files = glob.glob(f"{prefix}_f*.jpg")
                 if files:
-                    latest = max(files, key=os.path.getmtime)
+                    try:
+                        latest = max(files, key=os.path.getmtime)
+                    except (FileNotFoundError, ValueError):
+                        # 文件在 glob 和 getmtime 之间被 gst-launch 删除/轮转
+                        await asyncio.sleep(1.0 / (fps * 2))
+                        continue
                     if latest != last_file:
-                        try:
-                            frame = cv2.imread(latest)
-                        except FileNotFoundError:
-                            # multifilesink 轮转覆盖时旧文件可能被删除，忽略
-                            continue
+                        frame = cv2.imread(latest)
                         if frame is not None and frame.size > 0:
                             self.current_frame = frame
                             self._frame_seq += 1
