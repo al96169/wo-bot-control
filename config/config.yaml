@@ -65,6 +65,23 @@ camera:
   fps: 30
   stream_type: "mjpeg"  # mjpeg, webrtc
 
+# Gimbal
+gimbal:
+  enabled: false                # 设为 true 启用云台控制
+  gimbal_type: "rosmaster"      # 硬件后端: mock / pca9685 / gpio_pwm / rosmaster
+  # Rosmaster 后端配置
+  com: "/dev/ttyUSB0"          # Rosmaster 串口设备路径（实际设备 /dev/ttyUSB0）
+  car_type: 1                   # 小车类型
+  pan_channel: 4                # 左右云台 servo_id (4号位)
+  tilt_channel: 3               # 俯仰云台 servo_id (3号位)
+  pan_min: 0                    # 角度限制 (Rosmaster 0-180)
+  pan_max: 180
+  tilt_min: 30                  # -60° 映射到 30
+  tilt_max: 150                 # +60° 映射到 150
+  pan_invert: false             # 反转水平方向（实际部署时按硬件接线设为 true/false）
+  tilt_invert: false            # 反转俯仰方向 (摇杆向上→舵机逆时针)
+  step: 3.0                     # 增量模式每步移动角度
+
 # Modules
 modules:
   auto_load: true

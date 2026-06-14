@@ -94,8 +94,9 @@ class WoBotControl:
                 "fps": 15,
             },
             "gimbal": {
-                "enabled": False, "gimbal_type": "mock",
-                "pan_channel": 0, "tilt_channel": 1,
+                "enabled": False, "gimbal_type": "rosmaster",
+                "com": "/dev/myserial", "car_type": 1,
+                "pan_channel": 4, "tilt_channel": 3,
                 "pan_min": 0, "pan_max": 180, "tilt_min": 30, "tilt_max": 150,
             },
             "logging": {"level": "INFO"},
@@ -144,6 +145,7 @@ class WoBotControl:
             message_handler=self.message_handler,
             robot_info=self.config.get("robot", {}),
             webrtc_service=self.webrtc_service,
+            gimbal_controller=self.gimbal_controller,
             config=self.config,
             logger=self.logger,
         )

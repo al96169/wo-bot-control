@@ -80,8 +80,6 @@ class MessageHandler:
         if not hasattr(self, 'gimbal_controller') or not self.gimbal_controller:
             return {"type": "error", "data": {"code": 503, "message": "Gimbal not available"}}
 
-        axis = data.get("axis", "pan")
-        angle = data.get("angle", 90)
         action = data.get("action", "set_angle")
 
         try:
@@ -90,14 +88,40 @@ class MessageHandler:
                 return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
             elif action == "get_state":
                 return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
-            elif axis == "pan":
-                await self.gimbal_controller.set_pan(float(angle))
-            elif axis == "tilt":
-                await self.gimbal_controller.set_tilt(float(angle))
-            else:
-                return {"type": "error", "data": {"code": 400, "message": f"Unknown axis: {axis}"}}
+            elif action == "move":
+                # 增量控制: {action: "move", pan_delta: -1.0, tilt_delta: 0.5}
+                step = float(data.get("step", 1.0))
+                pan_delta = float(data.get("pan_delta", 0) or 0)
+                tilt_delta = float(data.get("tilt_delta", 0) or 0)
 
-            return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
+                pan_r = await self.gimbal_controller.move_pan(pan_delta, step)
+                tilt_r = await self.gimbal_controller.move_tilt(tilt_delta, step)
+
+                state = self.gimbal_controller.get_state()
+                resp = {"type": "gimbal_status", "data": state}
+
+                # 限位检测：在 state 上附加 limit 信息
+                if pan_r.get("limit") or tilt_r.get("limit"):
+                    resp["type"] = "gimbal_limit"
+                    if tilt_r.get("limit"):
+                        state["limit_axis"] = "tilt"
+                        state["limit"] = "max" if tilt_r["tilt"] == self.gimbal_controller.tilt_max else "min"
+                    elif pan_r.get("limit"):
+                        state["limit_axis"] = "pan"
+                        state["limit"] = "max" if pan_r["pan"] == self.gimbal_controller.pan_max else "min"
+
+                return resp
+            else:
+                # 绝对角度控制 (兼容旧版)
+                axis = data.get("axis", "pan")
+                angle = data.get("angle", 90)
+                if axis == "pan":
+                    await self.gimbal_controller.set_pan(float(angle))
+                elif axis == "tilt":
+                    await self.gimbal_controller.set_tilt(float(angle))
+                else:
+                    return {"type": "error", "data": {"code": 400, "message": f"Unknown axis: {axis}"}}
+                return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
 

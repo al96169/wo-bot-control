@@ -186,7 +186,12 @@ class CameraManager:
             return {"id": camera_id, "status": "error", "message": "Camera not found"}
 
         if camera_id in self.active_streams:
-            return self.active_streams[camera_id].get_info()
+            stream = self.active_streams[camera_id]
+            if stream.running:
+                return stream.get_info()
+            # 热恢复：流存在但已暂停
+            await stream.start()
+            return stream.get_info()
 
         camera = self.cameras[camera_id]
         shared_from = camera.get("shared_from")
@@ -210,36 +215,39 @@ class CameraManager:
         return stream.get_info()
 
     def _auto_start_shared_streams(self, source_id: int, source_stream: "CameraStream"):
-        """自动启动所有依赖于 source_id 的共享摄像头"""
+        """自动启动所有依赖于 source_id 的共享摄像头（创建或热恢复）"""
         for cam_id, cam_info in self.cameras.items():
-            if cam_info.get("shared_from") == source_id and cam_id not in self.active_streams:
-                shared_stream = SharedCameraStream(cam_info, source_stream, self.logger)
-                self.active_streams[cam_id] = shared_stream
-                shared_stream.running = True
-                if self.logger:
-                    self.logger.info(
-                        f"Auto-started shared camera {cam_id}: {cam_info['name']}"
-                    )
+            if cam_info.get("shared_from") == source_id:
+                if cam_id not in self.active_streams:
+                    shared_stream = SharedCameraStream(cam_info, source_stream, self.logger)
+                    self.active_streams[cam_id] = shared_stream
+                    shared_stream.running = True
+                    if self.logger:
+                        self.logger.info(f"Auto-started shared camera {cam_id}: {cam_info['name']}")
+                elif not self.active_streams[cam_id].running:
+                    # 热恢复已存在的共享流
+                    self.active_streams[cam_id].running = True
+                    if self.logger:
+                        self.logger.info(f"Auto-resumed shared camera {cam_id}: {cam_info['name']}")
 
     async def stop_stream(self, camera_id: int):
-        """停止视频流"""
+        """暂停视频流 — 停止采集但不释放设备"""
         if camera_id not in self.active_streams:
             return
 
         stream = self.active_streams[camera_id]
         await stream.stop()
-        del self.active_streams[camera_id]
+        # 不删除：保留 stream 对象以支持热恢复
 
-        # 如果是源摄像头被停止，也停止依赖它的共享流
+        # 如果是源摄像头被停止，也暂停依赖它的共享流
         dependents = [
             cid for cid, info in self.cameras.items()
             if info.get("shared_from") == camera_id and cid in self.active_streams
         ]
         for dep_id in dependents:
             await self.active_streams[dep_id].stop()
-            del self.active_streams[dep_id]
             if self.logger:
-                self.logger.info(f"Stopped dependent shared camera {dep_id}")
+                self.logger.info(f"Paused dependent shared camera {dep_id}")
 
     async def stop_all(self):
         """停止所有视频流"""
@@ -272,8 +280,16 @@ class CameraManager:
         return {"cameras": cameras}
 
     async def stop(self):
-        """停止管理器"""
-        await self.stop_all()
+        """彻底停止管理器 — 释放所有设备资源"""
+        await self.shutdown()
+
+    async def shutdown(self):
+        """释放所有摄像头设备资源"""
+        for stream in list(self.active_streams.values()):
+            await stream.shutdown()
+        self.active_streams.clear()
+        if self.logger:
+            self.logger.info("All camera devices released")
 
     def get_frame(self, camera_id: int = None) -> Optional[np.ndarray]:
         """获取帧（用于 MJPEG 流和 WebRTC）"""
@@ -299,14 +315,24 @@ class CameraStream:
         self._csi_proc: Optional[subprocess.Popen] = None
         self._csi_file_prefix: Optional[str] = None
         self.running = False
+        self._capture_task: Optional[asyncio.Task] = None
         self.current_frame: Optional[np.ndarray] = None
         self.stream_port = 8080 + camera_info.get("id", 0)
 
     async def start(self):
-        """启动流（硬编码 320x240@10fps，NumPy YUYV 转换）"""
+        """启动流 — 支持热恢复（设备已打开）和冷启动"""
         if self.running:
             return
 
+        # 热恢复：设备已打开，直接重启采集循环
+        if self.cap is not None or self._csi_proc is not None:
+            self.running = True
+            self._capture_task = asyncio.create_task(self._capture_loop())
+            if self.logger:
+                self.logger.info(f"Camera stream resumed: {self.camera_info['name']}")
+            return
+
+        # 冷启动：打开设备
         try:
             # 硬编码低分辨率+低帧率以适配 Jetson Nano VP8 编码
             w, h, fps = 320, 240, 10
@@ -346,7 +372,7 @@ class CameraStream:
                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                     )
                     # 等待第一批帧写入（CSI 初始化约需 1.5 秒）
-                    time.sleep(2.0)
+                    await asyncio.sleep(2.0)
                     # 检查子进程是否还活着
                     if proc.poll() is not None:
                         stderr_output = proc.stderr.read().decode() if proc.stderr else ""
@@ -364,7 +390,8 @@ class CameraStream:
                             )
                     else:
                         proc.terminate()
-                        proc.wait(timeout=2)
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, proc.wait, 2)
                         if self.logger:
                             self.logger.warning("CSI subprocess: no frames produced, falling back")
                 except Exception as e:
@@ -412,7 +439,7 @@ class CameraStream:
             self.running = True
             # 把 w/h 存入实例供 _capture_loop 使用
             self._cap_w, self._cap_h, self._cap_fps = w, h, fps
-            asyncio.create_task(self._capture_loop())
+            self._capture_task = asyncio.create_task(self._capture_loop())
 
             if self.logger:
                 fmt = "YUYV(NumPy)" if getattr(self, '_yuyv', False) else "MJPG/BGR"
@@ -424,22 +451,45 @@ class CameraStream:
             self.running = False
 
     async def stop(self):
-        """停止流"""
+        """暂停流 — 停止采集但不释放设备，支持快速恢复"""
         self.running = False
+        # 取消采集任务并等待退出（保持 cap/csi_proc 不动）
+        if self._capture_task and not self._capture_task.done():
+            self._capture_task.cancel()
+            try:
+                await self._capture_task
+            except asyncio.CancelledError:
+                pass
+        self._capture_task = None
+
+        if self.logger:
+            self.logger.info(f"Camera stream paused: {self.camera_info['name']}")
+
+    async def shutdown(self):
+        """彻底释放设备资源（应用退出时调用）"""
+        self.running = False
+        if self._capture_task and not self._capture_task.done():
+            self._capture_task.cancel()
+            try:
+                await self._capture_task
+            except asyncio.CancelledError:
+                pass
+        self._capture_task = None
 
         # 终止 CSI 子进程
         if self._csi_proc:
             try:
                 self._csi_proc.terminate()
-                self._csi_proc.wait(timeout=3)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self._csi_proc.wait, 3)
             except Exception:
                 try:
                     self._csi_proc.kill()
-                    self._csi_proc.wait(timeout=2)
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(None, self._csi_proc.wait, 2)
                 except Exception:
                     pass
             self._csi_proc = None
-            # 清理临时帧文件
             if self._csi_file_prefix:
                 for f in glob.glob(f"{self._csi_file_prefix}_f*.jpg"):
                     try:
@@ -450,9 +500,6 @@ class CameraStream:
         if self.cap:
             self.cap.release()
             self.cap = None
-
-        if self.logger:
-            self.logger.info(f"Camera stream stopped: {self.camera_info['name']}")
 
     async def _capture_loop(self):
         """帧采集循环（使用 yuyv_to_bgr 绕过 ARM SIMD 崩溃）"""
@@ -480,6 +527,8 @@ class CameraStream:
                         )
                 await asyncio.sleep(1.0 / (fps * 2))
 
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"Capture error: {e}")
@@ -511,6 +560,8 @@ class CameraStream:
                                 )
                 await asyncio.sleep(1.0 / (fps * 2))
 
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"CSI capture error: {e}")
@@ -566,7 +617,12 @@ class SharedCameraStream:
     async def stop(self):
         self.running = False
         if self.logger:
-            self.logger.info(f"Shared camera stream stopped: {self.camera_info['name']}")
+            self.logger.info(f"Shared camera stream paused: {self.camera_info['name']}")
+
+    async def shutdown(self):
+        """彻底清理（共享摄像头无设备需要释放）"""
+        self.running = False
+        self.source = None
 
     def get_frame(self) -> Optional[np.ndarray]:
         """从源流获取当前帧"""

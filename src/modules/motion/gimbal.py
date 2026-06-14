@@ -1,6 +1,6 @@
 """
 二轴云台控制模块
-支持 PCA9685 I2C 舵机驱动板 / Jetson GPIO PWM / Mock 三种后端
+支持 PCA9685 I2C / Jetson GPIO PWM / Rosmaster 串口 / Mock 四种后端
 """
 
 import asyncio
@@ -233,6 +233,69 @@ class GPIOPWMGimbal(GimbalInterface):
         await self.release()
 
 
+class RosmasterGimbal(GimbalInterface):
+    """通过亚博 Rosmaster_Lib 串口驱动库控制 PWM 舵机
+
+    参数:
+        com: 串口设备路径 (默认 /dev/myserial)
+        car_type: 小车类型 (默认 1)
+        pan_channel: 水平舵机 servo_id (默认 4)
+        tilt_channel: 俯仰舵机 servo_id (默认 3)
+    """
+
+    def __init__(self, com: str = "/dev/myserial", car_type: int = 1,
+                 pan_channel: int = 4, tilt_channel: int = 3):
+        self.com = com
+        self.car_type = car_type
+        self.pan_channel = pan_channel
+        self.tilt_channel = tilt_channel
+        self._bot = None
+        self._current_angles = {0: 90, 1: 90}
+
+    def _ensure_init(self):
+        if self._bot is None:
+            try:
+                from Rosmaster_Lib import Rosmaster
+                self._bot = Rosmaster(car_type=self.car_type, com=self.com)
+                self._bot.set_auto_report_state(enable=False)
+                self._bot.set_pwm_servo(self.pan_channel, 90)
+                self._bot.set_pwm_servo(self.tilt_channel, 90)
+                logger.info(
+                    f"Rosmaster gimbal initialized: com={self.com}, "
+                    f"car_type={self.car_type}, pan=servo{self.pan_channel}, tilt=servo{self.tilt_channel}"
+                )
+            except ImportError:
+                logger.error("Rosmaster_Lib not found. Install the Yahboom Rosmaster driver library.")
+                raise
+            except Exception as e:
+                logger.error(f"Rosmaster gimbal init failed: {e}")
+                raise
+
+    async def set_angle(self, channel: int, angle: float) -> None:
+        self._ensure_init()
+        if self._bot is None:
+            return
+
+        angle = max(0, min(180, angle))
+        self._current_angles[channel] = angle
+        servo_id = self.pan_channel if channel == 0 else self.tilt_channel
+
+        try:
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._bot.set_pwm_servo, servo_id, int(angle)
+            )
+        except Exception as e:
+            logger.error(f"Rosmaster set_angle(ch={channel}, servo={servo_id}, {angle}°) failed: {e}")
+
+    async def release(self) -> None:
+        if self._bot:
+            self._bot = None
+        logger.info("Rosmaster gimbal released")
+
+    async def close(self) -> None:
+        await self.release()
+
+
 class GimbalController:
     """云台控制器 - 管理二轴云台"""
 
@@ -253,11 +316,25 @@ class GimbalController:
         self.tilt_min = self.config.get("tilt_min", 30)
         self.tilt_max = self.config.get("tilt_max", 150)
 
+        # 方向反转
+        self.pan_invert = self.config.get("pan_invert", False)
+        self.tilt_invert = self.config.get("tilt_invert", False)
+
+        # 限位回调: async fn(axis: str, limit: float, direction: str)
+        self.on_limit: callable = None
+
     def _create_hardware(self) -> GimbalInterface:
         """根据配置创建硬件后端"""
         gimbal_type = self.config.get("gimbal_type", "mock")
 
-        if gimbal_type == "pca9685":
+        if gimbal_type == "rosmaster":
+            return RosmasterGimbal(
+                com=self.config.get("com", "/dev/myserial"),
+                car_type=self.config.get("car_type", 1),
+                pan_channel=self.config.get("pan_channel", 4),
+                tilt_channel=self.config.get("tilt_channel", 3),
+            )
+        elif gimbal_type == "pca9685":
             return PCA9685Gimbal(
                 bus=self.config.get("i2c_bus", 1),
                 address=self.config.get("i2c_address", 0x40),
@@ -274,15 +351,82 @@ class GimbalController:
 
     async def set_pan(self, angle: float) -> None:
         """设置水平角度 (0-180, 0=最左, 180=最右, 90=居中)"""
+        old_angle = self.pan_angle
         angle = max(self.pan_min, min(self.pan_max, angle))
         self.pan_angle = angle
-        await self._hardware.set_angle(0, angle)
+        actual = 180 - angle if self.pan_invert else angle
+        await self._hardware.set_angle(0, actual)
+        await self._check_limit("pan", old_angle, angle)
 
     async def set_tilt(self, angle: float) -> None:
         """设置俯仰角度 (0-180, 0=最下, 180=最上, 90=水平)"""
+        old_angle = self.tilt_angle
         angle = max(self.tilt_min, min(self.tilt_max, angle))
         self.tilt_angle = angle
-        await self._hardware.set_angle(1, angle)
+        actual = 180 - angle if self.tilt_invert else angle
+        await self._hardware.set_angle(1, actual)
+        await self._check_limit("tilt", old_angle, angle)
+
+    async def _check_limit(self, axis: str, old: float, new: float):
+        """检查是否到达限位，触发回调"""
+        if not self.on_limit:
+            return
+        if axis == "pan":
+            if new == self.pan_min and old > self.pan_min:
+                await self.on_limit("pan", self.pan_min, "min")
+            elif new == self.pan_max and old < self.pan_max:
+                await self.on_limit("pan", self.pan_max, "max")
+        elif axis == "tilt":
+            if new == self.tilt_min and old > self.tilt_min:
+                await self.on_limit("tilt", self.tilt_min, "min")
+            elif new == self.tilt_max and old < self.tilt_max:
+                await self.on_limit("tilt", self.tilt_max, "max")
+
+    async def move_pan(self, delta: float, step: float = 1.0) -> dict:
+        """增量移动水平角度，返回 {changed, pan, tilt, limit?}"""
+        if abs(delta) < 0.01:
+            return {"changed": False, "pan": self.pan_angle, "tilt": self.tilt_angle}
+        new_angle = self.pan_angle + delta * step
+        old = self.pan_angle
+        clamped = max(self.pan_min, min(self.pan_max, new_angle))
+        if abs(clamped - old) < 0.01:
+            return {"changed": False, "pan": self.pan_angle, "tilt": self.tilt_angle, "limit": True}
+        self.pan_angle = clamped
+        actual = 180 - clamped if self.pan_invert else clamped
+        await self._hardware.set_angle(0, actual)
+        result = {"changed": True, "pan": self.pan_angle, "tilt": self.tilt_angle}
+        if clamped == self.pan_min and old > self.pan_min:
+            result["limit"] = True
+            if self.on_limit:
+                await self.on_limit("pan", self.pan_min, "min")
+        elif clamped == self.pan_max and old < self.pan_max:
+            result["limit"] = True
+            if self.on_limit:
+                await self.on_limit("pan", self.pan_max, "max")
+        return result
+
+    async def move_tilt(self, delta: float, step: float = 1.0) -> dict:
+        """增量移动俯仰角度，返回 {changed, pan, tilt, limit?}"""
+        if abs(delta) < 0.01:
+            return {"changed": False, "pan": self.pan_angle, "tilt": self.tilt_angle}
+        new_angle = self.tilt_angle + delta * step
+        old = self.tilt_angle
+        clamped = max(self.tilt_min, min(self.tilt_max, new_angle))
+        if abs(clamped - old) < 0.01:
+            return {"changed": False, "pan": self.pan_angle, "tilt": self.tilt_angle, "limit": True}
+        self.tilt_angle = clamped
+        actual = 180 - clamped if self.tilt_invert else clamped
+        await self._hardware.set_angle(1, actual)
+        result = {"changed": True, "pan": self.pan_angle, "tilt": self.tilt_angle}
+        if clamped == self.tilt_min and old > self.tilt_min:
+            result["limit"] = True
+            if self.on_limit:
+                await self.on_limit("tilt", self.tilt_min, "min")
+        elif clamped == self.tilt_max and old < self.tilt_max:
+            result["limit"] = True
+            if self.on_limit:
+                await self.on_limit("tilt", self.tilt_max, "max")
+        return result
 
     async def center(self) -> None:
         """云台居中"""
@@ -306,4 +450,8 @@ class GimbalController:
 
 def create_gimbal(config: dict, logger_instance=None) -> GimbalController:
     """工厂函数：根据配置创建云台控制器"""
-    return GimbalController(config.get("gimbal", {}), logger_instance)
+    gimbal_config = config.get("gimbal", {})
+    # 传递 robot 信息给 MockGimbal 使用
+    robot_config = config.get("robot", {})
+    gimbal_config.setdefault("robot", robot_config)
+    return GimbalController(gimbal_config, logger_instance)

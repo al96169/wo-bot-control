@@ -194,7 +194,14 @@ class WebRTCService:
         await pc.setRemoteDescription(offer)
 
         # 添加视频轨（为每个实际检测到的摄像头创建一个）
+        # 先确保所有摄像头流已启动（热恢复，O(1)）
         if self.camera_manager:
+            for cam_id in sorted(self.camera_manager.cameras.keys()):
+                try:
+                    await self.camera_manager.start_stream(cam_id)
+                except Exception as e:
+                    self.logger.warning(f"[{client_id}] Camera {cam_id} start failed: {e}")
+
             self._video_tracks[client_id] = {}
             for cam_id in sorted(self.camera_manager.cameras.keys()):
                 try:

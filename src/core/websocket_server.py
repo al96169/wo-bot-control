@@ -21,12 +21,13 @@ except ImportError:
 class WebSocketServer:
     """WebSocket 信令服务器"""
 
-    def __init__(self, host: str, port: int, message_handler, robot_info: dict, webrtc_service=None, config: dict = None, logger=None):
+    def __init__(self, host: str, port: int, message_handler, robot_info: dict, webrtc_service=None, gimbal_controller=None, config: dict = None, logger=None):
         self.host = host
         self.port = port
         self.message_handler = message_handler
         self.robot_info = robot_info
         self.webrtc_service = webrtc_service
+        self.gimbal_controller = gimbal_controller
         self.config = config or {}
         self.logger = logger
         self._server = None
@@ -145,6 +146,8 @@ class WebSocketServer:
             features.append("webrtc")
         else:
             features.append("websocket-fallback")  # 标记 WebSocket 可处理业务消息
+        if getattr(self, 'gimbal_controller', None):
+            features.append("gimbal")
 
         try:
             # 发送握手消息（设备发现兼容）
