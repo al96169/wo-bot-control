@@ -51,34 +51,52 @@ class MotionController:
                 self.logger.warning(f"Invalid drive type: {drive_type}")
 
     async def set_velocity(self, linear: float, angular: float, mode: str = None):
-        """设置速度"""
+        """设置速度（兼容旧版双轴协议）"""
         if self.emergency_stopped:
             if self.logger:
                 self.logger.warning("Motion blocked: emergency stop active")
             return
 
-        # 限制速度范围
         linear = max(-1.0, min(1.0, linear))
         angular = max(-1.0, min(1.0, angular))
-
-        # 应用速度限制
         linear *= self.max_linear_speed
         angular *= self.max_angular_speed
 
-        # 更新当前状态
         self.current_linear = linear
         self.current_angular = angular
         if mode:
             self.current_mode = mode
 
-        # 根据驱动类型计算轮速
-        wheel_speeds = self._calculate_wheel_speeds(linear, angular)
-
-        # 发送到硬件
-        await self._send_to_hardware(wheel_speeds)
+        # 麦轮驱动优先使用 set_mecanum（硬件原生支持）
+        if self.drive_type == "mecanum":
+            await self.hardware.set_mecanum(linear, 0.0, angular)
+        else:
+            wheel_speeds = self._calculate_wheel_speeds(linear, angular)
+            await self._send_to_hardware(wheel_speeds)
 
         if self.logger:
             self.logger.debug(f"Velocity set: linear={linear:.2f}, angular={angular:.2f}")
+
+    async def set_mecanum_velocity(self, v_x: float, v_y: float, v_z: float, mode: str = None):
+        """设置麦轮三轴速度 (v_x=前后, v_y=左右平移, v_z=旋转)"""
+        if self.emergency_stopped:
+            if self.logger:
+                self.logger.warning("Motion blocked: emergency stop active")
+            return
+
+        v_x = max(-1.0, min(1.0, v_x))
+        v_y = max(-1.0, min(1.0, v_y))
+        v_z = max(-5.0, min(5.0, v_z))
+
+        self.current_linear = v_x
+        self.current_angular = v_z
+        if mode:
+            self.current_mode = mode
+
+        await self.hardware.set_mecanum(v_x, v_y, v_z)
+
+        if self.logger:
+            self.logger.debug(f"Mecanum velocity: v_x={v_x:.2f}, v_y={v_y:.2f}, v_z={v_z:.2f}")
 
     def _calculate_wheel_speeds(self, linear: float, angular: float) -> dict:
         """根据驱动类型计算轮速"""

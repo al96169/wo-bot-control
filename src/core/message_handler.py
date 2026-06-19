@@ -60,17 +60,26 @@ class MessageHandler:
         return {"type": "status", "data": {}}
 
     async def _handle_motion(self, data: dict) -> dict:
-        """处理运动控制"""
+        """处理运动控制（支持双轴兼容 + 三轴麦轮协议）"""
         if not self.motion_controller:
             return {"type": "error", "data": {"code": 503, "message": "Motion controller not available"}}
 
-        linear = data.get("linear", 0.0)
-        angular = data.get("angular", 0.0)
-        mode = data.get("mode", "manual")
-
         try:
-            await self.motion_controller.set_velocity(linear, angular, mode)
-            return {"type": "motion_ack", "data": {"linear": linear, "angular": angular, "mode": mode}}
+            # 三轴麦轮协议: {v_x, v_y, v_z}（平移摇杆+偏航摇杆合并后发送）
+            if "v_x" in data or "v_y" in data or "v_z" in data:
+                v_x = float(data.get("v_x", 0) or 0)
+                v_y = float(data.get("v_y", 0) or 0)
+                v_z = float(data.get("v_z", 0) or 0)
+                mode = data.get("mode", "manual")
+                await self.motion_controller.set_mecanum_velocity(v_x, v_y, v_z, mode)
+                return {"type": "motion_ack", "data": {"v_x": v_x, "v_y": v_y, "v_z": v_z, "mode": mode}}
+            # 双轴兼容协议: {linear, angular}
+            else:
+                linear = float(data.get("linear", 0) or 0)
+                angular = float(data.get("angular", 0) or 0)
+                mode = data.get("mode", "manual")
+                await self.motion_controller.set_velocity(linear, angular, mode)
+                return {"type": "motion_ack", "data": {"linear": linear, "angular": angular, "mode": mode}}
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
 

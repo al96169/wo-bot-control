@@ -264,7 +264,10 @@ class RosmasterGimbal(GimbalInterface):
         try:
             from Rosmaster_Lib import Rosmaster
             self._bot = Rosmaster(car_type=self.car_type, com=self.com)
-            self._bot.set_auto_report_state(enable=False)
+            self._bot.set_car_type(self.car_type)
+            # 启动接收线程（串口缓冲区必须被消费，否则通信会堵塞）。
+            # __uart_state 是类变量，多实例共享同一个串口时不会重复创建线程。
+            self._bot.create_receive_threading()
             self._bot.set_pwm_servo(self.pan_channel, 90)
             self._bot.set_pwm_servo(self.tilt_channel, 90)
             logger.info(
