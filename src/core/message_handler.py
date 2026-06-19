@@ -54,10 +54,15 @@ class MessageHandler:
 
     async def _handle_get_status(self, data: dict) -> dict:
         """处理状态请求"""
+        status_data = {}
         if self.system_collector:
-            status = await self.system_collector.collect()
-            return {"type": "status", "data": status}
-        return {"type": "status", "data": {}}
+            status_data = await self.system_collector.collect()
+        # 附带 features，确保客户端始终能获取最新功能列表
+        features = ["websocket", "exec", "motion", "system", "camera"]
+        if hasattr(self, 'gimbal_controller') and self.gimbal_controller:
+            features.append("gimbal")
+        status_data["features"] = features
+        return {"type": "status", "data": status_data}
 
     async def _handle_motion(self, data: dict) -> dict:
         """处理运动控制（支持双轴兼容 + 三轴麦轮协议）"""
@@ -217,6 +222,13 @@ class MessageHandler:
             await self.motion_controller.emergency_stop()
         self.logger.warning("Emergency stop triggered!")
         return {"type": "emergency_stop_ack", "data": {}}
+
+    async def _handle_emergency_release(self, data: dict) -> dict:
+        """释放急停"""
+        if self.motion_controller:
+            await self.motion_controller.release_emergency_stop()
+        self.logger.info("Emergency stop released")
+        return {"type": "emergency_release_ack", "data": {}}
 
     async def _handle_motion_config(self, data: dict) -> dict:
         """处理运动配置"""
