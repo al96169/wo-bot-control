@@ -44,6 +44,7 @@ class WebSocketServer:
             ping_interval=20,
             ping_timeout=10,
             max_size=2**20,
+            origins=None,  # 允许所有 Origin（浏览器跨域 WebSocket 需要）
         )
         if self.logger:
             self.logger.info(f"WebSocket signaling server started on ws://{self.host}:{self.port}")
