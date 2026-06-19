@@ -257,30 +257,33 @@ class RosmasterGimbal(GimbalInterface):
         self._bot = None
         self._current_angles = {0: 90, 1: 90}
 
-    def _ensure_init(self):
-        if self._bot is None:
-            try:
-                from Rosmaster_Lib import Rosmaster
-                self._bot = Rosmaster(car_type=self.car_type, com=self.com)
-                self._bot.set_auto_report_state(enable=False)
-                self._bot.set_pwm_servo(self.pan_channel, 90)
-                self._bot.set_pwm_servo(self.tilt_channel, 90)
-                logger.info(
-                    f"Rosmaster gimbal initialized: com={self.com}, "
-                    f"car_type={self.car_type}, pan=servo{self.pan_channel}, tilt=servo{self.tilt_channel}"
-                )
-            except ImportError:
-                logger.error("Rosmaster_Lib not found. Install the Yahboom Rosmaster driver library.")
-                raise
-            except Exception as e:
-                # 不抛异常，保留 _bot=None 允许下次调用时重试
-                # 典型场景：ROS 串口板在服务启动后才插入
-                logger.warning(f"Rosmaster gimbal init failed (will retry): {e}")
+    def _ensure_init(self) -> bool:
+        """初始化硬件，返回 True 表示成功（_bot 可用）"""
+        if self._bot is not None:
+            return True
+        try:
+            from Rosmaster_Lib import Rosmaster
+            self._bot = Rosmaster(car_type=self.car_type, com=self.com)
+            self._bot.set_auto_report_state(enable=False)
+            self._bot.set_pwm_servo(self.pan_channel, 90)
+            self._bot.set_pwm_servo(self.tilt_channel, 90)
+            logger.info(
+                f"Rosmaster gimbal initialized: com={self.com}, "
+                f"car_type={self.car_type}, pan=servo{self.pan_channel}, tilt=servo{self.tilt_channel}"
+            )
+            return True
+        except ImportError:
+            logger.error("Rosmaster_Lib not found. Install the Yahboom Rosmaster driver library.")
+            raise
+        except Exception as e:
+            # 不抛异常，保留 _bot=None 允许下次调用时重试
+            # 典型场景：ROS 串口板在服务启动后才插入
+            logger.warning(f"Rosmaster gimbal init failed (will retry): {e}")
+            return False
 
     async def set_angle(self, channel: int, angle: float) -> None:
-        self._ensure_init()
-        if self._bot is None:
-            return
+        if not self._ensure_init():
+            raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
 
         angle = max(0, min(180, angle))
         self._current_angles[channel] = angle
@@ -295,9 +298,8 @@ class RosmasterGimbal(GimbalInterface):
 
     async def set_angles(self, pan_angle: float, tilt_angle: float) -> None:
         """同时设置 pan 和 tilt — 单次 run_in_executor 避免双倍开销"""
-        self._ensure_init()
-        if self._bot is None:
-            return
+        if not self._ensure_init():
+            raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
 
         pan = max(0, min(180, pan_angle))
         tilt = max(0, min(180, tilt_angle))
@@ -317,9 +319,8 @@ class RosmasterGimbal(GimbalInterface):
         """同步版双轴写入 — 用于 executor 线程内直接调用，避免逐 tick executor 调度抖动
         round() 替代 int() 消除 0.75°/tick 时的节拍效应（每4tick卡一次），
         set_pwm_servo_all 单包发送替代两次 set_pwm_servo 节省 2ms sleep"""
-        self._ensure_init()
-        if self._bot is None:
-            return
+        if not self._ensure_init():
+            raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
         self._current_angles[0] = max(0, min(180, pan_angle))
         self._current_angles[1] = max(0, min(180, tilt_angle))
         # 四路角度: s1,s2 未用=255, s3=tilt, s4=pan
@@ -396,20 +397,20 @@ class GimbalController:
 
     async def set_pan(self, angle: float) -> None:
         """设置水平角度 (0-180, 0=最左, 180=最右, 90=居中)"""
-        old_angle = self.pan_angle
         angle = max(self.pan_min, min(self.pan_max, angle))
-        self.pan_angle = angle
         actual = 180 - angle if self.pan_invert else angle
+        # 先写硬件，成功后再更新内部状态
         await self._hardware.set_angle(0, actual)
+        old_angle, self.pan_angle = self.pan_angle, angle
         await self._check_limit("pan", old_angle, angle)
 
     async def set_tilt(self, angle: float) -> None:
         """设置俯仰角度 (0-180, 0=最下, 180=最上, 90=水平)"""
-        old_angle = self.tilt_angle
         angle = max(self.tilt_min, min(self.tilt_max, angle))
-        self.tilt_angle = angle
         actual = 180 - angle if self.tilt_invert else angle
+        # 先写硬件，成功后再更新内部状态
         await self._hardware.set_angle(1, actual)
+        old_angle, self.tilt_angle = self.tilt_angle, angle
         await self._check_limit("tilt", old_angle, angle)
 
     async def _check_limit(self, axis: str, old: float, new: float):
@@ -436,9 +437,10 @@ class GimbalController:
         clamped = max(self.pan_min, min(self.pan_max, new_angle))
         if abs(clamped - old) < 0.01:
             return {"changed": False, "pan": self.pan_angle, "tilt": self.tilt_angle, "limit": True}
-        self.pan_angle = clamped
         actual = 180 - clamped if self.pan_invert else clamped
+        # 先写硬件，成功后再更新内部状态
         await self._hardware.set_angle(0, actual)
+        self.pan_angle = clamped
         result = {"changed": True, "pan": self.pan_angle, "tilt": self.tilt_angle}
         if clamped == self.pan_min and old > self.pan_min:
             result["limit"] = True
@@ -459,9 +461,10 @@ class GimbalController:
         clamped = max(self.tilt_min, min(self.tilt_max, new_angle))
         if abs(clamped - old) < 0.01:
             return {"changed": False, "pan": self.pan_angle, "tilt": self.tilt_angle, "limit": True}
-        self.tilt_angle = clamped
         actual = 180 - clamped if self.tilt_invert else clamped
+        # 先写硬件，成功后再更新内部状态
         await self._hardware.set_angle(1, actual)
+        self.tilt_angle = clamped
         result = {"changed": True, "pan": self.pan_angle, "tilt": self.tilt_angle}
         if clamped == self.tilt_min and old > self.tilt_min:
             result["limit"] = True
@@ -482,13 +485,14 @@ class GimbalController:
         tilt_clamped = max(self.tilt_min, min(self.tilt_max, tilt_new))
 
         pan_old, tilt_old = self.pan_angle, self.tilt_angle
-        self.pan_angle = pan_clamped
-        self.tilt_angle = tilt_clamped
 
         pan_actual = 180 - pan_clamped if self.pan_invert else pan_clamped
         tilt_actual = 180 - tilt_clamped if self.tilt_invert else tilt_clamped
 
+        # 先写硬件，成功后再更新内部状态
         await self._hardware.set_angles(pan_actual, tilt_actual)
+        self.pan_angle = pan_clamped
+        self.tilt_angle = tilt_clamped
 
         result = {"changed": True, "pan": self.pan_angle, "tilt": self.tilt_angle}
         # 限位检查
@@ -504,13 +508,16 @@ class GimbalController:
         """同步版双轴增量移动 — 用于 executor 线程内直接调用"""
         pan_new = self.pan_angle + pan_delta * step
         tilt_new = self.tilt_angle + tilt_delta * step
-        self.pan_angle = max(self.pan_min, min(self.pan_max, pan_new))
-        self.tilt_angle = max(self.tilt_min, min(self.tilt_max, tilt_new))
+        pan_clamped = max(self.pan_min, min(self.pan_max, pan_new))
+        tilt_clamped = max(self.tilt_min, min(self.tilt_max, tilt_new))
 
-        pan_actual = 180 - self.pan_angle if self.pan_invert else self.pan_angle
-        tilt_actual = 180 - self.tilt_angle if self.tilt_invert else self.tilt_angle
+        pan_actual = 180 - pan_clamped if self.pan_invert else pan_clamped
+        tilt_actual = 180 - tilt_clamped if self.tilt_invert else tilt_clamped
 
+        # 先写硬件，成功后再更新内部状态
         self._hardware.set_angles_sync(pan_actual, tilt_actual)
+        self.pan_angle = pan_clamped
+        self.tilt_angle = tilt_clamped
         return True
 
     async def center(self) -> None:
