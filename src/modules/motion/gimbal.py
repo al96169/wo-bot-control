@@ -273,8 +273,9 @@ class RosmasterGimbal(GimbalInterface):
                 logger.error("Rosmaster_Lib not found. Install the Yahboom Rosmaster driver library.")
                 raise
             except Exception as e:
-                logger.error(f"Rosmaster gimbal init failed: {e}")
-                raise
+                # 不抛异常，保留 _bot=None 允许下次调用时重试
+                # 典型场景：ROS 串口板在服务启动后才插入
+                logger.warning(f"Rosmaster gimbal init failed (will retry): {e}")
 
     async def set_angle(self, channel: int, angle: float) -> None:
         self._ensure_init()
