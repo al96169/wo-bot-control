@@ -1,0 +1,38 @@
+name: 代码质量控制
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  quality:
+    name: "Python 代码质量检查"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Ruff Lint
+        run: ruff check --output-format=github .
+
+      - name: Ruff Format 检查
+        run: ruff format --check .
+
+      - name: Mypy 类型检查
+        run: mypy src/
+
+      - name: Pytest 测试
+        run: pytest --tb=short
