@@ -9,7 +9,7 @@ import sys
 import pytest
 
 # 添加 src 到路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 class TestMotionController:
@@ -230,14 +230,7 @@ class TestProtocol:
 
     def test_message_format(self):
         """测试消息格式"""
-        message = {
-            "type": "motion",
-            "timestamp": 1699999999000,
-            "data": {
-                "linear": 0.5,
-                "angular": 0.3
-            }
-        }
+        message = {"type": "motion", "timestamp": 1699999999000, "data": {"linear": 0.5, "angular": 0.3}}
 
         # 验证 JSON 序列化
         json_str = json.dumps(message)

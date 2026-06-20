@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 class TestWebSocketServer:
@@ -31,11 +31,7 @@ class TestWebSocketServer:
         _server = WebSocketServer(host="localhost", port=8766)
 
         # 测试消息构建
-        message = {
-            "type": "test",
-            "timestamp": 1699999999000,
-            "data": {}
-        }
+        message = {"type": "test", "timestamp": 1699999999000, "data": {}}
 
         json_str = json.dumps(message)
         parsed = json.loads(json_str)

@@ -13,9 +13,10 @@ import numpy as np
 
 # ===== NumPy YUYV → BGR（绕过 OpenCV cvtColor 在 ARM 上的 SIMD 崩溃） =====
 
+
 def yuyv_to_bgr(frame_1ch: np.ndarray, width: int, height: int) -> np.ndarray:
     """纯 NumPy YUYV(1ch, H×2W) → BGR(3ch, H×W)，不依赖 cv2.cvtColor"""
-    yuyv = frame_1ch.reshape(height, width, 2)          # (H, W, 2)
+    yuyv = frame_1ch.reshape(height, width, 2)  # (H, W, 2)
     y = yuyv[:, :, 0].astype(np.float32)
     uv = yuyv[:, :, 1].astype(np.float32)
     u = np.repeat(uv[:, 0::2] - 128.0, 2, axis=1)
@@ -100,18 +101,17 @@ class CameraManager:
         try:
             # 通过进程名匹配：gst-launch-1.0 且参数含 csi_cam 或 nvarguscamerasrc
             result = subprocess.run(
-                ['pgrep', '-f', 'gst-launch-1.0.*nvarguscamerasrc'],
-                capture_output=True, text=True, timeout=5
+                ["pgrep", "-f", "gst-launch-1.0.*nvarguscamerasrc"], capture_output=True, text=True, timeout=5
             )
             if result.stdout.strip():
-                pids = result.stdout.strip().split('\n')
+                pids = result.stdout.strip().split("\n")
                 for pid in pids:
                     try:
                         os.kill(int(pid), 9)
                     except Exception:
                         pass
                 # 清理旧帧文件
-                for f in glob.glob('/tmp/csi_cam*_f*.jpg'):
+                for f in glob.glob("/tmp/csi_cam*_f*.jpg"):
                     try:
                         os.remove(f)
                     except Exception:
@@ -136,10 +136,16 @@ class CameraManager:
         try:
             cap = cv2.VideoCapture(csi_pipeline, cv2.CAP_GSTREAMER)
             if cap.isOpened():
-                cameras.append({
-                    "id": 0, "name": "CSI Camera", "type": "csi",
-                    "device": "/dev/video0", "pipeline": csi_pipeline, "status": "available",
-                })
+                cameras.append(
+                    {
+                        "id": 0,
+                        "name": "CSI Camera",
+                        "type": "csi",
+                        "device": "/dev/video0",
+                        "pipeline": csi_pipeline,
+                        "status": "available",
+                    }
+                )
                 cap.release()
                 return cameras
             cap.release()
@@ -148,15 +154,18 @@ class CameraManager:
 
         # 方式 2: v4l2-ctl 检测（检查 /dev/video0 的驱动是否为 tegra-video）
         try:
-            result = subprocess.run(
-                ['v4l2-ctl', '-d', '/dev/video0', '-D'],
-                capture_output=True, text=True, timeout=5
-            )
-            if 'tegra-video' in result.stdout or 'imx219' in result.stdout.lower():
-                cameras.append({
-                    "id": 0, "name": "CSI Camera", "type": "csi",
-                    "device": "/dev/video0", "pipeline": csi_pipeline, "status": "available",
-                })
+            result = subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "-D"], capture_output=True, text=True, timeout=5)
+            if "tegra-video" in result.stdout or "imx219" in result.stdout.lower():
+                cameras.append(
+                    {
+                        "id": 0,
+                        "name": "CSI Camera",
+                        "type": "csi",
+                        "device": "/dev/video0",
+                        "pipeline": csi_pipeline,
+                        "status": "available",
+                    }
+                )
                 if self.logger:
                     self.logger.info("CSI camera detected via v4l2-ctl (tegra-video/imx219)")
                 return cameras
@@ -165,15 +174,18 @@ class CameraManager:
 
         # 方式 3: gst-inspect 检测 nvarguscamerasrc 插件存在性
         try:
-            result = subprocess.run(
-                ['gst-inspect-1.0', 'nvarguscamerasrc'],
-                capture_output=True, text=True, timeout=5
-            )
+            result = subprocess.run(["gst-inspect-1.0", "nvarguscamerasrc"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
-                cameras.append({
-                    "id": 0, "name": "CSI Camera", "type": "csi",
-                    "device": "/dev/video0", "pipeline": csi_pipeline, "status": "available",
-                })
+                cameras.append(
+                    {
+                        "id": 0,
+                        "name": "CSI Camera",
+                        "type": "csi",
+                        "device": "/dev/video0",
+                        "pipeline": csi_pipeline,
+                        "status": "available",
+                    }
+                )
                 if self.logger:
                     self.logger.info("CSI camera detected via gst-inspect (nvarguscamerasrc available)")
         except Exception:
@@ -273,7 +285,8 @@ class CameraManager:
 
         # 如果是源摄像头被停止，也暂停依赖它的共享流
         dependents = [
-            cid for cid, info in self.cameras.items()
+            cid
+            for cid, info in self.cameras.items()
             if info.get("shared_from") == camera_id and cid in self.active_streams
         ]
         for dep_id in dependents:
@@ -403,8 +416,10 @@ class CameraStream:
                 )
                 try:
                     proc = subprocess.Popen(
-                        csi_cmd, shell=True,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        csi_cmd,
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
                     )
                     # 等待第一批帧写入（CSI 初始化约需 1.5 秒）
                     await asyncio.sleep(2.0)
@@ -420,9 +435,7 @@ class CameraStream:
                         self._csi_proc = proc
                         self._csi_file_prefix = csi_prefix
                         if self.logger:
-                            self.logger.info(
-                                f"CSI subprocess capture started ({len(files)} frame files)"
-                            )
+                            self.logger.info(f"CSI subprocess capture started ({len(files)} frame files)")
                     else:
                         proc.terminate()
                         loop = asyncio.get_event_loop()
@@ -450,7 +463,7 @@ class CameraStream:
             if self.cap is None:
                 cap_test = cv2.VideoCapture(self.camera_info.get("index", 0), cv2.CAP_V4L2)
                 if cap_test.isOpened():
-                    cap_test.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                    cap_test.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
                     cap_test.set(cv2.CAP_PROP_FRAME_WIDTH, w)
                     cap_test.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
                     cap_test.set(cv2.CAP_PROP_FPS, fps)
@@ -459,7 +472,7 @@ class CameraStream:
                     if cap_test.grab() and cap_test.retrieve()[0]:
                         self.cap = cap_test
                         actual_fourcc = int(cap_test.get(cv2.CAP_PROP_FOURCC))
-                        self._yuyv = (actual_fourcc == cv2.VideoWriter_fourcc(*'YUYV'))
+                        self._yuyv = actual_fourcc == cv2.VideoWriter_fourcc(*"YUYV")
                         if self.logger:
                             self.logger.info(
                                 f"V4L2 opened fourcc=0x{actual_fourcc:08x} "
@@ -477,7 +490,7 @@ class CameraStream:
             self._capture_task = asyncio.create_task(self._capture_loop())
 
             if self.logger:
-                fmt = "YUYV(NumPy)" if getattr(self, '_yuyv', False) else "MJPG/BGR"
+                fmt = "YUYV(NumPy)" if getattr(self, "_yuyv", False) else "MJPG/BGR"
                 self.logger.info(f"Camera stream started: {self.camera_info['name']} {w}x{h}@{fps}fps [{fmt}]")
 
         except Exception as e:
@@ -543,8 +556,8 @@ class CameraStream:
             await self._capture_loop_csi()
             return
 
-        w, h, fps = getattr(self, '_cap_w', 320), getattr(self, '_cap_h', 240), getattr(self, '_cap_fps', 10)
-        is_yuyv = getattr(self, '_yuyv', False)
+        w, h, fps = getattr(self, "_cap_w", 320), getattr(self, "_cap_h", 240), getattr(self, "_cap_fps", 10)
+        is_yuyv = getattr(self, "_yuyv", False)
         self._frame_seq = 0
 
         while self.running and self.cap:
@@ -571,7 +584,7 @@ class CameraStream:
 
     async def _capture_loop_csi(self):
         """CSI 子进程帧采集循环：从 gst-launch-1.0 multifilesink 读取最新 JPEG"""
-        _, _, fps = getattr(self, '_cap_w', 320), getattr(self, '_cap_h', 240), getattr(self, '_cap_fps', 10)
+        _, _, fps = getattr(self, "_cap_w", 320), getattr(self, "_cap_h", 240), getattr(self, "_cap_fps", 10)
         prefix = self._csi_file_prefix
         self._frame_seq = 0
         last_file = None
@@ -609,9 +622,7 @@ class CameraStream:
 
         # 子进程异常退出告警
         if self.running and self._csi_proc and self._csi_proc.poll() is not None and self.logger:
-            self.logger.warning(
-                f"CSI subprocess exited with code {self._csi_proc.returncode}"
-            )
+            self.logger.warning(f"CSI subprocess exited with code {self._csi_proc.returncode}")
 
     def get_frame(self) -> np.ndarray | None:
         """获取当前帧"""

@@ -20,6 +20,7 @@ try:
         VideoStreamTrack,
     )
     from av import VideoFrame
+
     WEBRTC_AVAILABLE = True
 except ImportError:
     WEBRTC_AVAILABLE = False
@@ -29,7 +30,8 @@ except ImportError:
 # 当客户端 offer 不含 video media 时，手动填充默认值
 try:
     from aiortc.rtcrtptransceiver import RTCRtpTransceiver
-    for attr in ['_codecs', '_headerExtensions', '_offerDirection']:
+
+    for attr in ["_codecs", "_headerExtensions", "_offerDirection"]:
         if not hasattr(RTCRtpTransceiver, attr):
             setattr(RTCRtpTransceiver, attr, None)
 except Exception:
@@ -43,6 +45,7 @@ STUN_SERVER = "stun:stun.l.google.com:19302"
 _PATCH_LOG = logging.getLogger("wobot")
 try:
     from aioice.ice import Connection as AioiceConnection
+
     _aioice_connect_original = AioiceConnection.connect
 
     async def _aioice_connect_patched(self):
@@ -124,8 +127,7 @@ class CameraVideoTrack(VideoStreamTrack):
                 )
             elif self._frame_count % 30 == 0 and self.logger:
                 self.logger.info(
-                    f"CameraVideoTrack(cam={self.camera_id}): frame #{self._frame_count} "
-                    f"shape={frame.shape}, ok"
+                    f"CameraVideoTrack(cam={self.camera_id}): frame #{self._frame_count} shape={frame.shape}, ok"
                 )
 
         # OpenCV BGR → RGB
@@ -156,9 +158,9 @@ class WebRTCService:
         send_callback: async function(payload_dict) 用于发送信令消息给客户端
         """
         # 使用 STUN 辅助 ICE 连通（局域网仍以 host candidates 为主）
-        pc = RTCPeerConnection(configuration=RTCConfiguration(
-            iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
-        ))
+        pc = RTCPeerConnection(
+            configuration=RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])])
+        )
 
         # Cleanup old connection if client reconnects
         old_pc = self._connections.get(client_id)
@@ -174,15 +176,15 @@ class WebRTCService:
             if candidate and send_callback:
                 try:
                     # RTCIceCandidate 的 candidate 属性是 SDP 字符串
-                    cand_str = candidate.candidate if hasattr(candidate, 'candidate') else str(candidate)
+                    cand_str = candidate.candidate if hasattr(candidate, "candidate") else str(candidate)
                     # 过滤掉空 candidate（表示 ICE 收集完成）
                     if cand_str:
                         payload = {
                             "type": "webrtc_ice_candidate",
                             "data": {
                                 "candidate": cand_str,
-                                "sdpMid": getattr(candidate, 'sdpMid', None) or "",
-                                "sdpMLineIndex": getattr(candidate, 'sdpMLineIndex', None) or 0,
+                                "sdpMid": getattr(candidate, "sdpMid", None) or "",
+                                "sdpMLineIndex": getattr(candidate, "sdpMLineIndex", None) or 0,
                             },
                         }
                         await send_callback(payload)
@@ -236,6 +238,7 @@ class WebRTCService:
             from aiortc import rtp as _rtp
             from aiortc.codecs import MEDIA_CODECS
             from aiortc.rtcpeerconnection import HEADER_EXTENSIONS
+
             dynamic_pt = _rtp.DYNAMIC_PAYLOAD_TYPES.start
             for t in pc._RTCPeerConnection__transceivers:
                 # 1) 分配 MID（createAnswer 不会自动分配，但 BUNDLE 需要）
@@ -247,16 +250,18 @@ class WebRTCService:
                 if not t._codecs:
                     codecs = []
                     raw_codecs = list(MEDIA_CODECS.get(t.kind, []))
+
                     # 排序: VP8 优先（通用兼容性最好），然后 H.264
                     def _codec_sort_key(c):
-                        name = c.name.upper() if hasattr(c, 'name') else ''
-                        if 'VP8' in name:
+                        name = c.name.upper() if hasattr(c, "name") else ""
+                        if "VP8" in name:
                             return 0
-                        if 'H264' in name:
+                        if "H264" in name:
                             return 1
-                        if 'VP9' in name:
+                        if "VP9" in name:
                             return 2
                         return 3
+
                     raw_codecs.sort(key=_codec_sort_key)
                     for codec in raw_codecs:
                         codec = _copy.deepcopy(codec)
@@ -279,25 +284,29 @@ class WebRTCService:
         await pc.setLocalDescription(answer)
 
         # 诊断：记录 answer SDP 是否包含 DataChannel
-        has_app = 'm=application' in (pc.localDescription.sdp or '')
+        has_app = "m=application" in (pc.localDescription.sdp or "")
         self.logger.info(f"[{client_id}] Answer SDP has DataChannel: {has_app}")
 
         # SCTP 协商完成后创建服务端 DataChannel
         if has_app:
             try:
                 server_dc = pc.createDataChannel("wobot-control-srv")
+
                 @server_dc.on("open")
                 def on_open():
                     self.logger.info(f"[{client_id}] Server DataChannel opened!")
                     self._data_channels[client_id] = server_dc
+
                 @server_dc.on("message")
                 def on_msg(msg):
                     asyncio.ensure_future(self._on_dc_message(client_id, msg))
+
                 @server_dc.on("close")
                 def on_close():
                     self.logger.info(f"[{client_id}] Server DataChannel closed")
                     if self._data_channels.get(client_id) is server_dc:
                         asyncio.ensure_future(self._on_dc_close(client_id))
+
                 self.logger.info(f"[{client_id}] Server-side DC created: {server_dc.label}")
             except Exception as e:
                 self.logger.warning(f"[{client_id}] Server DC creation failed: {e}")
@@ -312,6 +321,7 @@ class WebRTCService:
             return
         try:
             from aiortc import RTCIceCandidate
+
             # aiortc 0.9.10: RTCIceCandidate(component, foundation, ip, port, priority, protocol, type, ...)
             # 从 candidate SDP 字符串解析字段
             # 格式: "candidate:<foundation> <component> <protocol> <priority> <ip> <port> typ <type> [其他...]"
@@ -338,7 +348,9 @@ class WebRTCService:
                 )
                 # aiortc 0.9.10 的 addIceCandidate 是同步方法，不是 async
                 pc.addIceCandidate(ice)
-                self.logger.info(f"[{client_id}] ICE candidate added: {cand_type} {ip}:{port} sdpMid={sdp_mid} mline={sdp_mline_index}")
+                self.logger.info(
+                    f"[{client_id}] ICE candidate added: {cand_type} {ip}:{port} sdpMid={sdp_mid} mline={sdp_mline_index}"
+                )
             else:
                 self.logger.warning(f"[{client_id}] Invalid candidate format: {candidate[:80]}")
         except Exception as e:
@@ -355,9 +367,7 @@ class WebRTCService:
             if msg_type == "subscribe":
                 # 客户端订阅 → 启动状态广播
                 if not self._status_task:
-                    await self.start_status_broadcast(
-                        self.config.get("status", {}).get("update_interval", 1.0)
-                    )
+                    await self.start_status_broadcast(self.config.get("status", {}).get("update_interval", 1.0))
                 return
             if msg_type == "unsubscribe":
                 return
@@ -426,6 +436,7 @@ class WebRTCService:
 
     async def start_status_broadcast(self, interval: float = 1.0):
         """启动状态广播（通过 DataChannel）"""
+
         async def _broadcast():
             while True:
                 try:

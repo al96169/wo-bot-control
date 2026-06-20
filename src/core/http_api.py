@@ -13,7 +13,16 @@ from starlette.middleware.cors import CORSMiddleware
 
 
 class HttpAPIServer:
-    def __init__(self, host="0.0.0.0", port=8000, system_collector=None, camera_manager=None, message_handler=None, config=None, logger=None):
+    def __init__(
+        self,
+        host="0.0.0.0",
+        port=8000,
+        system_collector=None,
+        camera_manager=None,
+        message_handler=None,
+        config=None,
+        logger=None,
+    ):
         self.host = host
         self.port = port
         self.system_collector = system_collector

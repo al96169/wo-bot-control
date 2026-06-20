@@ -21,7 +21,17 @@ except ImportError:
 class WebSocketServer:
     """WebSocket 信令服务器"""
 
-    def __init__(self, host: str, port: int, message_handler, robot_info: dict, webrtc_service=None, gimbal_controller=None, config: dict = None, logger=None):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        message_handler,
+        robot_info: dict,
+        webrtc_service=None,
+        gimbal_controller=None,
+        config: dict = None,
+        logger=None,
+    ):
         self.host = host
         self.port = port
         self.message_handler = message_handler
@@ -77,9 +87,10 @@ class WebSocketServer:
         if auth_enabled:
             # 检查 URL query 参数中的 token
             token_from_url = None
-            if hasattr(websocket, 'request') and hasattr(websocket.request, 'query'):
+            if hasattr(websocket, "request") and hasattr(websocket.request, "query"):
                 try:
                     from urllib.parse import parse_qs
+
                     qs = parse_qs(websocket.request.query)
                     token_from_url = qs.get("token", [None])[0]
                 except Exception:
@@ -89,10 +100,14 @@ class WebSocketServer:
             if not expected_token:
                 if self.logger:
                     self.logger.warning(f"Auth enabled but no token configured, rejecting {remote}")
-                await websocket.send(json.dumps({
-                    "type": "error",
-                    "data": {"code": 403, "message": "Server misconfigured: no token set"},
-                }))
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "error",
+                            "data": {"code": 403, "message": "Server misconfigured: no token set"},
+                        }
+                    )
+                )
                 await websocket.close()
                 return
 
@@ -113,33 +128,47 @@ class WebSocketServer:
                     else:
                         if self.logger:
                             self.logger.warning(f"Auth failed for {remote}")
-                        await websocket.send(json.dumps({
-                            "type": "error",
-                            "data": {"code": 401, "message": "Authentication failed"},
-                        }))
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": "error",
+                                    "data": {"code": 401, "message": "Authentication failed"},
+                                }
+                            )
+                        )
                         await websocket.close()
                         return
                 except asyncio.TimeoutError:
                     if self.logger:
                         self.logger.warning(f"Auth timeout for {remote}")
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "data": {"code": 401, "message": "Authentication timeout"},
-                    }))
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "data": {"code": 401, "message": "Authentication timeout"},
+                            }
+                        )
+                    )
                     await websocket.close()
                     return
                 except Exception:
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "data": {"code": 400, "message": "Bad auth request"},
-                    }))
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "data": {"code": 400, "message": "Bad auth request"},
+                            }
+                        )
+                    )
                     await websocket.close()
                     return
 
         self._clients.add(websocket)
         self._ws_clients[client_id] = websocket
         if self.logger:
-            self.logger.info(f"Signaling client connected: {remote} ({client_id}){', authenticated' if auth_enabled else ''}")
+            self.logger.info(
+                f"Signaling client connected: {remote} ({client_id}){', authenticated' if auth_enabled else ''}"
+            )
 
         # 构建 features 列表
         features = ["websocket", "exec", "motion", "system", "camera"]
@@ -147,25 +176,33 @@ class WebSocketServer:
             features.append("webrtc")
         else:
             features.append("websocket-fallback")  # 标记 WebSocket 可处理业务消息
-        if getattr(self, 'gimbal_controller', None):
+        if getattr(self, "gimbal_controller", None):
             features.append("gimbal")
 
         try:
             # 发送握手消息（设备发现兼容）
-            await websocket.send(json.dumps({
-                "type": "connected",
-                "data": {**self.robot_info, "features": features},
-            }))
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "connected",
+                        "data": {**self.robot_info, "features": features},
+                    }
+                )
+            )
 
             async for raw in websocket:
                 try:
                     msg = json.loads(raw)
                     await self._process_message(websocket, client_id, remote, msg)
                 except json.JSONDecodeError:
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "data": {"code": 400, "message": "Invalid JSON"},
-                    }))
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "data": {"code": 400, "message": "Invalid JSON"},
+                            }
+                        )
+                    )
 
         except (websockets.exceptions.ConnectionClosed, websockets.ConnectionClosed):
             pass
@@ -185,26 +222,40 @@ class WebSocketServer:
         # ---- WebRTC 信令 ----
         if msg_type == "webrtc_offer":
             if not self.webrtc_service:
-                await websocket.send(json.dumps({"type": "error", "data": {"code": 503, "message": "WebRTC not available"}}))
+                await websocket.send(
+                    json.dumps({"type": "error", "data": {"code": 503, "message": "WebRTC not available"}})
+                )
                 return
             sdp = msg_data.get("sdp", "")
             try:
                 # 创建发送回调，让 WebRTCService 能将 ICE candidates 发回客户端
                 async def send_to_client(payload: dict):
                     await websocket.send(json.dumps(payload))
-                answer_sdp = await self.webrtc_service.create_peer_connection(client_id, sdp, send_callback=send_to_client)
-                await websocket.send(json.dumps({
-                    "type": "webrtc_answer",
-                    "data": {"sdp": answer_sdp},
-                }))
+
+                answer_sdp = await self.webrtc_service.create_peer_connection(
+                    client_id, sdp, send_callback=send_to_client
+                )
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "webrtc_answer",
+                            "data": {"sdp": answer_sdp},
+                        }
+                    )
+                )
             except Exception as e:
                 import traceback
+
                 if self.logger:
                     self.logger.error(f"WebRTC offer 处理失败: {e}\n{traceback.format_exc()}")
-                await websocket.send(json.dumps({
-                    "type": "error",
-                    "data": {"code": 500, "message": f"WebRTC negotiation failed: {e}"},
-                }))
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "error",
+                            "data": {"code": 500, "message": f"WebRTC negotiation failed: {e}"},
+                        }
+                    )
+                )
             return
 
         if msg_type == "webrtc_ice_candidate":
@@ -231,7 +282,7 @@ class WebSocketServer:
                             port = parts[5]
                             protocol = parts[2]
                             # 构造新 foundation（避免与原 candidate 冲突）
-                            new_foundation = f"h{parts[0].split(':',1)[1]}"
+                            new_foundation = f"h{parts[0].split(':', 1)[1]}"
                             new_cand = f"candidate:{new_foundation} 1 {protocol} 2122252543 {client_ip} {port} typ host"
                             self.logger.info(f"[{client_id}] Adding extra host candidate with real IP: {new_cand[:80]}")
                             await self.webrtc_service.add_ice_candidate(
@@ -247,9 +298,7 @@ class WebSocketServer:
         # ---- subscribe：启动 WebSocket 状态广播 ----
         if msg_type == "subscribe":
             self.logger.info(f"[{client_id}] Client subscribed via WebSocket, starting status broadcast")
-            await self._start_ws_status_broadcast(
-                self.config.get("status", {}).get("update_interval", 1.0)
-            )
+            await self._start_ws_status_broadcast(self.config.get("status", {}).get("update_interval", 1.0))
             return
 
         if msg_type == "unsubscribe":
@@ -268,10 +317,14 @@ class WebSocketServer:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Message handling error: {e}")
-            await websocket.send(json.dumps({
-                "type": "error",
-                "data": {"code": 500, "message": str(e)},
-            }))
+            await websocket.send(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "data": {"code": 500, "message": str(e)},
+                    }
+                )
+            )
 
     async def _start_ws_status_broadcast(self, interval: float = 1.0):
         """启动 WebSocket 状态广播（向所有已连接客户端广播系统状态）"""

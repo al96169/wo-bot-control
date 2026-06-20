@@ -140,6 +140,7 @@ class MotionController:
         """发送到硬件"""
         if self.ros_enabled and self.ros_publisher:
             from geometry_msgs.msg import Twist
+
             twist = Twist()
             twist.linear.x = self.current_linear
             twist.angular.z = self.current_angular

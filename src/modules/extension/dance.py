@@ -23,12 +23,12 @@ class DanceController(ExtensionModule):
         super().__init__("dance", logger=logger)
         self._motion = motion_controller
         self._current_dance: str | None = None  # 当前舞蹈 ID
-        self._step_index: int = 0                    # 当前播放帧 index
+        self._step_index: int = 0  # 当前播放帧 index
         self._playing: bool = False
         self._paused: bool = False
         self._task: asyncio.Task | None = None
-        self._progress: float = 0.0                   # 进度 0.0~1.0
-        self._dances: dict[str, Any] = {}            # 舞蹈数据缓存
+        self._progress: float = 0.0  # 进度 0.0~1.0
+        self._dances: dict[str, Any] = {}  # 舞蹈数据缓存
 
     # ---------- 生命周期 ----------
 
@@ -123,12 +123,14 @@ class DanceController(ExtensionModule):
         """列出所有舞蹈"""
         dances = []
         for did, info in self._dances.items():
-            dances.append({
-                "id": did,
-                "name": info.get("name", did),
-                "icon": info.get("icon", "💃"),
-                "duration_sec": info.get("duration_sec", 0),
-            })
+            dances.append(
+                {
+                    "id": did,
+                    "name": info.get("name", did),
+                    "icon": info.get("icon", "💃"),
+                    "duration_sec": info.get("duration_sec", 0),
+                }
+            )
         return {"type": "dance_list", "data": {"dances": dances}}
 
     async def _cmd_play(self, data: dict) -> dict:
@@ -250,14 +252,11 @@ class DanceController(ExtensionModule):
 
                 self._step_index += 1
                 # 更新进度
-                elapsed_ms = sum(s.get("duration", 100) for s in steps[:self._step_index])
+                elapsed_ms = sum(s.get("duration", 100) for s in steps[: self._step_index])
                 self._progress = min(elapsed_ms / total_duration_ms, 1.0) if total_duration_ms > 0 else 0.0
 
                 if self.logger and self._step_index % 10 == 0:
-                    self.logger.debug(
-                        f"Dance step {self._step_index}/{total_steps} "
-                        f"progress={self._progress:.1%}"
-                    )
+                    self.logger.debug(f"Dance step {self._step_index}/{total_steps} progress={self._progress:.1%}")
 
             # 播放完成
             if self._step_index >= total_steps:

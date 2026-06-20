@@ -180,6 +180,7 @@ class GPIOPWMGimbal(GimbalInterface):
         if self._gpio is None:
             try:
                 import Jetson.GPIO as GPIO
+
                 GPIO.setmode(GPIO.BOARD)
                 self._gpio = GPIO
 
@@ -192,8 +193,7 @@ class GPIOPWMGimbal(GimbalInterface):
                 self._tilt_pwm.start(self._angle_to_duty(90))
 
                 logger.info(
-                    f"GPIO PWM gimbal initialized: "
-                    f"pan=pin{self.pan_pin}, tilt=pin{self.tilt_pin}, freq={self.freq}Hz"
+                    f"GPIO PWM gimbal initialized: pan=pin{self.pan_pin}, tilt=pin{self.tilt_pin}, freq={self.freq}Hz"
                 )
             except ImportError:
                 logger.error("Jetson.GPIO not found. Only available on Jetson platforms.")
@@ -247,8 +247,7 @@ class RosmasterGimbal(GimbalInterface):
         tilt_channel: 俯仰舵机 servo_id (默认 3)
     """
 
-    def __init__(self, com: str = "/dev/myserial", car_type: int = 1,
-                 pan_channel: int = 4, tilt_channel: int = 3):
+    def __init__(self, com: str = "/dev/myserial", car_type: int = 1, pan_channel: int = 4, tilt_channel: int = 3):
         self.com = com
         self.car_type = car_type
         self.pan_channel = pan_channel
@@ -262,6 +261,7 @@ class RosmasterGimbal(GimbalInterface):
             return True
         try:
             from Rosmaster_Lib import Rosmaster
+
             self._bot = Rosmaster(car_type=self.car_type, com=self.com)
             self._bot.set_car_type(self.car_type)
             # 启动接收线程（串口缓冲区必须被消费，否则通信会堵塞）。
@@ -292,9 +292,7 @@ class RosmasterGimbal(GimbalInterface):
         servo_id = self.pan_channel if channel == 0 else self.tilt_channel
 
         try:
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._bot.set_pwm_servo, servo_id, int(angle)
-            )
+            await asyncio.get_event_loop().run_in_executor(None, self._bot.set_pwm_servo, servo_id, int(angle))
         except Exception as e:
             logger.error(f"Rosmaster set_angle(ch={channel}, servo={servo_id}, {angle}°) failed: {e}")
 
@@ -498,11 +496,13 @@ class GimbalController:
 
         result = {"changed": True, "pan": self.pan_angle, "tilt": self.tilt_angle}
         # 限位检查
-        if (pan_clamped == self.pan_min and pan_old > self.pan_min) or \
-           (pan_clamped == self.pan_max and pan_old < self.pan_max):
+        if (pan_clamped == self.pan_min and pan_old > self.pan_min) or (
+            pan_clamped == self.pan_max and pan_old < self.pan_max
+        ):
             result["limit"] = True
-        if (tilt_clamped == self.tilt_min and tilt_old > self.tilt_min) or \
-           (tilt_clamped == self.tilt_max and tilt_old < self.tilt_max):
+        if (tilt_clamped == self.tilt_min and tilt_old > self.tilt_min) or (
+            tilt_clamped == self.tilt_max and tilt_old < self.tilt_max
+        ):
             result["limit"] = True
         return result
 
@@ -526,9 +526,7 @@ class GimbalController:
         """云台回中 — 使用可配置的 pan_center / tilt_center"""
         await self.set_pan(self.pan_center)
         await self.set_tilt(self.tilt_center)
-        self.logger.info(
-            f"Gimbal centered (pan={self.pan_center}°, tilt={self.tilt_center}°)"
-        )
+        self.logger.info(f"Gimbal centered (pan={self.pan_center}°, tilt={self.tilt_center}°)")
 
     async def stop(self) -> None:
         """停止云台（保持当前位置，释放硬件）"""

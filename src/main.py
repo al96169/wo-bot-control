@@ -18,6 +18,7 @@ from core.websocket_server import WebSocketServer
 # WebRTC 可选导入（兼容 Python 3.6）
 try:
     from core.webrtc_service import WebRTCService
+
     WEBRTC_AVAILABLE = True
 except ImportError as e:
     WebRTCService = None
@@ -29,6 +30,7 @@ from modules.system.collector import SystemCollector
 # Camera 可选导入（兼容无opencv环境）
 try:
     from modules.vision.camera import CameraManager
+
     CAMERA_AVAILABLE = True
 except ImportError as e:
     CameraManager = None
@@ -37,6 +39,7 @@ except ImportError as e:
 # Gimbal 可选导入（兼容无舵机硬件环境）
 try:
     from modules.motion.gimbal import create_gimbal
+
     GIMBAL_AVAILABLE = True
 except ImportError as e:
     create_gimbal = None
@@ -97,10 +100,16 @@ class WoBotControl:
                 "fps": 15,
             },
             "gimbal": {
-                "enabled": False, "gimbal_type": "rosmaster",
-                "com": "/dev/myserial", "car_type": 1,
-                "pan_channel": 4, "tilt_channel": 3,
-                "pan_min": 0, "pan_max": 180, "tilt_min": 30, "tilt_max": 150,
+                "enabled": False,
+                "gimbal_type": "rosmaster",
+                "com": "/dev/myserial",
+                "car_type": 1,
+                "pan_channel": 4,
+                "tilt_channel": 3,
+                "pan_min": 0,
+                "pan_max": 180,
+                "tilt_min": 30,
+                "tilt_max": 150,
             },
             "logging": {"level": "INFO"},
         }
@@ -226,6 +235,7 @@ class WoBotControl:
         # 舞蹈控制（始终可用，依赖运动控制器）
         try:
             from modules.extension.dance import DanceController
+
             self.dance_controller = DanceController(
                 motion_controller=self.motion_controller,
                 logger=self.logger,
@@ -294,7 +304,7 @@ async def main():
 
 if __name__ == "__main__":
     # Python 3.6 兼容：asyncio.run() 在 3.7+ 才有
-    if hasattr(asyncio, 'run'):
+    if hasattr(asyncio, "run"):
         asyncio.run(main())
     else:
         loop = asyncio.get_event_loop()

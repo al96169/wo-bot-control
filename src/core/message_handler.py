@@ -58,9 +58,9 @@ class MessageHandler:
             status_data = await self.system_collector.collect()
         # 附带 features，确保客户端始终能获取最新功能列表
         features = ["websocket", "exec", "motion", "system", "camera"]
-        if hasattr(self, 'gimbal_controller') and self.gimbal_controller:
+        if hasattr(self, "gimbal_controller") and self.gimbal_controller:
             features.append("gimbal")
-        if hasattr(self, 'dance_controller') and self.dance_controller:
+        if hasattr(self, "dance_controller") and self.dance_controller:
             features.append("dance")
         status_data["features"] = features
         return {"type": "status", "data": status_data}
@@ -97,7 +97,7 @@ class MessageHandler:
 
     async def _handle_gimbal(self, data: dict) -> dict:
         """处理云台控制"""
-        if not hasattr(self, 'gimbal_controller') or not self.gimbal_controller:
+        if not hasattr(self, "gimbal_controller") or not self.gimbal_controller:
             return {"type": "error", "data": {"code": 503, "message": "Gimbal not available"}}
 
         action = data.get("action", "set_angle")
@@ -245,7 +245,7 @@ class MessageHandler:
 
     async def _handle_dance(self, data: dict) -> dict:
         """处理舞蹈控制命令"""
-        if not hasattr(self, 'dance_controller') or not self.dance_controller:
+        if not hasattr(self, "dance_controller") or not self.dance_controller:
             return {"type": "error", "data": {"code": 503, "message": "Dance controller not available"}}
 
         command = data.get("command", "status")
@@ -333,9 +333,20 @@ class MessageHandler:
                 new_cwd = os.path.abspath(os.path.join(self._shell_cwd, target))
                 if os.path.isdir(new_cwd):
                     self._shell_cwd = new_cwd
-                    return {"type": "exec_result", "data": {"stdout": f"已切换到 {self._shell_cwd}", "stderr": "", "return_code": 0, "cwd": self._shell_cwd}}
+                    return {
+                        "type": "exec_result",
+                        "data": {
+                            "stdout": f"已切换到 {self._shell_cwd}",
+                            "stderr": "",
+                            "return_code": 0,
+                            "cwd": self._shell_cwd,
+                        },
+                    }
                 else:
-                    return {"type": "exec_result", "data": {"stdout": "", "stderr": f"cd: {target}: No such file or directory", "return_code": 1}}
+                    return {
+                        "type": "exec_result",
+                        "data": {"stdout": "", "stderr": f"cd: {target}: No such file or directory", "return_code": 1},
+                    }
             except Exception as e:
                 return {"type": "exec_result", "data": {"stdout": "", "stderr": str(e), "return_code": 1}}
 
@@ -353,7 +364,7 @@ class MessageHandler:
                 cwd=self._shell_cwd,
             )
             os.close(slave_fd)
-            output = b''
+            output = b""
             while True:
                 ready, _, _ = select.select([master_fd], [], [], timeout)
                 if ready:
@@ -369,9 +380,9 @@ class MessageHandler:
             os.close(master_fd)
             proc.wait()
             # 移除 ANSI 转义序列（可选：保留颜色需要前端支持）
-            output_text = output.decode('utf-8', errors='replace')
+            output_text = output.decode("utf-8", errors="replace")
             # 去除末尾的 \r\n 序列带来的重复换行
-            output_text = re.sub(r'\r\n', '\n', output_text)
+            output_text = re.sub(r"\r\n", "\n", output_text)
             return {
                 "type": "exec_result",
                 "data": {
@@ -401,7 +412,7 @@ class MessageHandler:
             with open(log_file, encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
                 recent = all_lines[-lines:]
-                pattern = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] (\w+): (.+)$')
+                pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] (\w+): (.+)$")
                 for raw in recent:
                     raw = raw.strip()
                     m = pattern.match(raw)
@@ -432,10 +443,7 @@ class MessageHandler:
         if not keyword:
             return {"type": "error", "data": {"code": 400, "message": "Search keyword required"}}
         try:
-            result = subprocess.run(
-                ["apt-cache", "search", keyword],
-                capture_output=True, text=True, timeout=15
-            )
+            result = subprocess.run(["apt-cache", "search", keyword], capture_output=True, text=True, timeout=15)
             packages = []
             for line in result.stdout.strip().split("\n"):
                 if not line.strip():
@@ -459,37 +467,79 @@ class MessageHandler:
         self.logger.info(f"Software install requested: {package} from {source}")
         try:
             if source == "apt":
-                result = subprocess.run(["apt-get", "install", "-y", package], capture_output=True, text=True, timeout=120)
+                result = subprocess.run(
+                    ["apt-get", "install", "-y", package], capture_output=True, text=True, timeout=120
+                )
                 ok = result.returncode == 0
-                return {"type": "software_install_ack", "data": {"package": package, "status": "installed" if ok else "failed", "output": result.stdout[:500] if not ok else ""}}
+                return {
+                    "type": "software_install_ack",
+                    "data": {
+                        "package": package,
+                        "status": "installed" if ok else "failed",
+                        "output": result.stdout[:500] if not ok else "",
+                    },
+                }
             elif source == "pip":
-                result = subprocess.run(["pip", "install", package, "--break-system-packages"], capture_output=True, text=True, timeout=120)
+                result = subprocess.run(
+                    ["pip", "install", package, "--break-system-packages"], capture_output=True, text=True, timeout=120
+                )
                 ok = result.returncode == 0
-                return {"type": "software_install_ack", "data": {"package": package, "status": "installed" if ok else "failed", "output": result.stdout[:500] if not ok else ""}}
-            return {"type": "software_install_ack", "data": {"package": package, "status": f"source '{source}' not supported"}}
+                return {
+                    "type": "software_install_ack",
+                    "data": {
+                        "package": package,
+                        "status": "installed" if ok else "failed",
+                        "output": result.stdout[:500] if not ok else "",
+                    },
+                }
+            return {
+                "type": "software_install_ack",
+                "data": {"package": package, "status": f"source '{source}' not supported"},
+            }
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
 
     async def _handle_module_list(self, data: dict) -> dict:
         """获取模块列表（动态扫描）"""
         modules = [
-            {"id": "motion", "name": "运动控制", "version": "1.0.0", "status": "running" if self.motion_controller else "disabled", "enabled": self.motion_controller is not None},
-            {"id": "vision", "name": "视觉模块", "version": "1.0.0", "status": "running" if self.camera_manager else "disabled", "enabled": self.camera_manager is not None},
-            {"id": "system", "name": "系统信息", "version": "1.0.0", "status": "running" if self.system_collector else "disabled", "enabled": self.system_collector is not None},
+            {
+                "id": "motion",
+                "name": "运动控制",
+                "version": "1.0.0",
+                "status": "running" if self.motion_controller else "disabled",
+                "enabled": self.motion_controller is not None,
+            },
+            {
+                "id": "vision",
+                "name": "视觉模块",
+                "version": "1.0.0",
+                "status": "running" if self.camera_manager else "disabled",
+                "enabled": self.camera_manager is not None,
+            },
+            {
+                "id": "system",
+                "name": "系统信息",
+                "version": "1.0.0",
+                "status": "running" if self.system_collector else "disabled",
+                "enabled": self.system_collector is not None,
+            },
         ]
         # 尝试导入 extension 模块管理器
         try:
             from modules.extension.base import ModuleManager
+
             mgr = ModuleManager()
             mods = mgr.list_modules()
             for m in mods:
-                modules.append({
-                    "id": m.get("id", ""),
-                    "name": m.get("name", ""),
-                    "version": m.get("version", "1.0.0"),
-                    "status": m.get("status", "unknown"),
-                    "enabled": m.get("enabled", False),
-                })
+                modules.append(
+                    {
+                        "id": m.get("id", ""),
+                        "name": m.get("name", ""),
+                        "version": m.get("version", "1.0.0"),
+                        "status": m.get("status", "unknown"),
+                        "enabled": m.get("enabled", False),
+                    }
+                )
         except Exception:
             pass
         return {"type": "module_list", "data": {"modules": modules}}
@@ -518,7 +568,10 @@ class MessageHandler:
         try:
             result = subprocess.run(["apt-get", "remove", "-y", package], capture_output=True, text=True, timeout=60)
             ok = result.returncode == 0
-            return {"type": "software_uninstall_ack", "data": {"package": package, "status": "uninstalled" if ok else "failed"}}
+            return {
+                "type": "software_uninstall_ack",
+                "data": {"package": package, "status": "uninstalled" if ok else "failed"},
+            }
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
 
@@ -531,7 +584,10 @@ class MessageHandler:
         try:
             result = subprocess.run(["apt-get", "upgrade", "-y", package], capture_output=True, text=True, timeout=120)
             ok = result.returncode == 0
-            return {"type": "software_upgrade_ack", "data": {"package": package, "status": "upgraded" if ok else "failed"}}
+            return {
+                "type": "software_upgrade_ack",
+                "data": {"package": package, "status": "upgraded" if ok else "failed"},
+            }
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
 
@@ -553,7 +609,9 @@ class MessageHandler:
             try:
                 result = subprocess.run(
                     ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "dev", "status"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
                 for line in result.stdout.strip().split("\n"):
                     parts = line.split(":")
@@ -569,7 +627,9 @@ class MessageHandler:
                 try:
                     r2 = subprocess.run(
                         ["nmcli", "-t", "-f", "IN-USE,SIGNAL", "dev", "wifi", "list"],
-                        capture_output=True, text=True, timeout=10,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
                     )
                     for line in r2.stdout.strip().split("\n"):
                         parts = line.split(":")
@@ -588,7 +648,8 @@ class MessageHandler:
                 # 先用 nmcli rescan 试一下（新版 nmcli 支持，静默忽略错误）
                 subprocess.run(
                     ["nmcli", "dev", "wifi", "rescan"],
-                    capture_output=True, timeout=5,
+                    capture_output=True,
+                    timeout=5,
                 )
                 # 等待扫描完成
                 await asyncio.sleep(2)
@@ -599,7 +660,9 @@ class MessageHandler:
             try:
                 iw_result = subprocess.run(
                     ["/sbin/iwlist", "wlan0", "scanning"],
-                    capture_output=True, text=True, timeout=15,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
                 )
                 scan_output = iw_result.stdout
             except Exception:
@@ -610,7 +673,9 @@ class MessageHandler:
                 try:
                     nm_result = subprocess.run(
                         ["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "dev", "wifi", "list"],
-                        capture_output=True, text=True, timeout=10,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
                     )
                     scan_output = nm_result.stdout
                     # nmcli 格式
@@ -626,12 +691,14 @@ class MessageHandler:
                         seen.add(ssid)
                         signal = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
                         security = parts[2].strip() if len(parts) > 2 else "--"
-                        networks.append({
-                            "ssid": ssid,
-                            "signal": signal,
-                            "security": security,
-                            "connected": ssid == current_ssid,
-                        })
+                        networks.append(
+                            {
+                                "ssid": ssid,
+                                "signal": signal,
+                                "security": security,
+                                "connected": ssid == current_ssid,
+                            }
+                        )
                 except Exception:
                     pass
             else:
@@ -642,6 +709,7 @@ class MessageHandler:
                 #           Quality=39/100  Signal level=-86 dBm
                 #           IE: IEEE 802.11i/WPA2 ...
                 import re
+
                 cells = scan_output.split("Cell ")
                 for cell in cells[1:]:  # 跳过第一个空元素
                     essid_match = re.search(r'ESSID:"([^"]*)"', cell)
@@ -653,17 +721,17 @@ class MessageHandler:
                     seen.add(ssid)
 
                     # 信号强度: Quality=X/100 或 Signal level=-XX dBm
-                    sig_match = re.search(r'Signal level=(-\d+)\s*dBm', cell)
+                    sig_match = re.search(r"Signal level=(-\d+)\s*dBm", cell)
                     if sig_match:
                         dbm = int(sig_match.group(1))
                         # dBm → 0-100: -30dBm≈100%, -90dBm≈0%
                         signal = max(0, min(100, 2 * (dbm + 100)))
                     else:
-                        qual_match = re.search(r'Quality=(\d+)/', cell)
+                        qual_match = re.search(r"Quality=(\d+)/", cell)
                         signal = int(qual_match.group(1)) if qual_match else 0
 
                     # 安全类型
-                    encryption = re.search(r'Encryption key:(on|off)', cell)
+                    encryption = re.search(r"Encryption key:(on|off)", cell)
                     if encryption and encryption.group(1) == "on":
                         if "WPA2" in cell or "IEEE 802.11i" in cell:
                             security = "WPA2"
@@ -679,21 +747,25 @@ class MessageHandler:
                     if is_connected and current_signal > 0:
                         signal = current_signal
 
-                    networks.append({
-                        "ssid": ssid,
-                        "signal": signal,
-                        "security": security,
-                        "connected": is_connected,
-                    })
+                    networks.append(
+                        {
+                            "ssid": ssid,
+                            "signal": signal,
+                            "security": security,
+                            "connected": is_connected,
+                        }
+                    )
 
             # 确保当前连接在列表中
             if current_ssid and current_ssid not in seen and current_device:
-                networks.append({
-                    "ssid": current_ssid,
-                    "signal": current_signal,
-                    "security": "--",
-                    "connected": True,
-                })
+                networks.append(
+                    {
+                        "ssid": current_ssid,
+                        "signal": current_signal,
+                        "security": "--",
+                        "connected": True,
+                    }
+                )
 
             # 按信号强度排序
             networks.sort(key=lambda n: n["signal"], reverse=True)
@@ -748,7 +820,9 @@ class MessageHandler:
             if not device:
                 result = subprocess.run(
                     ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "dev", "status"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
                 for line in result.stdout.strip().split("\n"):
                     parts = line.split(":")

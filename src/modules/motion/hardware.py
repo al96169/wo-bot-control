@@ -101,9 +101,8 @@ class SerialHardware(HardwareInterface):
         if self._serial is None:
             try:
                 import serial_asyncio
-                self._serial, _ = await serial_asyncio.open_serial_connection(
-                    url=self.port, baudrate=self.baudrate
-                )
+
+                self._serial, _ = await serial_asyncio.open_serial_connection(url=self.port, baudrate=self.baudrate)
                 logger.info(f"Serial connected: {self.port} @ {self.baudrate}")
             except ImportError:
                 logger.error("pyserial-asyncio not installed. Run: pip install pyserial-asyncio")
@@ -125,7 +124,14 @@ class SerialHardware(HardwareInterface):
             logger.warning(f"Serial: set_motor({name}) blocked by emergency stop")
             return
         # 协议格式: 0xAA [motor_id] [speed_byte] 0x55
-        motor_map = {"front_left": 0x01, "front_right": 0x02, "rear_left": 0x03, "rear_right": 0x04, "left": 0x01, "right": 0x02}
+        motor_map = {
+            "front_left": 0x01,
+            "front_right": 0x02,
+            "rear_left": 0x03,
+            "rear_right": 0x04,
+            "left": 0x01,
+            "right": 0x02,
+        }
         mid = motor_map.get(name)
         if mid is None:
             logger.warning(f"Serial: unknown motor name '{name}'")
@@ -164,10 +170,10 @@ class GPIOHardware(HardwareInterface):
     def __init__(self, pins: dict = None):
         # 默认引脚映射 (Jetson GPIO)
         self.pins = pins or {
-            "front_left":  {"pwm": 32, "dir1": 33, "dir2": 35},
+            "front_left": {"pwm": 32, "dir1": 33, "dir2": 35},
             "front_right": {"pwm": 36, "dir1": 37, "dir2": 38},
-            "rear_left":   {"pwm": 40, "dir1": 41, "dir2": 43},
-            "rear_right":  {"pwm": 12, "dir1": 13, "dir2": 15},
+            "rear_left": {"pwm": 40, "dir1": 41, "dir2": 43},
+            "rear_right": {"pwm": 12, "dir1": 13, "dir2": 15},
         }
         self._gpio = None
         self._pwm_channels: dict = {}
@@ -177,6 +183,7 @@ class GPIOHardware(HardwareInterface):
         if self._gpio is None:
             try:
                 import Jetson.GPIO as GPIO
+
                 GPIO.setmode(GPIO.BOARD)
                 self._gpio = GPIO
 
@@ -271,6 +278,7 @@ class RosmasterMotion(HardwareInterface):
             return True
         try:
             from Rosmaster_Lib import Rosmaster
+
             self._bot = Rosmaster(car_type=self.car_type, com=self.com)
             # 写入 car_type 到板子（必须，否则板子用默认运动学参数）
             self._bot.set_car_type(self.car_type)
@@ -302,9 +310,7 @@ class RosmasterMotion(HardwareInterface):
 
         async with self._lock:
             try:
-                await asyncio.get_event_loop().run_in_executor(
-                    None, self._bot.set_car_motion, v_x, v_y, v_z
-                )
+                await asyncio.get_event_loop().run_in_executor(None, self._bot.set_car_motion, v_x, v_y, v_z)
             except Exception as e:
                 logger.error(f"Rosmaster set_car_motion failed: {e}")
 
