@@ -5,7 +5,6 @@
 
 import asyncio
 import logging
-import time
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
@@ -92,8 +91,8 @@ class PCA9685Gimbal(GimbalInterface):
             try:
                 import board
                 import busio
-                from adafruit_pca9685 import PCA9685
                 from adafruit_motor import servo
+                from adafruit_pca9685 import PCA9685
 
                 i2c = busio.I2C(board.SCL, board.SDA)
                 self._pca = PCA9685(i2c, address=self.address)

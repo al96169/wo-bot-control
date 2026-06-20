@@ -4,8 +4,9 @@ WebRTC 端到端集成测试
 """
 import asyncio
 import json
+
 import websockets
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
 STUN = "stun:stun.l.google.com:19302"
 RTC_CONF = RTCConfiguration(iceServers=[RTCIceServer(urls=STUN)])

@@ -7,13 +7,19 @@ WebSocket 仅用于信令（SDP/ICE 交换）
 import asyncio
 import json
 import logging
-from typing import Optional, Set
 
 import numpy as np
 
 try:
-    from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel, RTCConfiguration, RTCIceServer
-    from aiortc import MediaStreamTrack, VideoStreamTrack
+    from aiortc import (
+        MediaStreamTrack,
+        RTCConfiguration,
+        RTCDataChannel,
+        RTCIceServer,
+        RTCPeerConnection,
+        RTCSessionDescription,
+        VideoStreamTrack,
+    )
     from av import VideoFrame
     WEBRTC_AVAILABLE = True
 except ImportError:
@@ -37,7 +43,6 @@ STUN_SERVER = "stun:stun.l.google.com:19302"
 # 导致 ICE 永远停留在 "new" 状态。这里用 set_selected_pair 绕过检查。
 _PATCH_LOG = logging.getLogger("wobot")
 try:
-    import aioice
     from aioice.ice import Connection as AioiceConnection
     _aioice_connect_original = AioiceConnection.connect
 
@@ -228,9 +233,10 @@ class WebRTCService:
         # H.264 优先：iPad/Safari 只支持 H.264，VP8 优先会导致平板黑屏
         try:
             import copy as _copy
+
+            from aiortc import rtp as _rtp
             from aiortc.codecs import MEDIA_CODECS
             from aiortc.rtcpeerconnection import HEADER_EXTENSIONS
-            from aiortc import rtp as _rtp
             dynamic_pt = _rtp.DYNAMIC_PAYLOAD_TYPES.start
             for t in pc._RTCPeerConnection__transceivers:
                 # 1) 分配 MID（createAnswer 不会自动分配，但 BUNDLE 需要）
@@ -269,7 +275,7 @@ class WebRTCService:
         # Create answer
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
-        
+
         # 诊断：记录 answer SDP 是否包含 DataChannel
         has_app = 'm=application' in (pc.localDescription.sdp or '')
         self.logger.info(f"[{client_id}] Answer SDP has DataChannel: {has_app}")

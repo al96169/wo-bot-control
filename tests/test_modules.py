@@ -2,11 +2,11 @@
 wo-bot-control 测试
 """
 
-import pytest
-import asyncio
 import json
-import sys
 import os
+import sys
+
+import pytest
 
 # 添加 src 到路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -203,7 +203,7 @@ class TestExtensionModule:
 
     def test_module_manager(self):
         """测试模块管理器"""
-        from modules.extension.base import ModuleManager, ExtensionModule
+        from modules.extension.base import ExtensionModule, ModuleManager
 
         class TestModule(ExtensionModule):
             async def start(self):

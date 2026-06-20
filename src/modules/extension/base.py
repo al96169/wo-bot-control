@@ -3,7 +3,6 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
 
 
 class ExtensionModule(ABC):
@@ -55,7 +54,7 @@ class ModuleManager:
 
     def __init__(self, logger=None):
         self.logger = logger
-        self.modules: Dict[str, ExtensionModule] = {}
+        self.modules: dict[str, ExtensionModule] = {}
 
     def register(self, module: ExtensionModule):
         """注册模块"""

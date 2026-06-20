@@ -12,7 +12,6 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 
 class MessageHandler:
@@ -36,9 +35,9 @@ class MessageHandler:
         # 云台速度控制：客户端发速度(-1.0~+1.0)，服务端持续循环移动
         self._gimbal_speed = {"pan": 0.0, "tilt": 0.0}
         self._gimbal_running = threading.Event()
-        self._gimbal_task: Optional[asyncio.Task] = None
+        self._gimbal_task: asyncio.Task | None = None
 
-    async def handle(self, msg_type: str, msg_data: dict) -> Optional[dict]:
+    async def handle(self, msg_type: str, msg_data: dict) -> dict | None:
         """处理消息"""
         handler = getattr(self, f"_handle_{msg_type}", None)
 
@@ -61,6 +60,8 @@ class MessageHandler:
         features = ["websocket", "exec", "motion", "system", "camera"]
         if hasattr(self, 'gimbal_controller') and self.gimbal_controller:
             features.append("gimbal")
+        if hasattr(self, 'dance_controller') and self.dance_controller:
+            features.append("dance")
         status_data["features"] = features
         return {"type": "status", "data": status_data}
 
@@ -196,13 +197,9 @@ class MessageHandler:
                 # 限位
                 state = gc.get_state()
                 p, t = state["pan"], state["tilt"]
-                if p <= gc.pan_min and pan_delta < 0:
+                if p <= gc.pan_min and pan_delta < 0 or p >= gc.pan_max and pan_delta > 0:
                     pan_delta = 0
-                elif p >= gc.pan_max and pan_delta > 0:
-                    pan_delta = 0
-                if t <= gc.tilt_min and tilt_delta < 0:
-                    tilt_delta = 0
-                elif t >= gc.tilt_max and tilt_delta > 0:
+                if t <= gc.tilt_min and tilt_delta < 0 or t >= gc.tilt_max and tilt_delta > 0:
                     tilt_delta = 0
 
                 try:
@@ -245,6 +242,14 @@ class MessageHandler:
                 self.motion_controller.max_angular_speed = max_angular
 
         return {"type": "motion_config_ack", "data": data}
+
+    async def _handle_dance(self, data: dict) -> dict:
+        """处理舞蹈控制命令"""
+        if not hasattr(self, 'dance_controller') or not self.dance_controller:
+            return {"type": "error", "data": {"code": 503, "message": "Dance controller not available"}}
+
+        command = data.get("command", "status")
+        return await self.dance_controller.handle_command(command, data)
 
     async def _handle_camera(self, data: dict) -> dict:
         """处理摄像头控制"""
@@ -393,7 +398,7 @@ class MessageHandler:
         logs = []
 
         if log_file.exists():
-            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            with open(log_file, encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
                 recent = all_lines[-lines:]
                 pattern = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] (\w+): (.+)$')

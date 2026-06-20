@@ -7,9 +7,9 @@ WebSocket 信令服务器
 import asyncio
 import json
 import uuid
-from typing import Set
 
 import websockets
+
 # 兼容 websockets 9.x 和 11+
 try:
     from websockets.asyncio.server import ServerConnection
@@ -31,7 +31,7 @@ class WebSocketServer:
         self.config = config or {}
         self.logger = logger
         self._server = None
-        self._clients: Set[ServerConnection] = set()
+        self._clients: set[ServerConnection] = set()
         self._ws_clients: dict[str, ServerConnection] = {}  # client_id -> WebSocket 连接
         self._ws_broadcast_task: asyncio.Task = None
 

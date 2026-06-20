@@ -6,12 +6,11 @@ mDNS 服务发现
 import asyncio
 import socket
 import traceback
-from typing import List, Optional
 
 from zeroconf import ServiceInfo, Zeroconf
 
 
-def _get_local_ipv4_addresses() -> List[str]:
+def _get_local_ipv4_addresses() -> list[str]:
     """获取本机所有非环回 IPv4 地址"""
     result = []
     try:
@@ -47,8 +46,8 @@ class MDNSService:
         self.port = port
         self.logger = logger
 
-        self.zeroconf: Optional[Zeroconf] = None
-        self.service_info: Optional[ServiceInfo] = None
+        self.zeroconf: Zeroconf | None = None
+        self.service_info: ServiceInfo | None = None
 
     async def start(self):
         """启动 mDNS 服务"""

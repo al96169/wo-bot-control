@@ -3,7 +3,6 @@
 采集电池、CPU、内存、网络等系统状态
 """
 
-import asyncio
 import platform
 import subprocess
 from datetime import datetime
@@ -98,7 +97,7 @@ class SystemCollector:
 
             for path in temp_paths:
                 try:
-                    with open(path, "r") as f:
+                    with open(path) as f:
                         temp = int(f.read().strip()) / 1000.0
                         return round(temp, 1)
                 except FileNotFoundError:

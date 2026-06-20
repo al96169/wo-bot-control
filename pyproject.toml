@@ -1,0 +1,79 @@
+[project]
+name = "wo-bot-control"
+version = "0.1.0"
+description = "wo-bot 机器人设备服务端"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.11.0",
+    "mypy>=1.15",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "*.egg-info",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort
+    "W",    # pycodestyle warnings
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # do not perform function calls in argument defaults (too strict for current code)
+    "B904",  # raise from within except (can be noisy)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "modules", "utils"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_no_return = false
+warn_unused_ignores = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+exclude = [
+    "tests/",
+    ".venv/",
+    "venv/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "websockets.*",
+    "aiortc.*",
+    "av.*",
+    "zeroconf.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

@@ -4,14 +4,12 @@ HTTP API 服务器
 """
 
 import asyncio
-from io import BytesIO
+
+import cv2
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
-import cv2
-import numpy as np
-from typing import Optional
 
 
 class HttpAPIServer:

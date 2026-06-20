@@ -10,10 +10,11 @@ from pathlib import Path
 
 import yaml
 
-from core.websocket_server import WebSocketServer
+from core.http_api import HttpAPIServer
 from core.mdns_service import MDNSService
 from core.message_handler import MessageHandler
-from core.http_api import HttpAPIServer
+from core.websocket_server import WebSocketServer
+
 # WebRTC 可选导入（兼容 Python 3.6）
 try:
     from core.webrtc_service import WebRTCService
@@ -22,8 +23,9 @@ except ImportError as e:
     WebRTCService = None
     WEBRTC_AVAILABLE = False
     print(f"Warning: WebRTC not available: {e}")
-from modules.system.collector import SystemCollector
 from modules.motion.controller import MotionController
+from modules.system.collector import SystemCollector
+
 # Camera 可选导入（兼容无opencv环境）
 try:
     from modules.vision.camera import CameraManager
@@ -62,6 +64,7 @@ class WoBotControl:
         self.gimbal_controller = None
         self.http_server = None
         self.webrtc_service = None
+        self.dance_controller = None
 
         # 运行状态
         self.running = False
@@ -74,7 +77,7 @@ class WoBotControl:
             path = Path(__file__).parent.parent / config_path
 
         if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 return yaml.safe_load(f) or self._get_default_config()
         else:
             return self._get_default_config()
@@ -122,6 +125,10 @@ class WoBotControl:
         # 注入云台控制器到消息处理器
         if self.gimbal_controller:
             self.message_handler.gimbal_controller = self.gimbal_controller
+
+        # 注入舞蹈控制器到消息处理器
+        if self.dance_controller:
+            self.message_handler.dance_controller = self.dance_controller
 
         # 初始化 WebRTC 服务（可选）
         if WEBRTC_AVAILABLE and WebRTCService:
@@ -216,6 +223,19 @@ class WoBotControl:
             self.gimbal_controller = None
             self.logger.info("Gimbal controller disabled")
 
+        # 舞蹈控制（始终可用，依赖运动控制器）
+        try:
+            from modules.extension.dance import DanceController
+            self.dance_controller = DanceController(
+                motion_controller=self.motion_controller,
+                logger=self.logger,
+            )
+            await self.dance_controller.start()
+            self.logger.info("Dance controller initialized")
+        except Exception as e:
+            self.dance_controller = None
+            self.logger.warning(f"Dance controller init failed: {e}")
+
     async def stop(self):
         """停止服务"""
         self.logger.info("Stopping wo-bot-control...")
@@ -239,6 +259,9 @@ class WoBotControl:
 
         if self.gimbal_controller:
             await self.gimbal_controller.stop()
+
+        if self.dance_controller:
+            await self.dance_controller.stop()
 
         self.logger.info("wo-bot-control stopped")
 

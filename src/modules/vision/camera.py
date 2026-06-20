@@ -6,14 +6,10 @@
 import asyncio
 import glob
 import os
-import platform
 import subprocess
-import time
-from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
-
 
 # ===== NumPy YUYV → BGR（绕过 OpenCV cvtColor 在 ARM 上的 SIMD 崩溃） =====
 
@@ -47,8 +43,8 @@ class CameraManager:
         self.stream_type = self.config.get("stream_type", "mjpeg")
 
         # 摄像头列表
-        self.cameras: Dict[int, dict] = {}
-        self.active_streams: Dict[int, "CameraStream"] = {}
+        self.cameras: dict[int, dict] = {}
+        self.active_streams: dict[int, CameraStream] = {}
 
         # 初始化
         self._detect_cameras()
@@ -91,10 +87,10 @@ class CameraManager:
             self.cameras[clone_id] = clone
 
             if self.logger:
-                self.logger.info(f"Detected 1 physical camera, cloned to 2 logical cameras")
+                self.logger.info("Detected 1 physical camera, cloned to 2 logical cameras")
         elif physical_count == 2:
             if self.logger:
-                self.logger.info(f"Detected 2 cameras: USB(cam0) + CSI(cam1)")
+                self.logger.info("Detected 2 cameras: USB(cam0) + CSI(cam1)")
         else:
             if self.logger:
                 self.logger.info(f"Detected {physical_count} cameras")
@@ -125,7 +121,7 @@ class CameraManager:
         except Exception:
             pass
 
-    def _detect_csi_cameras(self) -> List[dict]:
+    def _detect_csi_cameras(self) -> list[dict]:
         """检测 CSI 摄像头：GStreamer → v4l2-ctl → gst-inspect 三级回退"""
         cameras = []
         csi_pipeline = (
@@ -185,7 +181,7 @@ class CameraManager:
 
         return cameras
 
-    def _detect_usb_cameras(self, skip_indices: set = None) -> List[dict]:
+    def _detect_usb_cameras(self, skip_indices: set = None) -> list[dict]:
         """检测 USB 摄像头"""
         cameras = []
         skip_indices = skip_indices or set()
@@ -327,7 +323,7 @@ class CameraManager:
         if self.logger:
             self.logger.info("All camera devices released")
 
-    def get_frame(self, camera_id: int = None) -> Optional[np.ndarray]:
+    def get_frame(self, camera_id: int = None) -> np.ndarray | None:
         """获取帧（用于 MJPEG 流和 WebRTC）"""
         if camera_id is None:
             camera_id = self.default_camera
@@ -347,12 +343,12 @@ class CameraStream:
         self.fps = fps
         self.logger = logger
 
-        self.cap: Optional[cv2.VideoCapture] = None
-        self._csi_proc: Optional[subprocess.Popen] = None
-        self._csi_file_prefix: Optional[str] = None
+        self.cap: cv2.VideoCapture | None = None
+        self._csi_proc: subprocess.Popen | None = None
+        self._csi_file_prefix: str | None = None
         self.running = False
-        self._capture_task: Optional[asyncio.Task] = None
-        self.current_frame: Optional[np.ndarray] = None
+        self._capture_task: asyncio.Task | None = None
+        self.current_frame: np.ndarray | None = None
         self.stream_port = 8080 + camera_info.get("id", 0)
 
     async def start(self):
@@ -390,7 +386,7 @@ class CameraStream:
                     if cap_test.isOpened():
                         self.cap = cap_test
                         if self.logger:
-                            self.logger.info(f"GStreamer nvarguscamerasrc opened")
+                            self.logger.info("GStreamer nvarguscamerasrc opened")
                         break
                     cap_test.release()
 
@@ -618,7 +614,7 @@ class CameraStream:
                     f"CSI subprocess exited with code {self._csi_proc.returncode}"
                 )
 
-    def get_frame(self) -> Optional[np.ndarray]:
+    def get_frame(self) -> np.ndarray | None:
         """获取当前帧"""
         return self.current_frame
 
@@ -668,7 +664,7 @@ class SharedCameraStream:
         self.running = False
         self.source = None
 
-    def get_frame(self) -> Optional[np.ndarray]:
+    def get_frame(self) -> np.ndarray | None:
         """从源流获取当前帧"""
         if self.running and self.source:
             return self.source.current_frame
