@@ -3,6 +3,8 @@
 处理各类 WebSocket 消息
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os

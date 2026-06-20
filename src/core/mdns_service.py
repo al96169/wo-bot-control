@@ -3,6 +3,8 @@ mDNS 服务发现
 使用 zeroconf 在局域网广播服务
 """
 
+from __future__ import annotations
+
 import asyncio
 import socket
 import traceback

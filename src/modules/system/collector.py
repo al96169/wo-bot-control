@@ -3,6 +3,8 @@
 采集电池、CPU、内存、网络等系统状态
 """
 
+from __future__ import annotations
+
 import platform
 import subprocess
 from datetime import datetime

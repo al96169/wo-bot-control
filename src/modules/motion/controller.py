@@ -3,6 +3,8 @@
 控制机器人运动
 """
 
+from __future__ import annotations
+
 import math
 
 from .hardware import HardwareInterface, create_hardware

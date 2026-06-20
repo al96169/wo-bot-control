@@ -3,6 +3,8 @@
 管理摄像头采集和视频流
 """
 
+from __future__ import annotations
+
 import asyncio
 import glob
 import os

@@ -4,12 +4,18 @@ WebSocket 信令服务器
 当 WebRTC DataChannel 不可用时，所有业务消息通过 WebSocket 传输
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import uuid
 from typing import Any
 
 import websockets
+
+# 协议版本：服务端与客户端协商的通信协议版本号
+# 仅递增，不做后向兼容的大版本变更
+PROTOCOL_VERSION = 1
 
 # 兼容 websockets 9.x 和 11+
 try:
@@ -164,11 +170,71 @@ class WebSocketServer:
                     await websocket.close()
                     return
 
+        # ---- 版本兼容性检查 ----
+        # 安全要求: 不透露服务端协议版本，不告知客户端是因版本问题被拒
+        # 通过 WebSocket URL query 参数 ?protocol_version=N 传递（连接时即确定，无竞态）
+        compat_config = self.config.get("compatibility", {})
+        min_protocol = compat_config.get("min_protocol_version", 1)
+        reject_newer = compat_config.get("reject_newer", False)
+
+        # 调试模式：可强制提升最低版本用于测试
+        debug_config = self.config.get("debug", {})
+        debug_force_min = debug_config.get("force_min_protocol_version", 0)
+        if debug_force_min > 0:
+            min_protocol = debug_force_min
+
+        # 从 URL query 参数读取 client_protocol
+        # 兼容新旧 websockets API: 新版有 request.query，旧版有 path
+        client_protocol = None
+        try:
+            from urllib.parse import parse_qs
+
+            query_string = ""
+            if hasattr(websocket, "request") and hasattr(websocket.request, "query"):  # type: ignore[union-attr]
+                query_string = websocket.request.query or ""  # type: ignore[union-attr]
+            elif hasattr(websocket, "path"):
+                # websockets 9.x / legacy: path 包含 query string
+                raw_path = websocket.path or ""
+                if "?" in raw_path:
+                    query_string = raw_path.split("?", 1)[1]
+
+            if query_string:
+                qs = parse_qs(query_string)
+                pv_str = qs.get("protocol_version", [None])[0]
+                if pv_str is not None:
+                    client_protocol = int(pv_str)
+        except Exception:
+            pass
+
+        if client_protocol is None:
+            if self.logger:
+                self.logger.info(f"Client {remote} rejected: no protocol_version in URL")
+            await websocket.close(4001, "Connection refused")
+            return
+
+        if client_protocol < min_protocol:
+            if self.logger:
+                self.logger.info(
+                    f"Client {remote} rejected: protocol version {client_protocol} < min {min_protocol}"
+                )
+            await websocket.close(4001, "Connection refused")
+            return
+
+        if reject_newer and client_protocol > PROTOCOL_VERSION:
+            if self.logger:
+                self.logger.info(
+                    f"Client {remote} rejected: protocol version {client_protocol} > server {PROTOCOL_VERSION}"
+                )
+            await websocket.close(4001, "Connection refused")
+            return
+
         self._clients.add(websocket)
         self._ws_clients[client_id] = websocket
         if self.logger:
             self.logger.info(
-                f"Signaling client connected: {remote} ({client_id}){', authenticated' if auth_enabled else ''}"
+                f"Signaling client connected: {remote} ({client_id})"
+                f"{', authenticated' if auth_enabled else ''}"
+                f", protocol={client_protocol}"
             )
 
         # 构建 features 列表

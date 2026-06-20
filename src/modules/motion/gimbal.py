@@ -3,6 +3,8 @@
 支持 PCA9685 I2C / Jetson GPIO PWM / Rosmaster 串口 / Mock 四种后端
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from abc import ABC, abstractmethod

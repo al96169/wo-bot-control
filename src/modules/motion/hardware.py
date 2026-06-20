@@ -3,6 +3,8 @@
 支持 Mock / 串口 / GPIO 三种硬件后端
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from abc import ABC, abstractmethod

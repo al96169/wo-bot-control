@@ -3,6 +3,8 @@
 从 dances.json 配置文件动态加载舞蹈动作序列
 """
 
+from __future__ import annotations
+
 import asyncio
 import glob
 import json

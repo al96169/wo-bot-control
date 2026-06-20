@@ -4,6 +4,8 @@ WebRTC 服务
 WebSocket 仅用于信令（SDP/ICE 交换）
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

@@ -101,3 +101,16 @@ security:
   auth_enabled: false
   # 当 auth_enabled=true 时，客户端需通过 URL query ?token=xxx 或首条 auth 消息认证
   token: "change-me-to-a-secure-random-string"
+
+# Compatibility
+compatibility:
+  # 最低支持的客户端协议版本，低于此版本的客户端会被拒绝连接
+  min_protocol_version: 1
+  # 是否拒绝比服务端更新的客户端（默认 false，新客户端兼容旧服务端）
+  reject_newer: false
+
+# Debug
+debug:
+  # 强制最低协议版本（0 表示使用 compatibility.min_protocol_version）
+  # 测试版本拒绝场景时，设置此值 > 客户端当前协议版本即可触发
+  force_min_protocol_version: 0
