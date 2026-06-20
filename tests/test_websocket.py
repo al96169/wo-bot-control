@@ -28,7 +28,7 @@ class TestWebSocketServer:
         """测试消息格式"""
         from core.websocket_server import WebSocketServer
 
-        server = WebSocketServer(host="localhost", port=8766)
+        _server = WebSocketServer(host="localhost", port=8766)
 
         # 测试消息构建
         message = {

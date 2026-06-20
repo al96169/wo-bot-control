@@ -12,7 +12,6 @@ import numpy as np
 
 try:
     from aiortc import (
-        MediaStreamTrack,
         RTCConfiguration,
         RTCDataChannel,
         RTCIceServer,
@@ -251,9 +250,12 @@ class WebRTCService:
                     # 排序: VP8 优先（通用兼容性最好），然后 H.264
                     def _codec_sort_key(c):
                         name = c.name.upper() if hasattr(c, 'name') else ''
-                        if 'VP8' in name: return 0
-                        if 'H264' in name: return 1
-                        if 'VP9' in name: return 2
+                        if 'VP8' in name:
+                            return 0
+                        if 'H264' in name:
+                            return 1
+                        if 'VP9' in name:
+                            return 2
                         return 3
                     raw_codecs.sort(key=_codec_sort_key)
                     for codec in raw_codecs:

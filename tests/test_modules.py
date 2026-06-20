@@ -63,7 +63,7 @@ class TestMotionController:
         controller = MotionController()
         await controller.set_velocity(0.5, 0.3)
         await controller.emergency_stop()
-        assert controller.emergency_stopped == True
+        assert controller.emergency_stopped
         assert controller.current_linear == 0.0
 
     @pytest.mark.asyncio

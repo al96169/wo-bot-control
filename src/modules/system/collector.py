@@ -113,7 +113,7 @@ class SystemCollector:
         try:
             # 获取网络接口信息
             interfaces = psutil.net_if_addrs()
-            stats = psutil.net_if_stats()
+            _ = psutil.net_if_stats()
 
             # 查找主要网络接口（通常是 wlan0 或 eth0）
             main_interface = None

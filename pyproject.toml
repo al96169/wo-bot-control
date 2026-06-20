@@ -36,9 +36,11 @@ select = [
     "UP",   # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
-    "B008",  # do not perform function calls in argument defaults (too strict for current code)
-    "B904",  # raise from within except (can be noisy)
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults (too strict for current code)
+    "B904",   # raise from within except (can be noisy)
+    "B027",   # empty method in abstract base class is intentional (default no-op)
+    "SIM105", # try-except-pass is preferred over contextlib.suppress in this project
 ]
 
 [tool.ruff.lint.isort]

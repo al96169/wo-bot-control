@@ -571,7 +571,7 @@ class CameraStream:
 
     async def _capture_loop_csi(self):
         """CSI 子进程帧采集循环：从 gst-launch-1.0 multifilesink 读取最新 JPEG"""
-        w, h, fps = getattr(self, '_cap_w', 320), getattr(self, '_cap_h', 240), getattr(self, '_cap_fps', 10)
+        _, _, fps = getattr(self, '_cap_w', 320), getattr(self, '_cap_h', 240), getattr(self, '_cap_fps', 10)
         prefix = self._csi_file_prefix
         self._frame_seq = 0
         last_file = None
@@ -608,11 +608,10 @@ class CameraStream:
                 break
 
         # 子进程异常退出告警
-        if self.running and self._csi_proc and self._csi_proc.poll() is not None:
-            if self.logger:
-                self.logger.warning(
-                    f"CSI subprocess exited with code {self._csi_proc.returncode}"
-                )
+        if self.running and self._csi_proc and self._csi_proc.poll() is not None and self.logger:
+            self.logger.warning(
+                f"CSI subprocess exited with code {self._csi_proc.returncode}"
+            )
 
     def get_frame(self) -> np.ndarray | None:
         """获取当前帧"""
