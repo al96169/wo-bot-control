@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import logging
 import os
 import pty
 import re
@@ -29,7 +30,7 @@ class MessageHandler:
         self.motion_controller = motion_controller
         self.camera_manager = camera_manager
         self.config = config or {}
-        self.logger = logger
+        self.logger = logger or logging.getLogger(__name__)
         # 持久 Shell 会话工作目录（初始为进程当前目录）
         self._shell_cwd = os.getcwd()
         # 云台速度控制：客户端发速度(-1.0~+1.0)，服务端持续循环移动

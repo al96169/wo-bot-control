@@ -3,6 +3,7 @@ wo-bot-control 测试
 """
 
 import json
+import logging
 import os
 import sys
 
@@ -173,7 +174,7 @@ class TestMessageHandler:
         """测试未知消息"""
         from core.message_handler import MessageHandler
 
-        handler = MessageHandler()
+        handler = MessageHandler(logger=logging.getLogger("test"))
         response = await handler.handle("unknown_type", {})
         assert response["type"] == "error"
 

@@ -3,6 +3,7 @@ WebSocket 服务器测试
 """
 
 import json
+import logging
 import os
 import sys
 
@@ -19,7 +20,13 @@ class TestWebSocketServer:
         """测试服务器创建"""
         from core.websocket_server import WebSocketServer
 
-        server = WebSocketServer(host="localhost", port=8766)
+        server = WebSocketServer(
+            host="localhost",
+            port=8766,
+            message_handler=None,
+            robot_info={"name": "test", "model": "mock"},
+            logger=logging.getLogger("test"),
+        )
         assert server.host == "localhost"
         assert server.port == 8766
 
@@ -28,7 +35,13 @@ class TestWebSocketServer:
         """测试消息格式"""
         from core.websocket_server import WebSocketServer
 
-        _server = WebSocketServer(host="localhost", port=8766)
+        _server = WebSocketServer(
+            host="localhost",
+            port=8766,
+            message_handler=None,
+            robot_info={"name": "test", "model": "mock"},
+            logger=logging.getLogger("test"),
+        )
 
         # 测试消息构建
         message = {"type": "test", "timestamp": 1699999999000, "data": {}}
