@@ -7,6 +7,7 @@ import asyncio
 import glob
 import os
 import subprocess
+from typing import Any
 
 import cv2
 import numpy as np
@@ -33,7 +34,7 @@ def yuyv_to_bgr(frame_1ch: np.ndarray, width: int, height: int) -> np.ndarray:
 class CameraManager:
     """摄像头管理器"""
 
-    def __init__(self, config: dict = None, logger=None):
+    def __init__(self, config: dict | None = None, logger=None):
         self.config = config or {}
         self.logger = logger
 
@@ -45,7 +46,7 @@ class CameraManager:
 
         # 摄像头列表
         self.cameras: dict[int, dict] = {}
-        self.active_streams: dict[int, CameraStream] = {}
+        self.active_streams: dict[int, CameraStream | SharedCameraStream] = {}
 
         # 初始化
         self._detect_cameras()
@@ -193,9 +194,9 @@ class CameraManager:
 
         return cameras
 
-    def _detect_usb_cameras(self, skip_indices: set = None) -> list[dict]:
+    def _detect_usb_cameras(self, skip_indices: set | None = None) -> list[dict[str, Any]]:
         """检测 USB 摄像头"""
-        cameras = []
+        cameras: list[dict[str, Any]] = []
         skip_indices = skip_indices or set()
 
         # 检测 /dev/video* 设备
@@ -221,7 +222,7 @@ class CameraManager:
 
         return cameras
 
-    async def start_stream(self, camera_id: int = None) -> dict:
+    async def start_stream(self, camera_id: int | None = None) -> dict:
         """启动视频流（支持帧共享：共享摄像头复用源摄像头的帧采集）"""
         if camera_id is None:
             camera_id = self.default_camera
@@ -243,6 +244,7 @@ class CameraManager:
         # 如果是共享摄像头，且源摄像头已在运行 → 复用其帧
         if shared_from is not None and shared_from in self.active_streams:
             source_stream = self.active_streams[shared_from]
+            assert isinstance(source_stream, CameraStream), "Source stream must be CameraStream"
             stream = SharedCameraStream(camera, source_stream, self.logger)
             await stream.start()
             self.active_streams[camera_id] = stream
@@ -336,7 +338,7 @@ class CameraManager:
         if self.logger:
             self.logger.info("All camera devices released")
 
-    def get_frame(self, camera_id: int = None) -> np.ndarray | None:
+    def get_frame(self, camera_id: int | None = None) -> np.ndarray | None:
         """获取帧（用于 MJPEG 流和 WebRTC）"""
         if camera_id is None:
             camera_id = self.default_camera
@@ -649,7 +651,7 @@ class SharedCameraStream:
 
     def __init__(self, camera_info: dict, source_stream: "CameraStream", logger=None):
         self.camera_info = camera_info
-        self.source = source_stream
+        self.source: CameraStream | None = source_stream
         self.logger = logger
         self.running = False
         self.resolution = source_stream.resolution

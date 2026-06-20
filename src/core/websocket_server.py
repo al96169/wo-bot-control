@@ -7,6 +7,7 @@ WebSocket 信令服务器
 import asyncio
 import json
 import uuid
+from typing import Any
 
 import websockets
 
@@ -15,7 +16,7 @@ try:
     from websockets.asyncio.server import ServerConnection
 except ImportError:
     # websockets 9.x 兼容
-    from websockets import WebSocketServerProtocol as ServerConnection
+    from websockets import WebSocketServerProtocol as ServerConnection  # type: ignore[no-redef]
 
 
 class WebSocketServer:
@@ -29,7 +30,7 @@ class WebSocketServer:
         robot_info: dict,
         webrtc_service=None,
         gimbal_controller=None,
-        config: dict = None,
+        config: dict | None = None,
         logger=None,
     ):
         self.host = host
@@ -40,10 +41,10 @@ class WebSocketServer:
         self.gimbal_controller = gimbal_controller
         self.config = config or {}
         self.logger = logger
-        self._server = None
+        self._server: websockets.Server | None = None
         self._clients: set[ServerConnection] = set()
         self._ws_clients: dict[str, ServerConnection] = {}  # client_id -> WebSocket 连接
-        self._ws_broadcast_task: asyncio.Task = None
+        self._ws_broadcast_task: asyncio.Task[Any] | None = None
 
     async def start(self):
         """启动 WebSocket 信令服务器"""
@@ -87,11 +88,11 @@ class WebSocketServer:
         if auth_enabled:
             # 检查 URL query 参数中的 token
             token_from_url = None
-            if hasattr(websocket, "request") and hasattr(websocket.request, "query"):
+            if hasattr(websocket, "request") and hasattr(websocket.request, "query"):  # type: ignore[union-attr]
                 try:
                     from urllib.parse import parse_qs
 
-                    qs = parse_qs(websocket.request.query)
+                    qs = parse_qs(websocket.request.query)  # type: ignore[union-attr]
                     token_from_url = qs.get("token", [None])[0]
                 except Exception:
                     pass

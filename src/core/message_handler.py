@@ -22,7 +22,7 @@ class MessageHandler:
         system_collector=None,
         motion_controller=None,
         camera_manager=None,
-        config: dict = None,
+        config: dict | None = None,
         logger=None,
     ):
         self.system_collector = system_collector
@@ -95,7 +95,7 @@ class MessageHandler:
             await self.motion_controller.stop()
         return {"type": "motion_ack", "data": {"linear": 0, "angular": 0}}
 
-    async def _handle_gimbal(self, data: dict) -> dict:
+    async def _handle_gimbal(self, data: dict) -> dict | None:
         """处理云台控制"""
         if not hasattr(self, "gimbal_controller") or not self.gimbal_controller:
             return {"type": "error", "data": {"code": 503, "message": "Gimbal not available"}}
@@ -170,7 +170,7 @@ class MessageHandler:
             return
         self._gimbal_running.set()
         loop = asyncio.get_event_loop()
-        self._gimbal_task = loop.run_in_executor(None, self._gimbal_thread_fn)
+        self._gimbal_task = loop.run_in_executor(None, self._gimbal_thread_fn)  # type: ignore[assignment]
 
     def _stop_gimbal_loop(self):
         """停止云台持续移动循环"""
@@ -768,7 +768,7 @@ class MessageHandler:
                 )
 
             # 按信号强度排序
-            networks.sort(key=lambda n: n["signal"], reverse=True)
+            networks.sort(key=lambda n: n["signal"], reverse=True)  # type: ignore[arg-type, return-value]
 
             return {
                 "type": "wifi_scan_result",

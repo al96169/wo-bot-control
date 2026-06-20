@@ -84,7 +84,7 @@ try:
 
         raise ConnectionError("No compatible candidate pair found")
 
-    AioiceConnection.connect = _aioice_connect_patched
+    AioiceConnection.connect = _aioice_connect_patched  # type: ignore[method-assign]
     _PATCH_LOG.info("aioice Connection.connect() PATCHED for Python 3.7 ICE fix")
 except Exception as _patch_err:
     _PATCH_LOG.warning("aioice monkey-patch FAILED: %s", _patch_err)
@@ -347,7 +347,7 @@ class WebRTCService:
                     sdpMLineIndex=sdp_mline_index if sdp_mline_index is not None else 0,
                 )
                 # aiortc 0.9.10 的 addIceCandidate 是同步方法，不是 async
-                pc.addIceCandidate(ice)
+                pc.addIceCandidate(ice)  # type: ignore[unused-coroutine]
                 self.logger.info(
                     f"[{client_id}] ICE candidate added: {cand_type} {ip}:{port} sdpMid={sdp_mid} mline={sdp_mline_index}"
                 )

@@ -6,6 +6,8 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +136,7 @@ class PCA9685Gimbal(GimbalInterface):
         if self._pca is None:
             return
 
-        angle = max(0, min(180, angle))
+        angle = int(max(0, min(180, angle)))
         self._current_angles[channel] = angle
 
         try:
@@ -287,7 +289,7 @@ class RosmasterGimbal(GimbalInterface):
         if not self._ensure_init():
             raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
 
-        angle = max(0, min(180, angle))
+        angle = int(max(0, min(180, angle)))
         self._current_angles[channel] = angle
         servo_id = self.pan_channel if channel == 0 else self.tilt_channel
 
@@ -301,8 +303,8 @@ class RosmasterGimbal(GimbalInterface):
         if not self._ensure_init():
             raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
 
-        pan = max(0, min(180, pan_angle))
-        tilt = max(0, min(180, tilt_angle))
+        pan = int(max(0, min(180, pan_angle)))
+        tilt = int(max(0, min(180, tilt_angle)))
         self._current_angles[0] = pan
         self._current_angles[1] = tilt
 
@@ -321,8 +323,8 @@ class RosmasterGimbal(GimbalInterface):
         set_pwm_servo_all 单包发送替代两次 set_pwm_servo 节省 2ms sleep"""
         if not self._ensure_init():
             raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
-        self._current_angles[0] = max(0, min(180, pan_angle))
-        self._current_angles[1] = max(0, min(180, tilt_angle))
+        self._current_angles[0] = int(max(0, min(180, pan_angle)))
+        self._current_angles[1] = int(max(0, min(180, tilt_angle)))
         # 四路角度: s1,s2 未用=255, s3=tilt, s4=pan
         s1 = s2 = 255
         s3 = round(tilt_angle) if self.tilt_channel == 3 else 255
@@ -341,7 +343,7 @@ class RosmasterGimbal(GimbalInterface):
 class GimbalController:
     """云台控制器 - 管理二轴云台"""
 
-    def __init__(self, config: dict = None, logger_instance=None):
+    def __init__(self, config: dict | None = None, logger_instance=None):
         self.config = config or {}
         self.logger = logger_instance or logger
 
@@ -367,7 +369,7 @@ class GimbalController:
         self.tilt_invert = self.config.get("tilt_invert", False)
 
         # 限位回调: async fn(axis: str, limit: float, direction: str)
-        self.on_limit: callable = None
+        self.on_limit: Callable[..., Any] | None = None
 
     def _create_hardware(self) -> GimbalInterface:
         """根据配置创建硬件后端"""

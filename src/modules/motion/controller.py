@@ -11,7 +11,7 @@ from .hardware import HardwareInterface, create_hardware
 class MotionController:
     """运动控制器"""
 
-    def __init__(self, config: dict = None, logger=None, hardware: HardwareInterface = None):
+    def __init__(self, config: dict | None = None, logger=None, hardware: HardwareInterface | None = None):
         self.config = config or {}
         self.logger = logger
 
@@ -48,7 +48,7 @@ class MotionController:
             if self.logger:
                 self.logger.warning(f"Invalid drive type: {drive_type}")
 
-    async def set_velocity(self, linear: float, angular: float, mode: str = None):
+    async def set_velocity(self, linear: float, angular: float, mode: str | None = None):
         """设置速度（兼容旧版双轴协议）"""
         if self.emergency_stopped:
             if self.logger:
@@ -75,7 +75,7 @@ class MotionController:
         if self.logger:
             self.logger.debug(f"Velocity set: linear={linear:.2f}, angular={angular:.2f}")
 
-    async def set_mecanum_velocity(self, v_x: float, v_y: float, v_z: float, mode: str = None):
+    async def set_mecanum_velocity(self, v_x: float, v_y: float, v_z: float, mode: str | None = None):
         """设置麦轮三轴速度 (v_x=前后, v_y=左右平移, v_z=旋转)"""
         if self.emergency_stopped:
             if self.logger:

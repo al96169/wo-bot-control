@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 class ExtensionModule(ABC):
     """扩展模块基类"""
 
-    def __init__(self, module_id: str, config: dict = None, logger=None):
+    def __init__(self, module_id: str, config: dict | None = None, logger=None):
         self.module_id = module_id
         self.config = config or {}
         self.logger = logger

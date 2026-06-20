@@ -31,7 +31,7 @@ def _get_local_ipv4_addresses() -> list[str]:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
             ip = info[4][0]
-            if ip and not ip.startswith("127.") and ip not in result:
+            if ip and not str(ip).startswith("127.") and ip not in result:
                 result.append(ip)
     except Exception:
         pass
@@ -81,7 +81,7 @@ class MDNSService:
                 name=service_name,
                 port=self.port,
                 properties=properties,
-                addresses=addresses,
+                addresses=addresses,  # type: ignore[arg-type]
             )
 
             # register_service 也是同步阻塞，放到线程池

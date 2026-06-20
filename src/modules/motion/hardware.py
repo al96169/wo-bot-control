@@ -167,7 +167,7 @@ class SerialHardware(HardwareInterface):
 class GPIOHardware(HardwareInterface):
     """Jetson GPIO 硬件后端 - 通过 PWM 控制电机"""
 
-    def __init__(self, pins: dict = None):
+    def __init__(self, pins: dict | None = None):
         # 默认引脚映射 (Jetson GPIO)
         self.pins = pins or {
             "front_left": {"pwm": 32, "dir1": 33, "dir2": 35},

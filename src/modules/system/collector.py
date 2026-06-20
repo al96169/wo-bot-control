@@ -86,7 +86,7 @@ class SystemCollector:
                 self.logger.error(f"System collection error: {e}")
             return {}
 
-    async def _get_cpu_temperature(self) -> float:
+    async def _get_cpu_temperature(self) -> float | None:
         """获取 CPU 温度（Jetson 特有）"""
         try:
             # Jetson Nano 温度文件路径
