@@ -204,22 +204,7 @@ class WoBotControl:
         self.system_collector = SystemCollector(self.logger)
         self.logger.info("System collector initialized")
 
-        # 运动控制
-        motion_config = self.config.get("motion", {})
-        self.motion_controller = MotionController(motion_config, self.logger)
-        self.logger.info("Motion controller initialized")
-
-        # 摄像头管理（可选）
-        camera_config = self.config.get("camera", {})
-        if camera_config.get("enabled", True) and CAMERA_AVAILABLE and CameraManager:
-            self.camera_manager = CameraManager(camera_config, self.logger)
-            self.logger.info("Camera manager initialized")
-        else:
-            self.camera_manager = None
-            if not CAMERA_AVAILABLE:
-                self.logger.warning("Camera manager disabled (opencv not available)")
-
-        # 云台控制（可选）
+        # 云台控制（先初始化，因为运动控制需要共享其 Rosmaster Bot 串口实例）
         gimbal_config = self.config.get("gimbal", {})
         if gimbal_config.get("enabled", False) and GIMBAL_AVAILABLE and create_gimbal:
             try:
@@ -231,6 +216,35 @@ class WoBotControl:
         else:
             self.gimbal_controller = None
             self.logger.info("Gimbal controller disabled")
+
+        # 运动控制（与云台共享 Rosmaster Bot，避免重复打开串口）
+        motion_config = self.config.get("motion", {})
+        shared_bot = None
+        if self.gimbal_controller is not None:
+            hw = getattr(self.gimbal_controller, '_hardware', None)
+            if hw is not None and hasattr(hw, '_ensure_init'):
+                hw._ensure_init()  # 触发懒加载，创建 Rosmaster Bot
+                shared_bot = getattr(hw, '_bot', None)
+                if shared_bot is not None:
+                    self.logger.info("Motion will share Rosmaster Bot instance with gimbal")
+
+        if shared_bot is not None:
+            from modules.motion.hardware import create_hardware
+            motion_hw = create_hardware(motion_config, bot=shared_bot)
+            self.motion_controller = MotionController(motion_config, self.logger, hardware=motion_hw)
+        else:
+            self.motion_controller = MotionController(motion_config, self.logger)
+        self.logger.info("Motion controller initialized")
+
+        # 摄像头管理（可选）
+        camera_config = self.config.get("camera", {})
+        if camera_config.get("enabled", True) and CAMERA_AVAILABLE and CameraManager:
+            self.camera_manager = CameraManager(camera_config, self.logger)
+            self.logger.info("Camera manager initialized")
+        else:
+            self.camera_manager = None
+            if not CAMERA_AVAILABLE:
+                self.logger.warning("Camera manager disabled (opencv not available)")
 
         # 舞蹈控制（始终可用，依赖运动控制器）
         try:

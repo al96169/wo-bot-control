@@ -32,13 +32,6 @@ class MotionController:
         self.current_angular = 0.0
         self.current_mode = self.config.get("default_mode", "manual")
 
-        # 急停状态
-        self.emergency_stopped = False
-
-        # ROS2 相关（可选）
-        self.ros_enabled = False
-        self.ros_publisher = None
-
     def set_drive_type(self, drive_type: str):
         """设置驱动类型"""
         valid_types = ["mecanum", "differential", "ackermann"]
@@ -52,11 +45,6 @@ class MotionController:
 
     async def set_velocity(self, linear: float, angular: float, mode: str | None = None):
         """设置速度（兼容旧版双轴协议）"""
-        if self.emergency_stopped:
-            if self.logger:
-                self.logger.warning("Motion blocked: emergency stop active")
-            return
-
         linear = max(-1.0, min(1.0, linear))
         angular = max(-1.0, min(1.0, angular))
         linear *= self.max_linear_speed
@@ -79,11 +67,6 @@ class MotionController:
 
     async def set_mecanum_velocity(self, v_x: float, v_y: float, v_z: float, mode: str | None = None):
         """设置麦轮三轴速度 (v_x=前后, v_y=左右平移, v_z=旋转)"""
-        if self.emergency_stopped:
-            if self.logger:
-                self.logger.warning("Motion blocked: emergency stop active")
-            return
-
         v_x = max(-1.0, min(1.0, v_x))
         v_y = max(-1.0, min(1.0, v_y))
         v_z = max(-5.0, min(5.0, v_z))
@@ -160,22 +143,6 @@ class MotionController:
         """停止运动"""
         await self.set_velocity(0, 0)
 
-    async def emergency_stop(self):
-        """急停"""
-        self.emergency_stopped = True
-        self.current_linear = 0.0
-        self.current_angular = 0.0
-        await self.hardware.emergency_stop()
-        if self.logger:
-            self.logger.warning("Emergency stop activated!")
-
-    async def release_emergency_stop(self):
-        """释放急停"""
-        self.emergency_stopped = False
-        await self.hardware.release()
-        if self.logger:
-            self.logger.info("Emergency stop released")
-
     def get_status(self) -> dict:
         """获取运动状态"""
         return {
@@ -183,7 +150,6 @@ class MotionController:
             "angular": self.current_angular,
             "mode": self.current_mode,
             "drive_type": self.drive_type,
-            "emergency_stopped": self.emergency_stopped,
             "max_linear_speed": self.max_linear_speed,
             "max_angular_speed": self.max_angular_speed,
         }

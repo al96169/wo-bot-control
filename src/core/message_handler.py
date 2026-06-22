@@ -54,6 +54,13 @@ class MessageHandler:
         """处理心跳"""
         return {"type": "pong", "data": {"ts": data.get("ts", 0)}}
 
+    async def _handle_subscribe(self, data: dict) -> dict:
+        """处理 DataChannel 事件订阅"""
+        events = data.get("events", [])
+        if self.logger:
+            self.logger.info(f"DataChannel subscribe to events: {events}")
+        return {"type": "subscribed", "data": {"events": events}}
+
     async def _handle_get_status(self, data: dict) -> dict:
         """处理状态请求"""
         status_data = {}
@@ -215,20 +222,6 @@ class MessageHandler:
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Gimbal thread error: {e}")
-
-    async def _handle_emergency_stop(self, data: dict) -> dict:
-        """处理急停"""
-        if self.motion_controller:
-            await self.motion_controller.emergency_stop()
-        self.logger.warning("Emergency stop triggered!")
-        return {"type": "emergency_stop_ack", "data": {}}
-
-    async def _handle_emergency_release(self, data: dict) -> dict:
-        """释放急停"""
-        if self.motion_controller:
-            await self.motion_controller.release_emergency_stop()
-        self.logger.info("Emergency stop released")
-        return {"type": "emergency_release_ack", "data": {}}
 
     async def _handle_motion_config(self, data: dict) -> dict:
         """处理运动配置"""

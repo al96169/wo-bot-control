@@ -50,6 +50,7 @@ class WebSocketServer:
         self._server: websockets.Server | None = None
         self._clients: set[ServerConnection] = set()
         self._ws_clients: dict[str, ServerConnection] = {}  # client_id -> WebSocket 连接
+        self._client_real_ips: dict[str, str] = {}  # client_id -> 真实客户端 IP（来自代理传递的 client_ip 参数）
         self._ws_broadcast_task: asyncio.Task[Any] | None = None
 
     async def start(self):
@@ -58,8 +59,8 @@ class WebSocketServer:
             self._handle_client,
             self.host,
             self.port,
-            ping_interval=20,
-            ping_timeout=10,
+            ping_interval=5,
+            ping_timeout=5,
             max_size=2**20,
             origins=None,  # 允许所有 Origin（浏览器跨域 WebSocket 需要）
         )
@@ -203,6 +204,12 @@ class WebSocketServer:
                 pv_str = qs.get("protocol_version", [None])[0]
                 if pv_str is not None:
                     client_protocol = int(pv_str)
+                # 提取代理传递的真实客户端 IP（用于修复 mDNS .local 解析）
+                client_ip_from_proxy = qs.get("client_ip", [None])[0]
+                if client_ip_from_proxy:
+                    self._client_real_ips[client_id] = client_ip_from_proxy
+                    if self.logger:
+                        self.logger.info(f"[{client_id}] Client real IP from proxy: {client_ip_from_proxy}")
         except Exception:
             pass
 
@@ -276,6 +283,7 @@ class WebSocketServer:
         finally:
             self._clients.discard(websocket)
             self._ws_clients.pop(client_id, None)
+            self._client_real_ips.pop(client_id, None)
             if self.webrtc_service:
                 await self.webrtc_service._cleanup_connection(client_id)
             if self.logger:
@@ -310,6 +318,10 @@ class WebSocketServer:
                         }
                     )
                 )
+                # 注意：不发送额外的 ICE candidate。猴子补丁仅用于强制服务端 pair，
+                # SDP Answer 中的 a=candidate 行已包含浏览端需要的所有候选地址。
+                # 从 _PENDING_CANDIDATES 提取的 candidate 端口与 set_selected_pair
+                # 实际选中的 protocol 端口不一致，会导致 DTLS 连通失败。
             except Exception as e:
                 import traceback
 
@@ -328,38 +340,53 @@ class WebSocketServer:
         if msg_type == "webrtc_ice_candidate":
             if self.webrtc_service:
                 cand_text = msg_data.get("candidate", "")
+                sdp_mid = msg_data.get("sdpMid", "")
+                sdp_mline = msg_data.get("sdpMLineIndex", 0)
                 self.logger.info(f"[{client_id}] Received ICE candidate from client: {cand_text[:80]}")
+
+                client_real_ip = self._client_real_ips.get(client_id, "")
+
+                # mDNS .local 双候选策略：
+                # Jetson mDNS 解析 .local 始终返回 192.168.1.53（Mac 代理 IP），
+                # 不能直接替换。改为保留原始 .local 候选，同时追加一个真实 IP 候选。
+                # 真实 IP 候选用更高优先级（2122252543），且先添加到 _remote_candidates，
+                # 确保猴子补丁优先尝试真实 IP -> 浏览器。
+                if ".local" in cand_text and client_real_ip:
+                    parts = cand_text.strip().split()
+                    if len(parts) >= 6 and ".local" in parts[4]:
+                        # 用更高优先级构造真实 IP candidate（放在 .local 之前尝试）
+                        new_foundation = "h" + parts[0].replace("candidate:", "")[:9]
+                        ip_cand = (
+                            f"candidate:{new_foundation} {parts[1]} {parts[2]} "
+                            f"2122252543 {client_real_ip} {parts[5]} typ host"
+                        )
+                        self.logger.info(
+                            f"[{client_id}] Adding host candidate with real IP first: "
+                            f"{client_real_ip}:{parts[5]}"
+                        )
+                        # 先添加真实 IP 候选（猴子补丁按添加顺序尝试，优先命中）
+                        await self.webrtc_service.add_ice_candidate(
+                            client_id,
+                            candidate=ip_cand,
+                            sdp_mid=sdp_mid,
+                            sdp_mline_index=sdp_mline,
+                        )
+                        # 再添加原始 .local 候选作为兜底
+                        await self.webrtc_service.add_ice_candidate(
+                            client_id,
+                            candidate=cand_text,
+                            sdp_mid=sdp_mid,
+                            sdp_mline_index=sdp_mline,
+                        )
+                        return
+
+                # 非 .local 候选（srflx/relay）或没有真实 IP，直接添加
                 await self.webrtc_service.add_ice_candidate(
                     client_id,
                     candidate=cand_text,
-                    sdp_mid=msg_data.get("sdpMid", ""),
-                    sdp_mline_index=msg_data.get("sdpMLineIndex", 0),
+                    sdp_mid=sdp_mid,
+                    sdp_mline_index=sdp_mline,
                 )
-                # Workaround: 客户端 host candidate 使用 mDNS .local 地址（如 xxxx.local），
-                # Jetson 端无法解析这些主机名导致 ICE 连通失败。
-                # 用 WebSocket 连接的真实 IP 构造额外 host candidate
-                if ".local" in cand_text and remote:
-                    client_ip = remote[0] if isinstance(remote, tuple) else str(remote)
-                    sdp_mid = msg_data.get("sdpMid", "") or "0"
-                    sdp_mline = msg_data.get("sdpMLineIndex", 0)
-                    # 从原 candidate 中提取 port, protocol, priority
-                    parts = cand_text.strip().split()
-                    if len(parts) >= 8 and parts[0].startswith("candidate:"):
-                        try:
-                            port = parts[5]
-                            protocol = parts[2]
-                            # 构造新 foundation（避免与原 candidate 冲突）
-                            new_foundation = f"h{parts[0].split(':', 1)[1]}"
-                            new_cand = f"candidate:{new_foundation} 1 {protocol} 2122252543 {client_ip} {port} typ host"
-                            self.logger.info(f"[{client_id}] Adding extra host candidate with real IP: {new_cand[:80]}")
-                            await self.webrtc_service.add_ice_candidate(
-                                client_id,
-                                candidate=new_cand,
-                                sdp_mid=sdp_mid,
-                                sdp_mline_index=sdp_mline,
-                            )
-                        except Exception as e:
-                            self.logger.warning(f"[{client_id}] Failed to add extra host candidate: {e}")
             return
 
         # ---- subscribe：启动 WebSocket 状态广播 ----

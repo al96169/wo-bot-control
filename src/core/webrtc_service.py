@@ -9,6 +9,8 @@ WebRTC 服务管理
 
 import asyncio
 import logging
+import socket
+import time
 
 import cv2
 import numpy as np
@@ -16,116 +18,102 @@ from av import VideoFrame
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 from aiortc import RTCDataChannel, VideoStreamTrack, RTCIceCandidate
 
+from .aioice_patch import apply as _apply_aioice_patch
+from .aioice_patch import get_pending_candidates, clear_pending_candidates
+
 STUN_SERVER = "stun:stun.l.google.com:19302"
 
-# ===== Monkey-patch: 修复 aioice 0.6.18 + Python 3.7 ICE 连通性问题 =====
-# 在 Python 3.7 上，aioice 的 STUN 连通性检查 transport 会变成 NoneType，
-# 导致 ICE 永远停留在 "new" 状态。这里用 set_selected_pair 绕过检查。
-_PATCH_LOG = logging.getLogger("wobot")
-_PENDING_CANDIDATES: list = []  # 模块级：存放待发送的 ICE candidate 信息
-_PENDING_CALLBACKS: dict = {}   # 模块级：client_id -> send_callback，供 monkey-patch 发送候选
+# 启动时应用猴子补丁（全局一次）
+_apply_aioice_patch()
 
 
-def _build_candidate_str(lc) -> str:
-    """从 aioice LocalCandidate 构建 SDP candidate 字符串"""
-    return (
-        f"candidate:{lc.foundation} {lc.component} "
-        f"udp {lc.priority} {lc.host} {lc.port} typ {getattr(lc, 'type', 'host')}"
-    )
+def _resolve_server_ip(config: dict) -> str:
+    """解析服务端对外公告 IP
 
+    优先级: config.server.advertised_ip > 非 0.0.0.0 的 host > 自动探测本机局域网 IP
+    """
+    server_cfg = config.get("server", {})
+    advertised = server_cfg.get("advertised_ip", "")
+    if advertised:
+        return advertised
 
-def _schedule_flush_candidates(component: int):
-    """调度发送所有已收集的 ICE candidate（从任意 client_id 发送）"""
-    loop = asyncio.get_event_loop()
-    loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_flush_all_candidates()))
+    host = server_cfg.get("host", "0.0.0.0")
+    if host and host != "0.0.0.0":
+        return host
 
-
-try:
-    import aioice
-    from aioice.ice import Connection as AioiceConnection
-    _aioice_connect_original = AioiceConnection.connect
-
-    async def _aioice_connect_patched(self):
-        if not self._local_candidates_end:
-            raise ConnectionError("Local candidates gathering was not performed")
-        if self.remote_username is None or self.remote_password is None:
-            raise ConnectionError("Remote username or password is missing")
-
-        # 等待远端 candidate（通过 WebSocket 信令异步到达）
-        for _ in range(100):
-            if self._remote_candidates:
-                break
-            await asyncio.sleep(0.1)
-
-        if not self._remote_candidates:
-            raise ConnectionError("No remote candidates received")
-
-        # 找到第一个兼容的 candidate pair 并强制选中
-        for remote_cand in self._remote_candidates:
-            for protocol in self._protocols:
-                if protocol.local_candidate.can_pair_with(remote_cand):
-                    self.set_selected_pair(
-                        component=protocol.local_candidate.component,
-                        local_foundation=protocol.local_candidate.foundation,
-                        remote_foundation=remote_cand.foundation,
-                    )
-                    # 收集服务端 ICE candidate，以便信令发送给客户端
-                    lc = protocol.local_candidate
-                    cand = _build_candidate_str(lc)
-                    _PENDING_CANDIDATES.append(cand)
-                    _PATCH_LOG.info(
-                        "ICE forced: local=%s:%d remote=%s:%d component=%d",
-                        lc.host, lc.port,
-                        remote_cand.host, remote_cand.port,
-                        lc.component,
-                    )
-                    # 通过模块级回调立即发送（不依赖 on_icecandidate 事件）
-                    _schedule_flush_candidates(lc.component)
-                    return  # 成功返回 → start() 会将 ICE state 设为 "completed"
-
-        raise ConnectionError("No compatible candidate pair found")
-
-    AioiceConnection.connect = _aioice_connect_patched  # type: ignore[method-assign]
-    _PATCH_LOG.info("aioice Connection.connect() PATCHED for Python 3.7 ICE fix")
-except Exception as _patch_err:
-    _PATCH_LOG.warning("aioice monkey-patch FAILED: %s", _patch_err)
+    # 自动探测: 连接外部地址获取本机局域网 IP
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 
 class CameraVideoTrack(VideoStreamTrack):
-    """从 CameraManager 读取帧并转换为 WebRTC 视频轨"""
+    """从 CameraManager 读取帧并转换为 WebRTC 视频轨
+
+    Jetson Nano VP8 软编码压力大时会落后于实时时钟，导致延迟递增。
+    这里用 wall-clock 时间做帧丢弃：如果编码落后超过 1 帧间隔，
+    丢弃中间帧只保留最新一帧，保持低延迟。
+    """
 
     kind = "video"
 
-    def __init__(self, camera_manager, camera_id=0, fps=30, logger=None):
+    def __init__(self, camera_manager, camera_id=0, fps=30, logger=None, client_id=""):
         super().__init__()
         self.camera_manager = camera_manager
         self.camera_id = camera_id
         self.fps = fps
         self.logger = logger
-        self._timestamp = 0
+        self.client_id = client_id
         self._frame_count = 0
+        self._dropped_count = 0
+        self._last_sent_time = 0.0  # wall-clock time of last encoded frame
 
     async def recv(self):
-        """aiortc 每帧调用一次，返回 av.VideoFrame"""
-        pts, time_base = await self.next_timestamp()
+        frame_interval = 1.0 / self.fps
+        now = time.time()
+
+        # 丢弃落后帧：如果距上次编码已超过 2 倍帧间隔，只保留最新帧
+        if self._last_sent_time > 0 and now - self._last_sent_time > frame_interval * 2:
+            # 跳过落后帧的时间戳，只保留最后一个
+            skip_count = int((now - self._last_sent_time) / frame_interval) - 1
+            for _ in range(skip_count):
+                await self.next_timestamp()
+            self._dropped_count += skip_count - 1 if skip_count > 1 else 0
+            # 取最新帧
+            pts, time_base = await self.next_timestamp()
+        else:
+            pts, time_base = await self.next_timestamp()
+
+        self._last_sent_time = now
 
         frame = self.camera_manager.get_frame(self.camera_id)
         if frame is None:
             frame = np.zeros((480, 640, 3), dtype=np.uint8)
             self._frame_count += 1
             if self._frame_count == 1 and self.logger:
-                self.logger.warning(f"CameraVideoTrack(cam={self.camera_id}): no frame from camera, using black")
+                self.logger.warning(
+                    f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
+                    f"no frame from camera, using black"
+                )
         else:
             frame = frame.copy()
             self._frame_count += 1
             if self._frame_count == 1 and self.logger:
                 self.logger.info(
-                    f"CameraVideoTrack(cam={self.camera_id}): first frame "
-                    f"shape={frame.shape}, mean=({frame.mean():.0f})"
+                    f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
+                    f"first frame shape={frame.shape}, mean=({frame.mean():.0f})"
                 )
             elif self._frame_count % 30 == 0 and self.logger:
+                dropped_info = f", dropped={self._dropped_count}" if self._dropped_count else ""
                 self.logger.info(
-                    f"CameraVideoTrack(cam={self.camera_id}): frame #{self._frame_count} shape={frame.shape}, ok"
+                    f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
+                    f"frame #{self._frame_count} shape={frame.shape}, ok{dropped_info}"
                 )
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -148,172 +136,92 @@ class WebRTCService:
         self._connections: dict[str, RTCPeerConnection] = {}
         self._data_channels: dict[str, RTCDataChannel] = {}
         self._video_tracks: dict[str, dict[int, CameraVideoTrack]] = {}
+        self._cleaning_up: set[str] = set()
 
-    async def _send_candidates_to_client(self, client_id: str, send_callback):
-        """将模块级 _PENDING_CANDIDATES 通过信令发送给客户端"""
-        global _PENDING_CANDIDATES
-        pending = _PENDING_CANDIDATES[:]
-        _PENDING_CANDIDATES = []
+        # 服务端对外公告 IP（用于 SDP ICE candidate 中替换 .local）
+        self._server_ip = _resolve_server_ip(self.config)
+        self.logger.info(f"WebRTC server IP resolved: {self._server_ip}")
+
+    # ---------- ICE candidate 发送 ----------
+
+    async def _flush_candidates(self, client_id: str, send_callback) -> int:
+        """发送暂存的 ICE candidate 到客户端。
+
+        必须在 send_callback(webrtc_answer) 之后调用，确保客户端已 setRemoteDescription。
+        返回发送的 candidate 数量。
+        """
+        pending = get_pending_candidates()
+        if not pending:
+            return 0
+
         for cand_str in pending:
             payload = {
                 "type": "webrtc_ice_candidate",
-                "data": {
-                    "candidate": cand_str,
-                    "sdpMid": "0",
-                    "sdpMLineIndex": 0,
-                },
+                "data": {"candidate": cand_str, "sdpMid": "", "sdpMLineIndex": 0},
             }
             try:
                 await send_callback(payload)
-                self.logger.info(f"[{client_id}] Sent host ICE candidate: {cand_str[:80]}")
+                self.logger.info(f"[{client_id}] Sent host ICE candidate (post-answer): {cand_str[:80]}")
             except Exception as e:
                 self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}")
 
-    # ---- 模块级 ICE 刷新函数 ----
+        self.logger.info(f"[{client_id}] ICE candidates flushed ({len(pending)} candidates)")
+        return len(pending)
 
+    # ---------- SDP 后处理 ----------
 
-async def _flush_all_candidates():
-    """模块级：将 _PENDING_CANDIDATES 发送给所有注册的客户端"""
-    global _PENDING_CANDIDATES
-    pending = _PENDING_CANDIDATES[:]
-    _PENDING_CANDIDATES = []
-    for client_id, send_callback in list(_PENDING_CALLBACKS.items()):
-        for cand_str in pending:
-            payload = {
-                "type": "webrtc_ice_candidate",
-                "data": {
-                    "candidate": cand_str,
-                    "sdpMid": "0",
-                    "sdpMLineIndex": 0,
-                },
-            }
-            try:
-                await send_callback(payload)
-                _PATCH_LOG.info(f"[{client_id}] Sent host ICE candidate: {cand_str[:80]}")
-            except Exception as e:
-                _PATCH_LOG.error(f"[{client_id}] Failed to send ICE candidate: {e}")
+    def _postprocess_sdp(self, client_id: str, sdp: str) -> str:
+        """SDP 回答后处理: 注入 ice-lite / 替换 .local → 真实 IP"""
 
-
-class WebRTCService:
-    """WebRTC 服务管理"""
-
-    def __init__(self, message_handler, camera_manager=None, robot_info=None, config=None, logger=None):
-        self.message_handler = message_handler
-        self.camera_manager = camera_manager
-        self.robot_info = robot_info or {}
-        self.config = config or {}
-        self.logger = logger or logging.getLogger("wobot")
-        self._connections: dict[str, RTCPeerConnection] = {}
-        self._data_channels: dict[str, RTCDataChannel] = {}
-        self._video_tracks: dict[str, dict[int, CameraVideoTrack]] = {}
-
-    async def _send_candidates_to_client(self, client_id: str, send_callback):
-        """将模块级 _PENDING_CANDIDATES 通过信令发送给客户端"""
-        global _PENDING_CANDIDATES
-        pending = _PENDING_CANDIDATES[:]
-        _PENDING_CANDIDATES = []
-        for cand_str in pending:
-            payload = {
-                "type": "webrtc_ice_candidate",
-                "data": {
-                    "candidate": cand_str,
-                    "sdpMid": "",
-                    "sdpMLineIndex": 0,
-                },
-            }
-            try:
-                await send_callback(payload)
-                self.logger.info(f"[{client_id}] Sent host ICE candidate: {cand_str[:80]}")
-            except Exception as e:
-                self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}")
-
-    async def create_peer_connection(self, client_id: str, sdp_offer: str, send_callback=None) -> str:
-        """处理客户端的 SDP offer，返回 SDP answer"""
-        # ===== 重置全局状态：清除上一次连接的残留 =====
-        global _PENDING_CANDIDATES
-        # 清除所有已失效的回调（只保留即将注册的 client_id）
-        stale = [cid for cid in _PENDING_CALLBACKS if cid != client_id]
-        for cid in stale:
-            _PENDING_CALLBACKS.pop(cid, None)
-            self.logger.info(f"[{client_id}] Cleared stale callback: {cid}")
-        _PENDING_CANDIDATES = []
-
-        # 注册回调必须在 setRemoteDescription 之前，因为 ICE monkey-patch
-        # 在 setRemoteDescription 期间就会触发，否则 _flush_all_candidates 找不到客户端
-        if send_callback:
-            _PENDING_CALLBACKS[client_id] = send_callback
-            self.logger.info(f"[{client_id}] Callback registered for ICE candidates")
-        # 使用 STUN 辅助 ICE 连通（局域网仍以 host candidates 为主）
-        pc = RTCPeerConnection(
-            configuration=RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])])
+        orig_cands = [l for l in sdp.split("\r\n") if l.startswith("a=candidate")]
+        self.logger.info(
+            f"[{client_id}] Original SDP candidates ({len(orig_cands)}): "
+            f"{[c[:80] for c in orig_cands]}"
         )
 
-        # Cleanup old connection if client reconnects
-        old_pc = self._connections.get(client_id)
-        if old_pc:
-            self.logger.info(f"[{client_id}] Old connection found, cleaning up before reconnect")
-            await self._cleanup_connection(client_id)
+        new_lines = []
+        ice_lite_inserted = False
+        replaced_count = 0
 
-        self._connections[client_id] = pc
+        for line in sdp.split("\r\n"):
+            # .local mDNS 替换为真实 IP
+            if line.startswith("a=candidate") and ".local" in line:
+                parts = line.split()
+                if len(parts) >= 6:
+                    old_ip = parts[4]
+                    parts[4] = self._server_ip
+                    line = " ".join(parts)
+                    replaced_count += 1
+                    self.logger.info(
+                        f"[{client_id}] SDP ice .local→IP: {old_ip}→{self._server_ip}"
+                    )
 
-        @pc.on("icecandidate")
-        async def on_icecandidate(candidate):
-            """将服务端 ICE candidate 发回客户端"""
-            if candidate and send_callback:
-                try:
-                    cand_str = candidate.candidate if hasattr(candidate, "candidate") else str(candidate)
-                    if cand_str:
-                        payload = {
-                            "type": "webrtc_ice_candidate",
-                            "data": {
-                                "candidate": cand_str,
-                                "sdpMid": getattr(candidate, "sdpMid", None) or "",
-                                "sdpMLineIndex": getattr(candidate, "sdpMLineIndex", None) or 0,
-                            },
-                        }
-                        await send_callback(payload)
-                        self.logger.info(f"[{client_id}] Sent ICE candidate: {cand_str[:80]}")
-                except Exception as e:
-                    self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}")
+            # 在第一个 m= 行之前注入 a=ice-lite
+            # 配合 aioice monkey-patch: 服务端不执行主动连通性检查，
+            # 由浏览器单侧验证 ICE 连通性
+            if not ice_lite_inserted and line.startswith("m="):
+                new_lines.append("a=ice-lite")
+                ice_lite_inserted = True
 
-        @pc.on("datachannel")
-        def on_datachannel(channel: RTCDataChannel):
-            self.logger.info(f"DataChannel opened by client {client_id}: {channel.label}")
-            self._data_channels[client_id] = channel
-            channel.on("message", lambda msg: asyncio.ensure_future(self._on_dc_message(client_id, msg)))
-            channel.on("close", lambda: self._on_dc_close(client_id))
+            new_lines.append(line)
 
-        @pc.on("iceconnectionstatechange")
-        def on_ice_state_change():
-            state = pc.iceConnectionState
-            self.logger.info(f"[{client_id}] ICE connection state: {state}")
-            if state in ("failed", "closed", "disconnected"):
-                asyncio.ensure_future(self._cleanup_connection(client_id))
+        sdp = "\r\n".join(new_lines)
 
-        # Process offer
-        offer = RTCSessionDescription(sdp=sdp_offer, type="offer")
-        await pc.setRemoteDescription(offer)
-        self.logger.info(f"[{client_id}] setRemoteDescription done")
+        # DTLS 角色修正: aiortc 0.9.10 错误地将 controlled → client (a=setup:active)
+        # 改为 passive 让 Jetson 成为 DTLS server，浏览器成为 DTLS client
+        # 配合 aioice_patch.py v5 wrapper，Jetson 的 start() 也会设为 server
+        sdp = sdp.replace("a=setup:active", "a=setup:passive")
 
-        # 添加视频轨（为每个实际检测到的摄像头创建一个）
-        if self.camera_manager:
-            for cam_id in sorted(self.camera_manager.cameras.keys()):
-                try:
-                    await self.camera_manager.start_stream(cam_id)
-                except Exception as e:
-                    self.logger.warning(f"[{client_id}] Camera {cam_id} start failed: {e}")
+        self.logger.info(
+            f"[{client_id}] ICE SDP postprocess: .local→IP={replaced_count}, "
+            f"ice-lite={'yes' if ice_lite_inserted else 'no'}"
+        )
+        return sdp
 
-            self._video_tracks[client_id] = {}
-            for cam_id in sorted(self.camera_manager.cameras.keys()):
-                try:
-                    video_track = CameraVideoTrack(self.camera_manager, camera_id=cam_id, fps=10, logger=self.logger)
-                    pc.addTrack(video_track)
-                    self._video_tracks[client_id][cam_id] = video_track
-                    self.logger.info(f"[{client_id}] Video track added (camera {cam_id})")
-                except Exception as e:
-                    self.logger.warning(f"[{client_id}] Failed to add video track camera {cam_id}: {e}")
+    # ---------- 编解码器回填 ----------
 
-        # aiortc 0.9.10 workaround: 客户端 offer 不含 video 时，手动填充默认编解码器 / MID / 载荷类型
+    def _ensure_transceiver_codecs(self, client_id: str, pc: RTCPeerConnection) -> None:
+        """aiortc 0.9.10 workaround: 客户端 offer 不含 video 时，手动填充默认编解码器"""
         try:
             import copy as _copy
             from aiortc import rtp as _rtp
@@ -351,94 +259,222 @@ class WebRTCService:
                 if t._offerDirection is None:
                     t._offerDirection = "sendrecv"
         except Exception as e:
-            self.logger.warning(f"[{client_id}] aiortc workaround error (non-fatal): {e}")
+            self.logger.warning(f"[{client_id}] aiortc codec backfill error (non-fatal): {e}")
 
-        # Create answer
+    # ---------- 视频轨设置 ----------
+
+    async def _setup_video_tracks(self, client_id: str, pc: RTCPeerConnection) -> None:
+        """为每个摄像头创建视频轨并绑定到 transceiver"""
+        if not self.camera_manager:
+            return
+
+        for cam_id in sorted(self.camera_manager.cameras.keys()):
+            try:
+                await self.camera_manager.start_stream(cam_id)
+            except Exception as e:
+                self.logger.warning(f"[{client_id}] Camera {cam_id} start failed: {e}")
+
+        self._video_tracks[client_id] = {}
+
+        transceivers = list(pc._RTCPeerConnection__transceivers)
+        video_transceivers = [t for t in transceivers if t.kind == "video"]
+        self.logger.info(
+            f"[{client_id}] Found {len(video_transceivers)} video transceivers "
+            f"(total={len(transceivers)})"
+        )
+
+        cam_ids = sorted(self.camera_manager.cameras.keys())
+
+        # 多客户端场景降低帧率，减少 Jetson Nano VP8 软编码 CPU 压力
+        # 注意: 此时新连接已加入 _connections，所以 len(_connections) 包含当前客户端
+        client_count = len(self._connections)
+        track_fps = 5 if client_count > 1 else 10
+
+        for i, cam_id in enumerate(cam_ids):
+            if i >= len(video_transceivers):
+                self.logger.warning(
+                    f"[{client_id}] No transceiver for camera {cam_id} "
+                    f"(only {len(video_transceivers)} video transceivers for {len(cam_ids)} cameras)"
+                )
+                continue
+
+            transceiver = video_transceivers[i]
+            transceiver.direction = "sendonly"
+            self.logger.info(
+                f"[{client_id}] Transceiver[{i}] → sendonly "
+                f"(mid={transceiver.mid}, kind={transceiver.kind})"
+            )
+
+            try:
+                video_track = CameraVideoTrack(
+                    self.camera_manager, camera_id=cam_id, fps=track_fps,
+                    logger=self.logger, client_id=client_id,
+                )
+                self._video_tracks[client_id][cam_id] = video_track
+
+                if transceiver.sender:
+                    transceiver.sender.replaceTrack(video_track)
+                    self.logger.info(
+                        f"[{client_id}] Video track on transceiver[{i}] "
+                        f"(camera {cam_id}, via replaceTrack)"
+                    )
+                else:
+                    self.logger.warning(
+                        f"[{client_id}] Transceiver[{i}] no sender, "
+                        f"fallback to addTrack for camera {cam_id}"
+                    )
+                    pc.addTrack(video_track)
+            except Exception as e:
+                self.logger.warning(
+                    f"[{client_id}] Failed to setup video track camera {cam_id}: {e}"
+                )
+
+    # ---------- 服务端 DataChannel ----------
+
+    def _create_server_data_channel(self, client_id: str, pc: RTCPeerConnection) -> None:
+        """创建服务端 DataChannel 用于命令下发"""
+        server_dc = pc.createDataChannel("wobot-control-srv")
+
+        @server_dc.on("open")
+        def on_open():
+            self.logger.info(f"[{client_id}] Server DataChannel opened!")
+            self._data_channels[client_id] = server_dc
+
+        @server_dc.on("message")
+        def on_msg(msg):
+            asyncio.ensure_future(self._on_dc_message(client_id, msg))
+
+        @server_dc.on("close")
+        def on_close():
+            self.logger.info(f"[{client_id}] Server DataChannel closed")
+            if self._data_channels.get(client_id) is server_dc:
+                asyncio.ensure_future(self._on_dc_close(client_id))
+
+        self.logger.info(f"[{client_id}] Server-side DC created: {server_dc.label}")
+
+    # ---------- 核心: 创建 PeerConnection ----------
+
+    async def create_peer_connection(self, client_id: str, sdp_offer: str, send_callback=None) -> str:
+        """处理客户端的 SDP offer，返回 SDP answer"""
+
+        pc = RTCPeerConnection(
+            configuration=RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])])
+        )
+
+        # 清理旧连接（幂等安全）
+        old_pc = self._connections.get(client_id)
+        if old_pc:
+            self.logger.info(f"[{client_id}] Old connection found, cleaning up before reconnect")
+            await self._cleanup_connection(client_id)
+
+        self._connections[client_id] = pc
+
+        # ---- 事件注册 ----
+
+        @pc.on("icecandidate")
+        async def on_icecandidate(candidate):
+            if candidate and send_callback:
+                try:
+                    cand_str = candidate.candidate if hasattr(candidate, "candidate") else str(candidate)
+                    if cand_str:
+                        await send_callback({
+                            "type": "webrtc_ice_candidate",
+                            "data": {
+                                "candidate": cand_str,
+                                "sdpMid": getattr(candidate, "sdpMid", None) or "",
+                                "sdpMLineIndex": getattr(candidate, "sdpMLineIndex", None) or 0,
+                            },
+                        })
+                        self.logger.info(f"[{client_id}] Sent ICE candidate: {cand_str[:80]}")
+                except Exception as e:
+                    self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}")
+
+        @pc.on("datachannel")
+        def on_datachannel(channel: RTCDataChannel):
+            self.logger.info(f"DataChannel opened by client {client_id}: {channel.label}")
+            self._data_channels[client_id] = channel
+            channel.on("message", lambda msg: asyncio.ensure_future(
+                self._on_dc_message(client_id, msg)))
+            channel.on("close", lambda: self._on_dc_close(client_id))
+
+        @pc.on("iceconnectionstatechange")
+        def on_ice_state_change():
+            state = pc.iceConnectionState
+            self.logger.info(f"[{client_id}] ICE connection state: {state}")
+            if state in ("failed", "closed", "disconnected"):
+                asyncio.ensure_future(self._cleanup_connection(client_id))
+
+        @pc.on("connectionstatechange")
+        def on_connection_state_change():
+            state = pc.connectionState
+            dtls_state = (
+                pc._RTCPeerConnection__dtlsTransport.state
+                if hasattr(pc, '_RTCPeerConnection__dtlsTransport')
+                else 'N/A'
+            )
+            self.logger.info(
+                f"[{client_id}] Connection state: {state}, "
+                f"ICE: {pc.iceConnectionState}, DTLS: {dtls_state}"
+            )
+            if state in ("failed", "closed"):
+                self.logger.warning(f"[{client_id}] Connection failed/closed, cleaning up")
+                asyncio.ensure_future(self._cleanup_connection(client_id))
+
+        # ---- SDP 协商 ----
+
+        offer = RTCSessionDescription(sdp=sdp_offer, type="offer")
+        await pc.setRemoteDescription(offer)
+        self.logger.info(f"[{client_id}] setRemoteDescription done")
+
+        # 设置视频轨（在 createAnswer 之前，确保 SDP 包含 m=video）
+        await self._setup_video_tracks(client_id, pc)
+
+        # 回填编解码器
+        self._ensure_transceiver_codecs(client_id, pc)
+
+        # 生成并处理 answer
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
-        # ===== ICE 候选提取 & SDP 注入 =====
-        # aiortc 的 on_icecandidate 从不触发（Python 3.7 + aioice 兼容性 bug）
-        # 方案：aiortc setLocalDescription 已写入候选到 SDP，但地址可能是 .local mDNS
-        # 直接读取 SDP 中的 a=candidate 行并替换 .local → 真实 IP
-        sdp = pc.localDescription.sdp
+        sdp = self._postprocess_sdp(client_id, pc.localDescription.sdp)
 
-        # 记录原始候选用于诊断
-        orig_cands = [l for l in sdp.split("\r\n") if l.startswith("a=candidate")]
-        self.logger.info(f"[{client_id}] Original SDP candidates ({len(orig_cands)}): {[c[:80] for c in orig_cands]}")
-
-        # 替换 .local 为真实 IP
-        server_ip = "192.168.1.47"
-        new_lines = []
-        replaced_count = 0
-        ice_lite_inserted = False
-        for line in sdp.split("\r\n"):
-            if line.startswith("a=candidate") and ".local" in line:
-                parts = line.split()
-                if len(parts) >= 6:
-                    old_ip = parts[4]
-                    parts[4] = server_ip
-                    replaced = " ".join(parts)
-                    self.logger.info(f"[{client_id}] SDP ice .local→IP: {old_ip}→{server_ip}")
-                    line = replaced
-                    replaced_count += 1
-            # 在第一个 m= 行之前插入 ice-lite（服务端不执行主动检查，由浏览器单侧验证）
-            if not ice_lite_inserted and line.startswith("m="):
-                new_lines.append("a=ice-lite")
-                ice_lite_inserted = True
-            new_lines.append(line)
-        sdp = "\r\n".join(new_lines)
-
-        injected_count = replaced_count
+        # 诊断: 确认 answer SDP 关键媒体行
+        has_app = "m=application" in sdp
+        has_video = "m=video" in sdp
         self.logger.info(
-            f"[{client_id}] ICE SDP: replaced .local→IP count={injected_count}, "
-            f"SDP has candidate={'a=candidate' in sdp}"
+            f"[{client_id}] Answer SDP: DataChannel={has_app}, Video={has_video}"
         )
+        if has_video:
+            vid_lines = [l for l in sdp.split("\r\n") if l.startswith("m=video") or l.startswith("a=rtpmap")]
+            self.logger.info(f"[{client_id}] Answer SDP video lines: {vid_lines[:5]}")
 
-        # 诊断：记录 answer SDP 是否包含 DataChannel
-        has_app = "m=application" in (sdp)
-        self.logger.info(f"[{client_id}] Answer SDP has DataChannel: {has_app}")
-
-        # SCTP 协商完成后创建服务端 DataChannel
+        # 服务端 DataChannel（SCTP 协商完成后）
         if has_app:
             try:
-                server_dc = pc.createDataChannel("wobot-control-srv")
-
-                @server_dc.on("open")
-                def on_open():
-                    self.logger.info(f"[{client_id}] Server DataChannel opened!")
-                    self._data_channels[client_id] = server_dc
-
-                @server_dc.on("message")
-                def on_msg(msg):
-                    asyncio.ensure_future(self._on_dc_message(client_id, msg))
-
-                @server_dc.on("close")
-                def on_close():
-                    self.logger.info(f"[{client_id}] Server DataChannel closed")
-                    if self._data_channels.get(client_id) is server_dc:
-                        asyncio.ensure_future(self._on_dc_close(client_id))
-
-                self.logger.info(f"[{client_id}] Server-side DC created: {server_dc.label}")
+                self._create_server_data_channel(client_id, pc)
             except Exception as e:
                 self.logger.warning(f"[{client_id}] Server DC creation failed: {e}")
 
         self.logger.info(f"WebRTC peer connection created for {client_id}")
 
+        # 3 秒后诊断 DTLS 状态
+        asyncio.ensure_future(self._diag_dtls_state(client_id, pc))
+
         return sdp
 
-    async def _deferred_send_candidates(self, client_id: str, send_callback):
-        """（已废弃：改为 monkey-patch 直接触发 _flush_all_candidates）"""
-        pass
+    # ---------- ICE candidate 外部接口 ----------
+
+    async def flush_pending_ice_candidates(self, client_id: str, send_callback) -> int:
+        """发送 monkey-patch 期间收集的 ICE candidate（由 websocket_server 在 answer 之后调用）"""
+        return await self._flush_candidates(client_id, send_callback)
 
     async def add_ice_candidate(self, client_id: str, candidate: str, sdp_mid: str, sdp_mline_index: int):
+        """添加远端 ICE candidate"""
         pc = self._connections.get(client_id)
         if not pc:
             self.logger.warning(f"[{client_id}] No peer connection, dropping ICE candidate")
             return
         try:
-            # 从 candidate SDP 字符串解析字段
-            # 格式: "candidate:<foundation> <component> <protocol> <priority> <ip> <port> typ <type> [其他...]"
             parts = candidate.strip().split()
             if len(parts) >= 8 and parts[0].startswith("candidate:"):
                 foundation = parts[0].split(":", 1)[1]
@@ -447,29 +483,39 @@ class WebRTCService:
                 priority = int(parts[3])
                 ip = parts[4]
                 port = int(parts[5])
-                cand_type = parts[7] if len(parts) >= 8 else "host"
+                cand_type = parts[7]
+
+                related_addr = None
+                related_port = None
+                for i, p in enumerate(parts[8:], 8):
+                    if p == "raddr" and i + 1 < len(parts):
+                        related_addr = parts[i + 1]
+                    elif p == "rport" and i + 1 < len(parts):
+                        related_port = int(parts[i + 1])
+
                 ice = RTCIceCandidate(
-                    component=component,
                     foundation=foundation,
+                    component=component,
                     ip=ip,
                     port=port,
                     priority=priority,
                     protocol=protocol,
                     type=cand_type,
+                    relatedAddress=related_addr,
+                    relatedPort=related_port,
                     sdpMid=sdp_mid if sdp_mid else None,
-                    sdpMLineIndex=sdp_mline_index if sdp_mline_index is not None else 0,
+                    sdpMLineIndex=sdp_mline_index if sdp_mline_index is not None else None,
                 )
                 pc.addIceCandidate(ice)
-                self.logger.info(
-                    f"[{client_id}] ICE candidate added: {cand_type} {ip}:{port} sdpMid={sdp_mid} mline={sdp_mline_index}"
-                )
+                self.logger.info(f"[{client_id}] ICE candidate added: {ip}:{port} ({cand_type})")
             else:
-                self.logger.warning(f"[{client_id}] Invalid candidate format: {candidate[:80]}")
+                self.logger.warning(f"[{client_id}] Invalid candidate format: {candidate[:60]}")
         except Exception as e:
             self.logger.error(f"[{client_id}] Failed to add ICE candidate: {e}")
 
+    # ---------- DataChannel 消息 ----------
+
     async def _on_dc_message(self, client_id: str, msg):
-        """处理 DataChannel 消息"""
         import json
         try:
             data = json.loads(msg) if isinstance(msg, (str, bytes)) else msg
@@ -477,32 +523,96 @@ class WebRTCService:
             data = {"type": "raw", "data": str(msg)}
 
         if self.message_handler:
-            await self.message_handler(client_id, data)
+            msg_type = data.get("type", "raw")
+            msg_data = data.get("data", {})
+            await self.message_handler.handle(msg_type, msg_data)
 
     def _on_dc_close(self, client_id: str):
         self.logger.info(f"[{client_id}] DataChannel closed")
         self._data_channels.pop(client_id, None)
 
+    # ---------- DTLS 诊断 ----------
+
+    async def _diag_dtls_state(self, client_id: str, pc):
+        """连接建立 3 秒后检查 DTLS 状态"""
+        await asyncio.sleep(3)
+        try:
+            # 检查每个 transceiver 的 DTLS 状态
+            transceivers = getattr(pc, '_RTCPeerConnection__transceivers', [])
+            for i, t in enumerate(transceivers):
+                dtls = getattr(t, '_transport', None)
+                if dtls:
+                    ice = getattr(dtls, 'transport', None)
+                    ice_state = getattr(ice, 'state', '?') if ice else '?'
+                    dtls_state = getattr(dtls, 'state', '?')
+                    encrypted = getattr(dtls, 'encrypted', None)
+                    self.logger.info(
+                        f"[{client_id}] DTLS diag: transceiver[{i}] "
+                        f"kind={getattr(t, 'kind', '?')} "
+                        f"ICE={ice_state} DTLS={dtls_state} encrypted={encrypted}"
+                    )
+            # 检查 SCTP / DataChannel
+            sctp = getattr(pc, '_RTCPeerConnection__sctp', None)
+            if sctp:
+                sctp_dtls = getattr(sctp, 'transport', None)
+                if sctp_dtls:
+                    sctp_ice = getattr(sctp_dtls, 'transport', None)
+                    sctp_ice_state = getattr(sctp_ice, 'state', '?') if sctp_ice else '?'
+                    sctp_dtls_state = getattr(sctp_dtls, 'state', '?')
+                    self.logger.info(
+                        f"[{client_id}] DTLS diag: SCTP ICE={sctp_ice_state} DTLS={sctp_dtls_state}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"[{client_id}] DTLS diag failed: {e}")
+
+    # ---------- 连接清理 ----------
+
     async def _cleanup_connection(self, client_id: str):
-        """清理连接（WebSocket 断开或 ICE 失败时调用）"""
-        _PENDING_CALLBACKS.pop(client_id, None)
-        pc = self._connections.pop(client_id, None)
-        if pc:
-            try:
-                await pc.close()
-            except Exception:
-                pass
-        self._data_channels.pop(client_id, None)
-        tracks = self._video_tracks.pop(client_id, {})
-        for cam_id, track in tracks.items():
-            try:
-                track.stop()
-            except Exception:
-                pass
-        # 同时清除模块级候选队列，防止残留数据影响下次连接
-        global _PENDING_CANDIDATES
-        _PENDING_CANDIDATES = []
-        self.logger.info(f"[{client_id}] Cleaned up connection ({len(tracks)} video tracks, pending_candidates cleared)")
+        """清理连接（WebSocket 断开或 ICE 失败时调用），幂等安全"""
+
+        if client_id in self._cleaning_up:
+            self.logger.info(f"[{client_id}] Cleanup already in progress, skipping")
+            return
+        self._cleaning_up.add(client_id)
+
+        try:
+            pc = self._connections.pop(client_id, None)
+            if pc:
+                try:
+                    await pc.close()
+                except Exception:
+                    pass
+
+            self._data_channels.pop(client_id, None)
+
+            tracks = self._video_tracks.pop(client_id, {})
+            for cam_id, track in tracks.items():
+                try:
+                    track.stop()
+                except Exception:
+                    pass
+                try:
+                    await self.camera_manager.stop_stream(cam_id)
+                except Exception:
+                    pass
+
+            # 仅当没有其他活跃连接时才清除全局候选队列
+            if len(self._connections) == 0:
+                clear_pending_candidates()
+                self.logger.info(
+                    f"[{client_id}] Cleaned up ({len(tracks)} video tracks, "
+                    f"pending_candidates cleared, no other connections)"
+                )
+            else:
+                other_ids = list(self._connections.keys())
+                self.logger.info(
+                    f"[{client_id}] Cleaned up ({len(tracks)} video tracks, "
+                    f"other connections: {other_ids})"
+                )
+        finally:
+            self._cleaning_up.discard(client_id)
+
+    # ---------- 消息发送与状态 ----------
 
     async def send_message(self, client_id: str, data):
         """通过 DataChannel 发送消息"""
@@ -513,3 +623,10 @@ class WebRTCService:
 
     def get_connection_count(self) -> int:
         return len(self._connections)
+
+    async def stop(self):
+        """停止 WebRTC 服务，清理所有连接"""
+        self.logger.info("Stopping WebRTC service...")
+        for client_id in list(self._connections.keys()):
+            await self._cleanup_connection(client_id)
+        self.logger.info("WebRTC service stopped")

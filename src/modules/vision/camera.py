@@ -125,72 +125,82 @@ class CameraManager:
             pass
 
     def _detect_csi_cameras(self) -> list[dict]:
-        """检测 CSI 摄像头：GStreamer → v4l2-ctl → gst-inspect 三级回退"""
+        """检测 CSI 摄像头：GStreamer 直接检测 + v4l2-ctl 回退"""
         cameras = []
         csi_pipeline = (
             "nvarguscamerasrc sensor_id=0 ! "
-            "video/x-raw(memory:NVMM), width=640, height=480, format=NV12, framerate=30/1 ! "
-            "nvvidconv ! video/x-raw, format=BGRx ! "
-            "videoconvert ! video/x-raw, format=BGR ! "
-            "appsink"
+            "video/x-raw(memory:NVMM),width=640,height=480,framerate=30/1 ! "
+            "nvvidconv ! video/x-raw,format=BGRx ! "
+            "videoconvert ! video/x-raw,format=BGR ! "
+            "appsink drop=1 max-buffers=1"
         )
 
         # 方式 1: GStreamer 直接检测
         try:
             cap = cv2.VideoCapture(csi_pipeline, cv2.CAP_GSTREAMER)
             if cap.isOpened():
-                cameras.append(
-                    {
-                        "id": 0,
-                        "name": "CSI Camera",
-                        "type": "csi",
-                        "device": "/dev/video0",
-                        "pipeline": csi_pipeline,
-                        "status": "available",
-                    }
-                )
+                # 验证能读取一帧
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    cameras.append(
+                        {
+                            "id": 0,
+                            "name": "CSI Camera",
+                            "type": "csi",
+                            "device": "/dev/video0",
+                            "pipeline": csi_pipeline,
+                            "status": "available",
+                        }
+                    )
+                    if self.logger:
+                        self.logger.info("CSI camera detected via GStreamer")
+                    cap.release()
+                    return cameras
                 cap.release()
-                return cameras
-            cap.release()
-        except Exception:
-            pass
+            else:
+                cap.release()
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"CSI GStreamer detection failed: {e}")
 
-        # 方式 2: v4l2-ctl 检测（检查 /dev/video0 的驱动是否为 tegra-video）
-        try:
-            result = subprocess.run(["v4l2-ctl", "-d", "/dev/video0", "-D"], capture_output=True, text=True, timeout=5)
-            if "tegra-video" in result.stdout or "imx219" in result.stdout.lower():
-                cameras.append(
-                    {
-                        "id": 0,
-                        "name": "CSI Camera",
-                        "type": "csi",
-                        "device": "/dev/video0",
-                        "pipeline": csi_pipeline,
-                        "status": "available",
-                    }
-                )
-                if self.logger:
-                    self.logger.info("CSI camera detected via v4l2-ctl (tegra-video/imx219)")
-                return cameras
-        except Exception:
-            pass
+        # 方式 2: v4l2-ctl 检测
+        for video_dev in ["/dev/video0", "/dev/video1"]:
+            try:
+                result = subprocess.run(["v4l2-ctl", "-d", video_dev, "-D"], capture_output=True, text=True, timeout=5)
+                if "tegra-video" in result.stdout or "imx219" in result.stdout.lower() or "ov5693" in result.stdout.lower():
+                    cameras.append(
+                        {
+                            "id": 0,
+                            "name": "CSI Camera",
+                            "type": "csi",
+                            "device": video_dev,
+                            "pipeline": None,
+                            "status": "available",
+                        }
+                    )
+                    if self.logger:
+                        self.logger.info(f"CSI camera detected via v4l2-ctl: {video_dev}")
+                    return cameras
+            except Exception:
+                pass
 
-        # 方式 3: gst-inspect 检测 nvarguscamerasrc 插件存在性
+        # 方式 3: gst-inspect 检测
         try:
             result = subprocess.run(["gst-inspect-1.0", "nvarguscamerasrc"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 cameras.append(
                     {
                         "id": 0,
-                        "name": "CSI Camera",
+                        "name": "CSI Camera (fallback)",
                         "type": "csi",
                         "device": "/dev/video0",
-                        "pipeline": csi_pipeline,
+                        "pipeline": None,
                         "status": "available",
                     }
                 )
                 if self.logger:
-                    self.logger.info("CSI camera detected via gst-inspect (nvarguscamerasrc available)")
+                    self.logger.info("CSI camera detected via gst-inspect fallback")
+                return cameras
         except Exception:
             pass
 
@@ -225,16 +235,29 @@ class CameraManager:
         return cameras
 
     async def start_stream(self, camera_id: int | None = None) -> dict:
-        """启动视频流（支持帧共享：共享摄像头复用源摄像头的帧采集）"""
+        """启动视频流（支持帧共享：共享摄像头复用源摄像头的帧）
+        
+        引用计数：每次+1，stop_stream 减到 0 才真正暂停采集。
+        防止多客户端场景下，一个客户端关摄像头影响其他客户端。
+        """
         if camera_id is None:
             camera_id = self.default_camera
 
         if camera_id not in self.cameras:
             return {"id": camera_id, "status": "error", "message": "Camera not found"}
 
+        # 引用计数初始化
+        if not hasattr(self, "_ref_counts"):
+            self._ref_counts: dict[int, int] = {}
+        self._ref_counts[camera_id] = self._ref_counts.get(camera_id, 0) + 1
+
         if camera_id in self.active_streams:
             stream = self.active_streams[camera_id]
             if stream.running:
+                if self.logger:
+                    self.logger.debug(
+                        f"Camera {camera_id} already running, ref_count={self._ref_counts[camera_id]}"
+                    )
                 return stream.get_info()
             # 热恢复：流存在但已暂停
             await stream.start()
@@ -279,8 +302,29 @@ class CameraManager:
                         self.logger.info(f"Auto-resumed shared camera {cam_id}: {cam_info['name']}")
 
     async def stop_stream(self, camera_id: int):
-        """暂停视频流 — 停止采集但不释放设备"""
+        """暂停视频流 — 引用计数减到 0 才真正停止采集
+        
+        多客户端安全：只有当没有客户端引用时才真正暂停硬件采集。
+        """
+        if not hasattr(self, "_ref_counts"):
+            self._ref_counts: dict[int, int] = {}
+        
+        current = self._ref_counts.get(camera_id, 0)
+        if current > 0:
+            self._ref_counts[camera_id] = current - 1
+        
         if camera_id not in self.active_streams:
+            if self.logger:
+                self.logger.debug(f"Camera {camera_id} not in active_streams (ref={self._ref_counts.get(camera_id, 0)})")
+            return
+
+        # 只有引用计数归零时才真正暂停
+        if self._ref_counts.get(camera_id, 0) > 0:
+            if self.logger:
+                self.logger.info(
+                    f"Camera {camera_id} stop deferred: "
+                    f"still referenced by {self._ref_counts[camera_id]} client(s)"
+                )
             return
 
         stream = self.active_streams[camera_id]
@@ -584,6 +628,7 @@ class CameraStream:
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"Capture error: {e}")
+                self.running = False  # 确保异常时流被标记为停止，允许后续重启
                 break
 
     async def _capture_loop_csi(self):
@@ -622,11 +667,13 @@ class CameraStream:
             except Exception as e:
                 if self.logger:
                     self.logger.error(f"CSI capture error: {e}")
+                self.running = False  # 确保异常时流被标记为停止，允许后续重启
                 break
 
         # 子进程异常退出告警
         if self.running and self._csi_proc and self._csi_proc.poll() is not None and self.logger:
             self.logger.warning(f"CSI subprocess exited with code {self._csi_proc.returncode}")
+            self.running = False  # 子进程退出时也标记为停止
 
     def get_frame(self) -> np.ndarray | None:
         """获取当前帧"""

@@ -1,6 +1,6 @@
 """
 运动控制硬件输出层
-支持 Mock / 串口 / GPIO 三种硬件后端
+支持 Mock / 串口 / GPIO / Rosmaster 四种硬件后端
 """
 
 from __future__ import annotations
@@ -41,16 +41,6 @@ class HardwareInterface(ABC):
         """设置转向角度（阿克曼用）-pi/4 ~ pi/4"""
         ...
 
-    @abstractmethod
-    async def emergency_stop(self) -> None:
-        """硬件急停（断电/刹车）"""
-        ...
-
-    @abstractmethod
-    async def release(self) -> None:
-        """释放急停"""
-        ...
-
     async def close(self) -> None:
         """关闭硬件连接"""
         pass
@@ -61,29 +51,14 @@ class MockHardware(HardwareInterface):
 
     def __init__(self, name: str = "mock"):
         self.name = name
-        self._stopped = False
         self._last_speeds: dict = {}
 
     async def set_motor(self, name: str, speed: float) -> None:
-        if self._stopped:
-            logger.debug(f"[{self.name}] set_motor({name}, {speed:.2f}) BLOCKED (emergency)")
-            return
         self._last_speeds[name] = speed
         logger.debug(f"[{self.name}] set_motor({name}, {speed:.2f})")
 
     async def set_steering(self, angle: float) -> None:
-        if self._stopped:
-            logger.debug(f"[{self.name}] set_steering({angle:.2f}) BLOCKED (emergency)")
-            return
         logger.debug(f"[{self.name}] set_steering({angle:.2f})")
-
-    async def emergency_stop(self) -> None:
-        self._stopped = True
-        logger.warning(f"[{self.name}] HARDWARE EMERGENCY STOP")
-
-    async def release(self) -> None:
-        self._stopped = False
-        logger.info(f"[{self.name}] Emergency stop released")
 
     def get_last_speeds(self) -> dict:
         return dict(self._last_speeds)
@@ -96,7 +71,6 @@ class SerialHardware(HardwareInterface):
         self.port = port
         self.baudrate = baudrate
         self._serial = None
-        self._stopped = False
         self._lock = asyncio.Lock()
 
     async def _ensure_serial(self):
@@ -122,9 +96,6 @@ class SerialHardware(HardwareInterface):
             await self._serial.drain()
 
     async def set_motor(self, name: str, speed: float) -> None:
-        if self._stopped:
-            logger.warning(f"Serial: set_motor({name}) blocked by emergency stop")
-            return
         # 协议格式: 0xAA [motor_id] [speed_byte] 0x55
         motor_map = {
             "front_left": 0x01,
@@ -143,22 +114,10 @@ class SerialHardware(HardwareInterface):
         await self._write(bytes([0xAA, mid, speed_byte, 0x55]))
 
     async def set_steering(self, angle: float) -> None:
-        if self._stopped:
-            return
         val = int(angle * 180 / 3.14159)
         val = max(-45, min(45, val))
         val_byte = val & 0xFF if val >= 0 else (256 + val) & 0xFF
         await self._write(bytes([0xAA, 0x10, val_byte, 0x55]))
-
-    async def emergency_stop(self) -> None:
-        self._stopped = True
-        await self._write(bytes([0xAA, 0xFF, 0x00, 0x55]))
-        logger.warning("Serial: HARDWARE EMERGENCY STOP sent")
-
-    async def release(self) -> None:
-        self._stopped = False
-        await self._write(bytes([0xAA, 0xFE, 0x01, 0x55]))
-        logger.info("Serial: Emergency stop released")
 
     async def close(self) -> None:
         if self._serial:
@@ -179,7 +138,6 @@ class GPIOHardware(HardwareInterface):
         }
         self._gpio = None
         self._pwm_channels: dict = {}
-        self._stopped = False
 
     def _ensure_gpio(self):
         if self._gpio is None:
@@ -213,8 +171,6 @@ class GPIOHardware(HardwareInterface):
 
     async def set_motor(self, name: str, speed: float) -> None:
         self._ensure_gpio()
-        if self._stopped:
-            return
         ch = self._pwm_channels.get(name)
         if ch is None:
             logger.warning(f"GPIO: unknown motor name '{name}'")
@@ -239,19 +195,6 @@ class GPIOHardware(HardwareInterface):
         # GPIO 后端一般通过差速实现转向，steering 仅阿克曼底盘需要
         logger.debug(f"GPIO steering not implemented (use differential): {angle:.2f}")
 
-    async def emergency_stop(self) -> None:
-        self._ensure_gpio()
-        self._stopped = True
-        for ch in self._pwm_channels.values():
-            ch["pwm"].ChangeDutyCycle(0)
-            self._gpio.output(ch["dir1"], self._gpio.LOW)
-            self._gpio.output(ch["dir2"], self._gpio.LOW)
-        logger.warning("GPIO: HARDWARE EMERGENCY STOP (all motors off)")
-
-    async def release(self) -> None:
-        self._stopped = False
-        logger.info("GPIO: Emergency stop released")
-
     async def close(self) -> None:
         if self._gpio:
             for ch in self._pwm_channels.values():
@@ -268,11 +211,11 @@ class RosmasterMotion(HardwareInterface):
     X3 底盘: v_x/v_y=[-1.0, 1.0], v_z=[-5, 5]
     """
 
-    def __init__(self, com: str = "/dev/ttyUSB1", car_type: int = 1):
+    def __init__(self, com: str = "/dev/ttyUSB1", car_type: int = 1, bot=None):
         self.com = com
         self.car_type = car_type
-        self._bot = None
-        self._stopped = False
+        self._bot = bot  # 允许外部传入已有 Bot 实例（与云台共享串口）
+        self._bot_shared = bot is not None
         self._lock = asyncio.Lock()  # 保护串口写入，防止多线程并发写串口
 
     def _ensure_init(self) -> bool:
@@ -299,9 +242,6 @@ class RosmasterMotion(HardwareInterface):
 
     async def set_mecanum(self, v_x: float, v_y: float, v_z: float) -> None:
         """通过 Rosmaster 库直接发送三轴麦轮速度"""
-        if self._stopped:
-            logger.warning("Rosmaster motion blocked by emergency stop")
-            return
         if not self._ensure_init():
             raise RuntimeError(f"Rosmaster hardware not ready (serial: {self.com})")
 
@@ -318,8 +258,6 @@ class RosmasterMotion(HardwareInterface):
 
     async def set_motor(self, name: str, speed: float) -> None:
         """回退到 Rosmaster.set_motor(s1, s2, s3, s4)"""
-        if self._stopped:
-            return
         if not self._ensure_init():
             raise RuntimeError(f"Rosmaster hardware not ready (serial: {self.com})")
         # 暂不支持单轮控制，记录警告
@@ -328,31 +266,19 @@ class RosmasterMotion(HardwareInterface):
     async def set_steering(self, angle: float) -> None:
         pass  # 麦轮无需转向
 
-    async def emergency_stop(self) -> None:
-        self._stopped = True
-        if self._bot:
-            try:
-                self._bot.set_car_motion(0, 0, 0)
-            except Exception:
-                pass
-        logger.warning("Rosmaster motion: EMERGENCY STOP")
-
-    async def release(self) -> None:
-        self._stopped = False
-        logger.info("Rosmaster motion: Emergency stop released")
-
     async def close(self) -> None:
         self._bot = None
 
 
-def create_hardware(config: dict) -> HardwareInterface:
-    """根据配置创建硬件后端实例"""
+def create_hardware(config: dict, bot=None) -> HardwareInterface:
+    """根据配置创建硬件后端实例。bot: 可选的共享 Rosmaster 实例（与云台复用串口）"""
     hw_type = config.get("hardware_type", "mock")
 
     if hw_type == "rosmaster":
         return RosmasterMotion(
             com=config.get("serial_port", "/dev/ttyUSB1"),
             car_type=config.get("car_type", 1),
+            bot=bot,
         )
     elif hw_type == "serial":
         return SerialHardware(

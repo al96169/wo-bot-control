@@ -22,6 +22,9 @@ server:
   host: "0.0.0.0"
   port: 8765
   http_port: 8000
+  # 对外公告的 IP（用于 WebRTC SDP ICE candidate，局域网 mDNS 不可用时）
+  # 留空则自动获取：先取 host（非 0.0.0.0 时），否则取本机局域网 IP
+  advertised_ip: "192.168.1.47"
 
 # mDNS Discovery
 mdns:
@@ -43,10 +46,10 @@ motion:
   max_linear_speed: 1.0
   max_angular_speed: 1.0
   default_mode: "manual"  # manual, semi, auto
-  # 硬件后端: mock / serial / gpio
-  hardware_type: "mock"
-  # serial 后端配置
-  serial_port: "/dev/ttyTHS0"
+  # 硬件后端: mock / serial / gpio / rosmaster
+  hardware_type: "rosmaster"
+  # Rosmaster 串口后端配置（/dev/ttyUSB0 = Rosmaster 主控板，/dev/ttyUSB1 = 备用）
+  serial_port: "/dev/ttyUSB0"
   serial_baudrate: 115200
   # GPIO 引脚映射 (Jetson BOARD 编号)
   gpio_pins:
@@ -57,7 +60,7 @@ motion:
 
 # Camera
 camera:
-  enabled: false
+  enabled: true
   default_camera: 0
   resolution:
     width: 640
@@ -67,7 +70,7 @@ camera:
 
 # Gimbal
 gimbal:
-  enabled: false                # 设为 true 启用云台控制
+  enabled: true                # 设为 true 启用云台控制
   gimbal_type: "rosmaster"      # 硬件后端: mock / pca9685 / gpio_pwm / rosmaster
   # Rosmaster 后端配置
   com: "/dev/ttyUSB0"          # Rosmaster 串口设备路径（实际设备 /dev/ttyUSB0）
@@ -79,8 +82,9 @@ gimbal:
   pan_center: 90               # 回中位置，默认为 (pan_min + pan_max) / 2
   tilt_min: 30                  # -60° 映射到 30
   tilt_max: 150                 # +60° 映射到 150
+  # 方向反转
+  pan_invert: true              # pan 水平反转（true=左右对调）
   tilt_center: 90               # 回中位置，默认为 (tilt_min + tilt_max) / 2
-  pan_invert: false             # 反转水平方向（实际部署时按硬件接线设为 true/false）
   tilt_invert: false            # 反转俯仰方向 (摇杆向上→舵机逆时针)
   step: 3.0                     # 增量模式每步移动角度
 
