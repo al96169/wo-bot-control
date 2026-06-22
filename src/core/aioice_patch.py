@@ -1,8 +1,11 @@
 """
-aioice 猴子补丁：修复 Python 3.7 + aioice 0.6.18 ICE 连通性问题
+aioice / aiortc 猴子补丁
 
-在 Python 3.7 上，aioice 的 STUN 连通性检查 transport 会变成 NoneType，
-导致 ICE 永远停留在 "new" 状态。这里用 set_selected_pair 绕过检查。
+修复项:
+  1. Python 3.7 + aioice 0.6.18 ICE 连通性：STUN 连通性检查 transport 变成 NoneType，
+     用 set_selected_pair() 绕过检查，优先 IPv6 同子网直连。
+  2. aiortc 0.9.10 SCTP DataChannel 重复 OPEN 崩溃：浏览器 DTLS 重连时可能重复发送
+     DataChannel OPEN，将 assert 改为 warn + return 优雅忽略。
 """
 import asyncio
 import logging
@@ -19,103 +22,6 @@ def _build_candidate_str(lc) -> str:
         f"candidate:{lc.foundation} {lc.component} "
         f"udp {lc.priority} {lc.host} {lc.port} typ {getattr(lc, 'type', 'host')}"
     )
-
-
-def _fix_dtls_role() -> None:
-    """修复 aiortc 0.9.10 DTLS 角色反转：controlling → client, controlled → server
-
-    原始代码错误：
-      controlling → DTLS server (SSL_set_accept_state)
-      controlled   → DTLS client (SSL_set_connect_state)
-
-    RFC 5763 正确：
-      controlling → DTLS client (主动发 ClientHello)
-      controlled   → DTLS server (等待 ClientHello)
-
-    v5 策略：用包装器临时替换 self._transport，让原始 start() 读到交换后的
-    transport.role，从而设置正确的 SSL state。
-    """
-    try:
-        from aiortc.rtcdtlstransport import RTCDtlsTransport
-
-        _dtls_start_original = RTCDtlsTransport.start
-
-        class _IceTransportWrapper:
-            """包装 RTCIceTransport，交换 role 属性，其他透传"""
-            __slots__ = ('_real',)
-
-            def __init__(self, real_transport):
-                object.__setattr__(self, '_real', real_transport)
-
-            @property
-            def role(self):
-                real_role = self._real.role
-                return 'controlled' if real_role == 'controlling' else 'controlling'
-
-            def __getattr__(self, name):
-                return getattr(self._real, name)
-
-        async def _dtls_start_fixed(self, remoteParameters):
-            """v5: 包装 transport.role 后调用原始 start()"""
-            real_transport = self._transport
-            wrapper = _IceTransportWrapper(real_transport)
-            self._transport = wrapper
-
-            original_ice_role = real_transport.role
-            _PATCH_LOG.info(
-                "DTLS v5: ICE=%s → wrapper returns %s",
-                original_ice_role, wrapper.role,
-            )
-
-            try:
-                return await _dtls_start_original(self, remoteParameters)
-            finally:
-                self._transport = real_transport
-                _PATCH_LOG.info(
-                    "DTLS v5 done: ICE=%s → _role=%s",
-                    original_ice_role, self._role,
-                )
-
-        RTCDtlsTransport.start = _dtls_start_fixed
-        _PATCH_LOG.info("RTCDtlsTransport.start() PATCHED v5")
-    except Exception as e:
-        _PATCH_LOG.warning("Failed to patch DTLS role: %s", e)
-
-
-def _fix_add_transport_description() -> None:
-    """修复 aiortc 0.9.10 add_transport_description() 的 DTLS 角色反转
-
-    原始代码错误:
-      controlling → media.dtls.role = 'auto'   → SDP a=setup:actpass
-      controlled   → media.dtls.role = 'client' → SDP a=setup:active ← 错误!
-
-    RFC 5763 正确:
-      controlling → DTLS client → SDP a=setup:active
-      controlled   → DTLS server → SDP a=setup:passive
-
-    修正: controlled→server (passive), controlling→client (active)
-    调用原始函数后覆盖 dtls.role，确保指纹等参数已正确生成。
-    """
-    try:
-        import aiortc.rtcpeerconnection as _rtcpc
-        _add_td_original = _rtcpc.add_transport_description
-
-        def add_transport_description_fixed(media, iceTransport, dtlsTransport):
-            _add_td_original(media, iceTransport, dtlsTransport)
-            # 覆盖: 原始函数将 controlled→client(active)，这里修正为 server(passive)
-            if iceTransport.role == 'controlling':
-                media.dtls.role = 'client'
-            else:
-                media.dtls.role = 'server'
-            _PATCH_LOG.debug(
-                "DTLS SDP: ICE=%s → dtls.role=%s",
-                iceTransport.role, media.dtls.role,
-            )
-
-        _rtcpc.add_transport_description = add_transport_description_fixed
-        _PATCH_LOG.info("add_transport_description() PATCHED: RFC 5763 DTLS role")
-    except Exception as e:
-        _PATCH_LOG.warning("Failed to patch add_transport_description: %s", e)
 
 
 def _fix_sctp_duplicate_stream() -> None:
@@ -261,16 +167,7 @@ def apply() -> None:
     AioiceConnection.connect = _aioice_connect_patched  # type: ignore[method-assign]
     _PATCH_LOG.info("aioice Connection.connect() PATCHED for Python 3.7 ICE fix")
 
-    # ---- 修复 DTLS 角色反转 ----
-    # aiortc 0.9.10 在两个地方都有角色反转:
-    #   1. add_transport_description(): controlled→client→SDP a=setup:active
-    #   2. RTCDtlsTransport.start(): controlled→SSL_set_connect_state
-    # 两者都与 RFC 5763 相反。
-    # 修正策略:
-    #   1. 猴子补丁 add_transport_description(): controlled→server (SDP passive)
-    #   2. v5 wrapper: 让 start() 读到交换后的 role，设置正确的 SSL state
-    _fix_add_transport_description()
-    _fix_dtls_role()
+    # ---- SCTP DataChannel 重复 OPEN 容错 ----
     _fix_sctp_duplicate_stream()
 
 

@@ -207,11 +207,6 @@ class WebRTCService:
 
         sdp = "\r\n".join(new_lines)
 
-        # DTLS 角色修正: aiortc 0.9.10 错误地将 controlled → client (a=setup:active)
-        # 改为 passive 让 Jetson 成为 DTLS server，浏览器成为 DTLS client
-        # 配合 aioice_patch.py v5 wrapper，Jetson 的 start() 也会设为 server
-        sdp = sdp.replace("a=setup:active", "a=setup:passive")
-
         self.logger.info(
             f"[{client_id}] ICE SDP postprocess: .local→IP={replaced_count}, "
             f"ice-lite={'yes' if ice_lite_inserted else 'no'}"
