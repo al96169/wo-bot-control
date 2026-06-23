@@ -26,6 +26,9 @@
 pip install -r requirements.txt
 ```
 
+### 部署说明
+[部署说明](docs/agent-prompt-deploy.md)
+
 ### 运行服务
 
 ```bash

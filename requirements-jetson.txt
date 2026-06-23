@@ -1,7 +1,8 @@
 # 兼容 Python 3.7 (Jetson 默认环境)
 # aiortc 1.0+ 需要 Python 3.8+，Python 3.7 下最高可用 0.9.10
 # av 11+ 需要 Python 3.8+，Python 3.7 下最高可用 6.x，配合 FFmpeg 4.3
-websockets>=10.0,<13.0
+# websockets 10+ 需要 Python 3.8+，Python 3.7 下最高可用 9.1（代码已兼容 9.x API）
+websockets>=9.0,<10.0
 pyyaml>=5.0,<7.0
 psutil>=5.7,<6.0
 opencv-python-headless>=4.5,<5.0
@@ -10,4 +11,13 @@ zeroconf>=0.30,<0.133
 aiortc>=0.9.10,<0.10.0
 av>=6.0.0,<7.0.0
 cryptography>=2.2,<42.0
+# pyOpenSSL 24+ 需要 OpenSSL 1.1.1+ 移除的 SSL_CTX_set_read_ahead，Jetson OpenSSL 1.1.1 不兼容
+pyOpenSSL>=19.0,<24.0
 pyee>=6.0,<11.0
+# HTTP API (FastAPI + uvicorn)
+fastapi>=0.68,<0.100.0
+uvicorn>=0.15,<0.24.0
+starlette>=0.14,<0.28.0
+aiofiles>=0.6,<24.0
+# Jetson 硬件驱动
+pyserial>=3.0,<4.0
