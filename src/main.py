@@ -13,6 +13,7 @@ import yaml
 from core.http_api import HttpAPIServer
 from core.mdns_service import MDNSService
 from core.message_handler import MessageHandler
+from core.service_manager import ServiceManager
 from core.websocket_server import WebSocketServer
 
 # WebRTC 可选导入（兼容 Python 3.6）
@@ -20,7 +21,7 @@ try:
     from core.webrtc_service import WebRTCService
 
     WEBRTC_AVAILABLE = True
-except ImportError as e:
+except (ImportError, AttributeError) as e:
     WebRTCService = None
     WEBRTC_AVAILABLE = False
     print(f"Warning: WebRTC not available: {e}")
@@ -59,6 +60,7 @@ class WoBotControl:
         self.ws_server = None
         self.mdns_service = None
         self.message_handler = None
+        self.service_manager = None
 
         # 功能模块
         self.system_collector = None
@@ -139,6 +141,25 @@ class WoBotControl:
         if self.dance_controller:
             self.message_handler.dance_controller = self.dance_controller
 
+        # 初始化服务进程管理器（负责守护所有子服务）
+        self.service_manager = ServiceManager(
+            config=self.config,
+            message_callback=self._on_service_message,
+        )
+        self.logger.info("Service manager initialized")
+
+        # 注入 service_manager 到 message_handler
+        self.message_handler.service_manager = self.service_manager
+
+        # 注册进程内服务
+        if self.webrtc_service:
+            self.service_manager.register_in_process_service("webrtc", self.webrtc_service)
+        if self.dance_controller:
+            self.service_manager.register_in_process_service("dance", self.dance_controller)
+
+        # 启动所有子服务
+        await self.service_manager.start_all()
+
         # 初始化 WebRTC 服务（可选）
         if WEBRTC_AVAILABLE and WebRTCService:
             self.webrtc_service = WebRTCService(
@@ -162,6 +183,7 @@ class WoBotControl:
             robot_info=self.config.get("robot", {}),
             webrtc_service=self.webrtc_service,
             gimbal_controller=self.gimbal_controller,
+            service_manager=self.service_manager,
             config=self.config,
             logger=self.logger,
         )
@@ -265,6 +287,10 @@ class WoBotControl:
         self.logger.info("Stopping wo-bot-control...")
         self.running = False
 
+        # 停止服务进程管理器（先停止子服务）
+        if self.service_manager:
+            await self.service_manager.stop_all()
+
         # 停止各组件
         if self.webrtc_service:
             await self.webrtc_service.stop()
@@ -288,6 +314,14 @@ class WoBotControl:
             await self.dance_controller.stop()
 
         self.logger.info("wo-bot-control stopped")
+
+    async def _on_service_message(self, message: dict) -> None:
+        """服务管理器消息回调：将子服务异常通知转发给所有 WebSocket 客户端"""
+        if self.ws_server:
+            await self.ws_server.broadcast_message({
+                "type": "service_message",
+                "data": message,
+            })
 
     def handle_signal(self, signum, frame):
         """处理信号（Python 3.6 兼容：用 ensure_future + call_soon_threadsafe）"""

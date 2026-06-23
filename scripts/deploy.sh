@@ -167,7 +167,9 @@ echo "  -> 创建目标目录..."
 mkdir -p ${REMOTE_DIR}
 
 echo "  -> 清理旧文件..."
-rm -rf ${REMOTE_DIR}/*
+eval "${SUDO} rm -rf ${REMOTE_DIR}/*" 2>/dev/null || true
+# 如果 sudo rm 失败（权限不足），手动删除可删的文件
+rm -rf ${REMOTE_DIR}/* 2>/dev/null || true
 
 echo "  -> 解压部署包..."
 tar -xzf /tmp/${PACKAGE_NAME} -C ${REMOTE_DIR}

@@ -520,7 +520,10 @@ class WebRTCService:
         if self.message_handler:
             msg_type = data.get("type", "raw")
             msg_data = data.get("data", {})
-            await self.message_handler.handle(msg_type, msg_data)
+            result = await self.message_handler.handle(msg_type, msg_data)
+            # 将响应通过 DataChannel 发回客户端
+            if result and isinstance(result, dict):
+                await self.send_message(client_id, result)
 
     def _on_dc_close(self, client_id: str):
         self.logger.info(f"[{client_id}] DataChannel closed")

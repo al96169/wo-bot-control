@@ -10,9 +10,10 @@ numpy>=1.19,<1.23
 zeroconf>=0.30,<0.133
 aiortc>=0.9.10,<0.10.0
 av>=6.0.0,<7.0.0
-cryptography>=2.2,<42.0
-# pyOpenSSL 24+ 需要 OpenSSL 1.1.1+ 移除的 SSL_CTX_set_read_ahead，Jetson OpenSSL 1.1.1 不兼容
-pyOpenSSL>=19.0,<24.0
+cryptography>=36.0,<38.0
+# pyOpenSSL 需要匹配 OpenSSL 1.1.1 + cryptography 37.x
+# 过高版本会缺少 SSL_CTX_set_read_ahead 或 OpenSSL_add_all_algorithms
+pyOpenSSL>=21.0,<22.0
 pyee>=6.0,<11.0
 # HTTP API (FastAPI + uvicorn)
 fastapi>=0.68,<0.100.0

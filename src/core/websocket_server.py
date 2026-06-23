@@ -36,6 +36,7 @@ class WebSocketServer:
         robot_info: dict,
         webrtc_service=None,
         gimbal_controller=None,
+        service_manager=None,
         config: dict | None = None,
         logger=None,
     ):
@@ -45,6 +46,7 @@ class WebSocketServer:
         self.robot_info = robot_info
         self.webrtc_service = webrtc_service
         self.gimbal_controller = gimbal_controller
+        self.service_manager = service_manager
         self.config = config or {}
         self.logger = logger
         self._server: websockets.Server | None = None
@@ -83,6 +85,19 @@ class WebSocketServer:
             await self._server.wait_closed()
         if self.logger:
             self.logger.info("WebSocket signaling server stopped")
+
+    async def broadcast_message(self, message: dict) -> None:
+        """向所有已连接客户端广播消息"""
+        dead = []
+        payload = json.dumps(message)
+        for cid, ws in list(self._ws_clients.items()):
+            try:
+                await ws.send(payload)
+            except Exception:
+                dead.append(cid)
+        for cid in dead:
+            self._ws_clients.pop(cid, None)
+            self._clients.discard(self._ws_clients.get(cid))
 
     async def _handle_client(self, websocket: ServerConnection, path=None):
         """处理客户端连接"""
@@ -430,6 +445,10 @@ class WebSocketServer:
                 await asyncio.sleep(interval)
                 try:
                     status = await self.message_handler._handle_get_status({})
+                    # 附加服务状态信息
+                    if self.service_manager:
+                        services_status = self.service_manager.get_all_services_status()
+                        status["data"]["services"] = services_status
                     # 广播给所有已连接 WebSocket 客户端
                     dead = []
                     payload = json.dumps(status)

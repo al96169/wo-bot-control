@@ -27,12 +27,14 @@ class MessageHandler:
         camera_manager=None,
         config: dict | None = None,
         logger=None,
+        service_manager=None,
     ):
         self.system_collector = system_collector
         self.motion_controller = motion_controller
         self.camera_manager = camera_manager
         self.config = config or {}
         self.logger = logger or logging.getLogger(__name__)
+        self.service_manager = service_manager
         # 持久 Shell 会话工作目录（初始为进程当前目录）
         self._shell_cwd = os.getcwd()
         # 云台速度控制：客户端发速度(-1.0~+1.0)，服务端持续循环移动
@@ -71,7 +73,13 @@ class MessageHandler:
         if hasattr(self, "gimbal_controller") and self.gimbal_controller:
             features.append("gimbal")
         if hasattr(self, "dance_controller") and self.dance_controller:
-            features.append("dance")
+            # 通过 service_manager 检查 dance 服务是否实际在运行
+            if self.service_manager:
+                svc = self.service_manager.get_service_status("dance")
+                if svc and svc.get("status") == "running":
+                    features.append("dance")
+            else:
+                features.append("dance")
         status_data["features"] = features
         return {"type": "status", "data": status_data}
 
@@ -241,6 +249,11 @@ class MessageHandler:
 
     async def _handle_dance(self, data: dict) -> dict:
         """处理舞蹈控制命令"""
+        # 检查 service_manager 中的运行状态（防止进程管理器停服后仍响应）
+        if self.service_manager:
+            svc = self.service_manager.get_service_status("dance")
+            if not svc or svc.get("status") != "running":
+                return {"type": "error", "data": {"code": 503, "message": "Dance service is not running"}}
         if not hasattr(self, "dance_controller") or not self.dance_controller:
             return {"type": "error", "data": {"code": 503, "message": "Dance controller not available"}}
 
@@ -290,10 +303,57 @@ class MessageHandler:
             asyncio.create_task(self._delayed_shutdown())
             return {"type": "system_ack", "data": {"action": "shutdown", "status": "pending"}}
         elif action == "restart_service":
-            self.logger.info("Service restart requested")
-            return {"type": "system_ack", "data": {"action": "restart_service", "status": "pending"}}
+            service_id = data.get("service_id", "main")
+            self.logger.info(f"Service restart requested: {service_id}")
+            if hasattr(self, "service_manager") and self.service_manager:
+                if service_id == "main":
+                    self.logger.warning("Main service restart requested via systemd")
+                    asyncio.create_task(self._delayed_restart_service())
+                    return {"type": "system_ack", "data": {"action": "restart_service", "service_id": "main", "status": "pending"}}
+                success = await self.service_manager.restart_service(service_id)
+                return {"type": "system_ack", "data": {"action": "restart_service", "service_id": service_id, "status": "ok" if success else "failed"}}
+            else:
+                if service_id == "main":
+                    self.logger.warning("Main service restart requested via systemd (no service_manager)")
+                    asyncio.create_task(self._delayed_restart_service())
+                    return {"type": "system_ack", "data": {"action": "restart_service", "service_id": "main", "status": "pending"}}
+                return {"type": "system_ack", "data": {"action": "restart_service", "status": "pending", "service_id": service_id}}
 
         return {"type": "error", "data": {"code": 400, "message": "Invalid system action"}}
+
+    async def _handle_service_status(self, data: dict) -> dict:
+        """获取所有子服务状态"""
+        if hasattr(self, "service_manager") and self.service_manager:
+            services = self.service_manager.get_all_services_status()
+            return {"type": "service_status", "data": {"services": services}}
+        return {"type": "service_status", "data": {"services": []}}
+
+    async def _handle_service_control(self, data: dict) -> dict:
+        """控制子服务启停"""
+        service_id = data.get("service_id", "")
+        action = data.get("action", "")  # start | stop | restart
+        if not service_id or not action:
+            return {"type": "error", "data": {"code": 400, "message": "service_id and action required"}}
+
+        if not hasattr(self, "service_manager") or not self.service_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
+
+        if service_id == "main":
+            return {"type": "service_control_ack", "data": {"service_id": "main", "action": action, "status": "main_not_restartable", "message": "主服务不可通过面板控制"}}
+
+        if action == "start":
+            success = await self.service_manager.start_service(service_id)
+        elif action == "stop":
+            success = await self.service_manager.stop_service(service_id)
+        elif action == "restart":
+            success = await self.service_manager.restart_service(service_id)
+        else:
+            return {"type": "error", "data": {"code": 400, "message": f"Unknown action: {action}"}}
+
+        return {
+            "type": "service_control_ack",
+            "data": {"service_id": service_id, "action": action, "status": "ok" if success else "failed"},
+        }
 
     async def _delayed_reboot(self):
         """延迟重启"""
@@ -310,6 +370,14 @@ class MessageHandler:
             subprocess.run(["sudo", "shutdown", "-h", "now"], check=False)
         except Exception as e:
             self.logger.error(f"Shutdown failed: {e}")
+
+    async def _delayed_restart_service(self):
+        """延迟重启主服务（通过 systemd）"""
+        await asyncio.sleep(2)
+        try:
+            subprocess.run(["sudo", "systemctl", "restart", "wobot-control"], check=False)
+        except Exception as e:
+            self.logger.error(f"Restart service failed: {e}")
 
     async def _handle_exec(self, data: dict) -> dict:
         """执行命令（持久 Shell 会话，保持工作目录）"""
@@ -420,80 +488,28 @@ class MessageHandler:
         return {"type": "logs", "data": {"logs": logs}}
 
     async def _handle_software_list(self, data: dict) -> dict:
-        """获取软件列表"""
-        try:
-            result = subprocess.run(["dpkg", "-l"], capture_output=True, text=True, timeout=10)
-            packages = []
-            for line in result.stdout.split("\n")[5:]:  # 跳过头部
-                parts = line.split()
-                if len(parts) >= 3:
-                    packages.append({"name": parts[1], "version": parts[2], "status": "installed"})
-
-            return {"type": "software_list", "data": {"packages": packages[:50]}}  # 限制返回数量
-        except Exception as e:
-            return {"type": "error", "data": {"code": 500, "message": str(e)}}
+        """获取软件列表（转发至 software_manager 子服务）"""
+        if self.service_manager:
+            return await self.service_manager.send_subprocess_command(
+                "software_manager", "list", data
+            )
+        return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     async def _handle_software_search(self, data: dict) -> dict:
-        """搜索可安装的软件包（apt-cache search）"""
-        keyword = data.get("keyword", "").strip()
-        if not keyword:
-            return {"type": "error", "data": {"code": 400, "message": "Search keyword required"}}
-        try:
-            result = subprocess.run(["apt-cache", "search", keyword], capture_output=True, text=True, timeout=15)
-            packages = []
-            for line in result.stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-                # 格式: "package-name - Description"
-                parts = line.split(" - ", 1)
-                if len(parts) >= 2:
-                    packages.append({"name": parts[0].strip(), "description": parts[1].strip()})
-                elif parts:
-                    packages.append({"name": parts[0].strip(), "description": ""})
-            return {"type": "software_search_result", "data": {"keyword": keyword, "packages": packages[:30]}}
-        except Exception as e:
-            return {"type": "error", "data": {"code": 500, "message": str(e)}}
+        """搜索软件包（转发至 software_manager 子服务）"""
+        if self.service_manager:
+            return await self.service_manager.send_subprocess_command(
+                "software_manager", "search", data
+            )
+        return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     async def _handle_software_install(self, data: dict) -> dict:
-        """安装软件"""
-        package = data.get("package")
-        source = data.get("source", "apt")
-        if not package:
-            return {"type": "error", "data": {"code": 400, "message": "Package name required"}}
-        self.logger.info(f"Software install requested: {package} from {source}")
-        try:
-            if source == "apt":
-                result = subprocess.run(
-                    ["apt-get", "install", "-y", package], capture_output=True, text=True, timeout=120
-                )
-                ok = result.returncode == 0
-                return {
-                    "type": "software_install_ack",
-                    "data": {
-                        "package": package,
-                        "status": "installed" if ok else "failed",
-                        "output": result.stdout[:500] if not ok else "",
-                    },
-                }
-            elif source == "pip":
-                result = subprocess.run(
-                    ["pip", "install", package, "--break-system-packages"], capture_output=True, text=True, timeout=120
-                )
-                ok = result.returncode == 0
-                return {
-                    "type": "software_install_ack",
-                    "data": {
-                        "package": package,
-                        "status": "installed" if ok else "failed",
-                        "output": result.stdout[:500] if not ok else "",
-                    },
-                }
-            return {
-                "type": "software_install_ack",
-                "data": {"package": package, "status": f"source '{source}' not supported"},
-            }
-        except Exception as e:
-            return {"type": "error", "data": {"code": 500, "message": str(e)}}
+        """安装软件包（转发至 software_manager 子服务）"""
+        if self.service_manager:
+            return await self.service_manager.send_subprocess_command(
+                "software_manager", "install", data, timeout=120.0
+            )
+        return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     async def _handle_module_list(self, data: dict) -> dict:
         """获取模块列表（动态扫描）"""
@@ -556,36 +572,20 @@ class MessageHandler:
         return {"type": "device_control_ack", "data": {"action": action, "enabled": enabled, "status": "ok"}}
 
     async def _handle_software_uninstall(self, data: dict) -> dict:
-        """卸载软件"""
-        package = data.get("package", "")
-        if not package:
-            return {"type": "error", "data": {"code": 400, "message": "Package name required"}}
-        self.logger.info(f"Software uninstall: {package}")
-        try:
-            result = subprocess.run(["apt-get", "remove", "-y", package], capture_output=True, text=True, timeout=60)
-            ok = result.returncode == 0
-            return {
-                "type": "software_uninstall_ack",
-                "data": {"package": package, "status": "uninstalled" if ok else "failed"},
-            }
-        except Exception as e:
-            return {"type": "error", "data": {"code": 500, "message": str(e)}}
+        """卸载软件（转发至 software_manager 子服务）"""
+        if self.service_manager:
+            return await self.service_manager.send_subprocess_command(
+                "software_manager", "uninstall", data, timeout=120.0
+            )
+        return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     async def _handle_software_upgrade(self, data: dict) -> dict:
-        """升级软件"""
-        package = data.get("package", "")
-        if not package:
-            return {"type": "error", "data": {"code": 400, "message": "Package name required"}}
-        self.logger.info(f"Software upgrade: {package}")
-        try:
-            result = subprocess.run(["apt-get", "upgrade", "-y", package], capture_output=True, text=True, timeout=120)
-            ok = result.returncode == 0
-            return {
-                "type": "software_upgrade_ack",
-                "data": {"package": package, "status": "upgraded" if ok else "failed"},
-            }
-        except Exception as e:
-            return {"type": "error", "data": {"code": 500, "message": str(e)}}
+        """升级软件（转发至 software_manager 子服务）"""
+        if self.service_manager:
+            return await self.service_manager.send_subprocess_command(
+                "software_manager", "upgrade", data, timeout=120.0
+            )
+        return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     # ---- WiFi 管理 ----
 
