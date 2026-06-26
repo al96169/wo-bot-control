@@ -309,7 +309,7 @@ class CameraManager:
         多客户端安全：只有当没有客户端引用时才真正暂停硬件采集。
         """
         if not hasattr(self, "_ref_counts"):
-            self._ref_counts: dict[int, int] = {}
+            self._ref_counts: dict[int, int] = {}  # type: ignore[no-redef]
 
         current = self._ref_counts.get(camera_id, 0)
         if current > 0:

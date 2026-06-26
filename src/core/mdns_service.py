@@ -87,7 +87,7 @@ class MDNSService:
             )
 
             # register_service 也是同步阻塞，放到线程池
-            await loop.run_in_executor(None, self.zeroconf.register_service, self.service_info)
+            await loop.run_in_executor(None, self.zeroconf.register_service, self.service_info)  # type: ignore[union-attr]
             if self.logger:
                 self.logger.info(f"mDNS service registered: {service_name} on {addresses}:{self.port}")
 

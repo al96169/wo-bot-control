@@ -357,8 +357,8 @@ class PyDlnaRenderer:
 
     def _ssdp_thread_loop(self):
         """SSDP 监听线程：阻塞 recvfrom 接收 M-SEARCH，发送响应"""
-        sock = self._ssdp_sock
         while self._ssdp_sock:
+            sock = self._ssdp_sock
             try:
                 data, addr = sock.recvfrom(4096)
             except TimeoutError:
@@ -952,7 +952,7 @@ class PyDlnaRenderer:
         """监控 GStreamer 进程输出，检测 EOS"""
         try:
             while self._gst_proc and self._gst_proc.returncode is None:
-                line = await asyncio.wait_for(self._gst_proc.stderr.readline(), timeout=30)
+                line = await asyncio.wait_for(self._gst_proc.stderr.readline(), timeout=30)  # type: ignore[union-attr]
                 if not line:
                     break
                 text = line.decode(errors="replace").strip()

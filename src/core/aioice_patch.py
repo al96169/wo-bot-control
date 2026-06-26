@@ -84,8 +84,8 @@ def apply() -> None:
         else:
             _dtls_diag_counters[key]["remote"] = remote_str  # 每次更新
         c = _dtls_diag_counters[key]
-        c["tx"] += 1
-        if c["tx"] <= 5 or c["tx"] % 20 == 0:
+        c["tx"] += 1  # type: ignore[operator,index]
+        if c["tx"] <= 5 or c["tx"] % 20 == 0:  # type: ignore[operator]
             _PATCH_LOG.info(
                 "ICE data TX #%d: %d bytes → %s (comp=%d)",
                 c["tx"],
@@ -104,8 +104,8 @@ def apply() -> None:
         if key not in _dtls_diag_counters:
             _dtls_diag_counters[key] = {"tx": 0, "rx": 0, "remote": "?"}
         c = _dtls_diag_counters[key]
-        c["rx"] += 1
-        if c["rx"] <= 5 or c["rx"] % 20 == 0:
+        c["rx"] += 1  # type: ignore[operator,index]
+        if c["rx"] <= 5 or c["rx"] % 20 == 0:  # type: ignore[operator]
             first_byte = data[0] if data else 0
             _PATCH_LOG.info(
                 "ICE data RX #%d: %d bytes (0x%02x) comp=%d",

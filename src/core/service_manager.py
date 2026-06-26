@@ -540,7 +540,7 @@ class ServiceManager:
             logger.error(f"ServiceManager: stdout reader error for '{service_id}': {e}")
 
     async def send_subprocess_command(
-        self, service_id: str, cmd: str, params: dict = None, timeout: float = 30.0
+        self, service_id: str, cmd: str, params: dict | None = None, timeout: float = 30.0
     ) -> dict:
         """向子进程发送命令并等待响应"""
         writer = self._subproc_stdin.get(service_id)

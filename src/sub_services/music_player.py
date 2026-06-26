@@ -158,8 +158,8 @@ class MusicPlayer:
         # 播放状态
         self._status = "stopped"  # stopped | playing | paused
         self._current_track: dict[str, Any] | None = None
-        self._current_process = None  # type: Optional[asyncio.subprocess.Process]
-        self._monitor_task = None  # type: Optional[asyncio.Task]  # 用于取消旧的播放监控任务
+        self._current_process: asyncio.subprocess.Process | None = None
+        self._monitor_task: asyncio.Task | None = None  # 用于取消旧的播放监控任务
         self._volume = 75  # 默认音量 75%
         self._position = 0.0  # 当前播放位置（秒）
         self._playlist: list[dict[str, Any]] = []  # 播放队列
@@ -171,8 +171,8 @@ class MusicPlayer:
         self._stream_ports: dict[str, int] = {}  # stream_type → 端口
         self._active_source: str | None = None  # 当前活跃音源 (Last-one-wins): "local"/"dlna"/"airplay"/None
         self._airplay_watchdog_started = False
-        self._airplay_watchdog_task = None  # type: Optional[asyncio.Task]
-        self._dlna_watchdog_task = None  # type: Optional[asyncio.Task]
+        self._airplay_watchdog_task: asyncio.Task | None = None
+        self._dlna_watchdog_task: asyncio.Task | None = None
 
         # gmediarender DLNA 渲染器子进程
         self._gmediarender_proc: asyncio.subprocess.Process | None = None
@@ -398,7 +398,7 @@ class MusicPlayer:
                     cmd += ["sset", ctrl, f"{volume}%"]
                     await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda c=cmd: subprocess.run(
+                        lambda c=cmd: subprocess.run(  # type: ignore[misc]
                             c,
                             capture_output=True,
                             timeout=5,
@@ -434,7 +434,7 @@ class MusicPlayer:
                     cmd += ["sget", ctrl]
                     result = await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda c=cmd: subprocess.run(
+                        lambda c=cmd: subprocess.run(  # type: ignore[misc]
                             c,
                             capture_output=True,
                             text=True,
