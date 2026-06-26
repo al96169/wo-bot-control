@@ -31,6 +31,7 @@ class MotionController:
         self.current_linear = 0.0
         self.current_angular = 0.0
         self.current_mode = self.config.get("default_mode", "manual")
+        self.emergency_stopped = False
 
     def set_drive_type(self, drive_type: str):
         """设置驱动类型"""
@@ -141,7 +142,20 @@ class MotionController:
 
     async def stop(self):
         """停止运动"""
+        self.emergency_stopped = False
         await self.set_velocity(0, 0)
+
+    async def emergency_stop(self):
+        """急停：立即停止运动，设置急停标志"""
+        self.emergency_stopped = True
+        self.current_linear = 0.0
+        self.current_angular = 0.0
+        try:
+            await self.hardware.set_mecanum(0.0, 0.0, 0.0)
+        except Exception:
+            pass
+        if self.logger:
+            self.logger.warning("EMERGENCY STOP activated")
 
     def get_status(self) -> dict:
         """获取运动状态"""
