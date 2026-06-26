@@ -289,7 +289,8 @@ class RosmasterGimbal(GimbalInterface):
 
     async def set_angle(self, channel: int, angle: float) -> None:
         if not self._ensure_init():
-            raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
+            logger.debug(f"Gimbal hardware not available (serial: {self.com}), set_angle ignored")
+            return
 
         angle = int(max(0, min(180, angle)))
         self._current_angles[channel] = angle
@@ -303,7 +304,8 @@ class RosmasterGimbal(GimbalInterface):
     async def set_angles(self, pan_angle: float, tilt_angle: float) -> None:
         """同时设置 pan 和 tilt — 单次 run_in_executor 避免双倍开销"""
         if not self._ensure_init():
-            raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
+            logger.debug(f"Gimbal hardware not available (serial: {self.com}), set_angles ignored")
+            return
 
         pan = int(max(0, min(180, pan_angle)))
         tilt = int(max(0, min(180, tilt_angle)))
@@ -324,7 +326,8 @@ class RosmasterGimbal(GimbalInterface):
         round() 替代 int() 消除 0.75°/tick 时的节拍效应（每4tick卡一次），
         set_pwm_servo_all 单包发送替代两次 set_pwm_servo 节省 2ms sleep"""
         if not self._ensure_init():
-            raise RuntimeError(f"Gimbal hardware not ready (serial: {self.com})")
+            logger.debug(f"Gimbal hardware not available (serial: {self.com}), set_angles_sync ignored")
+            return
         self._current_angles[0] = int(max(0, min(180, pan_angle)))
         self._current_angles[1] = int(max(0, min(180, tilt_angle)))
         # 四路角度: s1,s2 未用=255, s3=tilt, s4=pan

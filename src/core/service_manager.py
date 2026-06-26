@@ -69,6 +69,13 @@ SERVICE_DEFINITIONS: dict[str, dict] = {
         "description": "高级传感器数据采集与环境监测",
         "auto_start": False,
     },
+    "music_player": {
+        "name": "音乐播放",
+        "module": "sub_services.music_player",
+        "script": "music_player.py",
+        "description": "本地音乐播放与网络推流 (DLNA/AirPlay/RTMP)",
+        "auto_start": True,
+    },
 }
 
 MAX_RESTART_ATTEMPTS = 10
@@ -217,9 +224,16 @@ class ServiceManager:
         # 停止子进程
         if service_id in self._processes:
             proc = self._processes.pop(service_id)
+            # 优先关闭 stdin，触发子进程 graceful shutdown（finally 执行清理逻辑）
+            stdin = self._subproc_stdin.pop(service_id, None)
+            if stdin:
+                try:
+                    stdin.close()
+                    # 等待子进程自然退出（shutdown() 杀 mpg123/gmediarender/shairport-sync）
+                    await asyncio.sleep(1.5)
+                except Exception:
+                    pass
             # 清理 IPC 资源
-            self._subproc_stdin.pop(service_id, None)
-            # 取消该服务的所有 pending futures
             stale_ids = [rid for rid, fut in self._subproc_futures.items() if not fut.done()]
             for rid in stale_ids:
                 fut = self._subproc_futures.pop(rid, None)
@@ -236,6 +250,70 @@ class ServiceManager:
                 pass
             except Exception as e:
                 logger.error(f"ServiceManager: error killing subprocess '{service_id}': {e}")
+
+            # music_player 会启动 gmediarender/shairport-sync 子进程，
+            # 这些子进程在父进程死亡后会变成孤儿继续运行，
+            # 因此需要 pkill 兜底强制清理
+            if service_id == "music_player":
+                import subprocess as sp
+                logger.info("ServiceManager: 清理 music_player 残留下游进程...")
+                downstream_procs = [
+                    ("gmediarender", "gmediarender", 5),
+                    ("shairport-sync", "shairport-sync", 10),
+                    ("mpg123", "mpg123", 3),
+                ]
+                for label, pattern, grace_secs in downstream_procs:
+                    try:
+                        # 先 SIGTERM 优雅退出（让 shairport-sync 发送 mDNS goodbye、
+                        # gmediarender 从 SSDP 网络注销）
+                        logger.info(f"ServiceManager: SIGTERM {label}，等待最多 {grace_secs}s 优雅退出...")
+                        sp.run(
+                            ["pkill", "-f", pattern],
+                            timeout=3,
+                            capture_output=True,
+                        )
+                        # 轮询等待进程退出（shairport-sync 需要时间发送 mDNS goodbye）
+                        for _ in range(grace_secs * 2):
+                            await asyncio.sleep(0.5)
+                            check = sp.run(
+                                ["pgrep", "-f", pattern],
+                                timeout=2,
+                                capture_output=True,
+                            )
+                            if check.returncode != 0:
+                                logger.info(f"ServiceManager: {label} 已优雅退出")
+                                break
+                        else:
+                            # 超时后 SIGKILL 兜底
+                            logger.info(f"ServiceManager: {label} 未响应 SIGTERM，SIGKILL 兜底...")
+                            sp.run(
+                                ["pkill", "-9", "-f", pattern],
+                                timeout=3,
+                                capture_output=True,
+                            )
+                        logger.info(f"ServiceManager: {label} 清理完成")
+                    except sp.TimeoutExpired:
+                        logger.warning(f"ServiceManager: pkill {label} 超时")
+                    except FileNotFoundError:
+                        pass
+                    except Exception as e:
+                        logger.warning(f"ServiceManager: pkill {label} 异常: {e}")
+                # 重载 avahi-daemon 清除缓存的 mDNS/Bonjour 条目，
+                # 确保 iPhone/macOS 立即感知 wo-bot AirPlay 设备已下线
+                try:
+                    logger.info("ServiceManager: 重载 avahi-daemon 清除 mDNS 缓存...")
+                    sp.run(
+                        ["sudo", "systemctl", "reload", "avahi-daemon"],
+                        timeout=8,
+                        capture_output=True,
+                    )
+                    logger.info("ServiceManager: avahi-daemon 重载完成")
+                except sp.TimeoutExpired:
+                    logger.warning("ServiceManager: avahi-daemon 重载超时")
+                except FileNotFoundError:
+                    logger.warning("ServiceManager: systemctl 不可用，跳过 avahi-daemon 重载")
+                except Exception as e:
+                    logger.warning(f"ServiceManager: avahi-daemon 重载异常: {e}")
 
         state.pid = None
         state.uptime = 0.0
@@ -314,8 +392,9 @@ class ServiceManager:
             return False
 
         try:
+            module = defn.get("module") or script_name.replace(".py", "").replace("/", ".")
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, script_path,
+                sys.executable, "-m", module,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -415,12 +494,11 @@ class ServiceManager:
                 logger.error(f"ServiceManager: failed to send failure notification: {e}")
 
     async def _notify_status(self, service_id: str) -> None:
-        """通知前端服务状态变更"""
+        """通知前端服务状态变更（状态通过 WebSocket 周期性广播同步）"""
         state = self._services.get(service_id)
         if not state:
             return
-        # 状态更新会通过 WebSocket 广播，此处记录日志即可
-        logger.debug(
+        logger.info(
             f"ServiceManager: status update '{service_id}' -> {state.status}"
         )
 

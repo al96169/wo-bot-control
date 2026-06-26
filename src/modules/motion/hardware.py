@@ -243,7 +243,8 @@ class RosmasterMotion(HardwareInterface):
     async def set_mecanum(self, v_x: float, v_y: float, v_z: float) -> None:
         """通过 Rosmaster 库直接发送三轴麦轮速度"""
         if not self._ensure_init():
-            raise RuntimeError(f"Rosmaster hardware not ready (serial: {self.com})")
+            logger.debug(f"Rosmaster hardware not available (serial: {self.com}), motion ignored")
+            return
 
         # X3 范围限制
         v_x = max(-1.0, min(1.0, v_x))
@@ -259,7 +260,8 @@ class RosmasterMotion(HardwareInterface):
     async def set_motor(self, name: str, speed: float) -> None:
         """回退到 Rosmaster.set_motor(s1, s2, s3, s4)"""
         if not self._ensure_init():
-            raise RuntimeError(f"Rosmaster hardware not ready (serial: {self.com})")
+            logger.debug(f"Rosmaster hardware not available (serial: {self.com}), motor ignored")
+            return
         # 暂不支持单轮控制，记录警告
         logger.warning(f"Rosmaster set_motor({name}) not individually supported, use set_mecanum")
 

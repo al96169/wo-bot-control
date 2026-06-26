@@ -350,9 +350,16 @@ class MessageHandler:
         else:
             return {"type": "error", "data": {"code": 400, "message": f"Unknown action: {action}"}}
 
+        # 操作成功后附带更新后的服务列表，确保前端即时更新状态
+        services = self.service_manager.get_all_services_status() if success else []
         return {
             "type": "service_control_ack",
-            "data": {"service_id": service_id, "action": action, "status": "ok" if success else "failed"},
+            "data": {
+                "service_id": service_id,
+                "action": action,
+                "status": "ok" if success else "failed",
+                "services": services,
+            },
         }
 
     async def _delayed_reboot(self):
@@ -806,6 +813,91 @@ class MessageHandler:
             return {"type": "wifi_connect_result", "data": {"ssid": ssid, "status": "timeout"}}
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
+
+    # ---- 音乐播放 ----
+
+    def _is_music_service_running(self) -> bool:
+        """检查音乐播放服务是否在运行"""
+        if not self.service_manager:
+            return False
+        state = self.service_manager.get_service_status("music_player")
+        return state is not None and state.get("status") == "running"
+
+    def _music_unavailable_response(self, msg_type: str = "music_status") -> dict:
+        """音乐服务不可用时的统一响应，避免 error 类型触发前端 Toast"""
+        return {"type": msg_type, "data": {"status": "stopped", "active_source": "none"}}
+
+    async def _forward_music_command(self, cmd: str, data: dict, resp_type: str = "music_action") -> dict:
+        """转发命令到音乐子进程，若服务不可用则返回友好响应（不触发前端 Toast）"""
+        if not self._is_music_service_running():
+            return self._music_unavailable_response(resp_type)
+        result = await self.service_manager.send_subprocess_command(
+            "music_player", cmd, data
+        )
+        # 防御性检查：子进程可能在状态检查和实际通信之间退出
+        if result.get("type") == "error":
+            return self._music_unavailable_response(resp_type)
+        return result
+
+    async def _handle_music_play(self, data: dict) -> dict:
+        """播放音乐"""
+        return await self._forward_music_command("play", data, "music_action")
+
+    async def _handle_music_pause(self, data: dict) -> dict:
+        """暂停音乐"""
+        return await self._forward_music_command("pause", data, "music_action")
+
+    async def _handle_music_stop(self, data: dict) -> dict:
+        """停止音乐"""
+        return await self._forward_music_command("stop", data, "music_action")
+
+    async def _handle_music_resume(self, data: dict) -> dict:
+        """恢复音乐"""
+        return await self._forward_music_command("resume", data, "music_action")
+
+    async def _handle_music_next(self, data: dict) -> dict:
+        """下一首"""
+        return await self._forward_music_command("next", data, "music_action")
+
+    async def _handle_music_previous(self, data: dict) -> dict:
+        """上一首"""
+        return await self._forward_music_command("previous", data, "music_action")
+
+    async def _handle_music_seek(self, data: dict) -> dict:
+        """跳转进度"""
+        return await self._forward_music_command("seek", data, "music_action")
+
+    async def _handle_music_volume(self, data: dict) -> dict:
+        """设置音量"""
+        return await self._forward_music_command("set_volume", data, "music_action")
+
+    async def _handle_music_status(self, data: dict) -> dict:
+        """获取播放状态"""
+        return await self._forward_music_command("get_status", data, "music_status")
+
+    async def _handle_music_list(self, data: dict) -> dict:
+        """获取歌曲列表"""
+        return await self._forward_music_command("list_songs", data, "music_list")
+
+    async def _handle_music_playlist_add(self, data: dict) -> dict:
+        """添加到播放队列"""
+        return await self._forward_music_command("playlist_add", data, "music_action")
+
+    async def _handle_music_playlist_remove(self, data: dict) -> dict:
+        """从播放队列移除"""
+        return await self._forward_music_command("playlist_remove", data, "music_action")
+
+    async def _handle_music_playlist_clear(self, data: dict) -> dict:
+        """清空播放队列"""
+        return await self._forward_music_command("playlist_clear", data, "music_action")
+
+    async def _handle_music_stream_start(self, data: dict) -> dict:
+        """启动推流"""
+        return await self._forward_music_command("stream_start", data, "stream_start")
+
+    async def _handle_music_stream_stop(self, data: dict) -> dict:
+        """停止推流"""
+        return await self._forward_music_command("stream_stop", data, "stream_stop")
 
     async def _handle_wifi_disconnect(self, data: dict) -> dict:
         """断开 WiFi 连接"""

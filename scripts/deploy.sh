@@ -174,6 +174,15 @@ rm -rf ${REMOTE_DIR}/* 2>/dev/null || true
 echo "  -> 解压部署包..."
 tar -xzf /tmp/${PACKAGE_NAME} -C ${REMOTE_DIR}
 
+# ---- 音频硬件自动检测 & 配置 ----
+echo "  -> 运行音频硬件自动配置..."
+if [ -f "${REMOTE_DIR}/scripts/setup_audio.sh" ]; then
+    eval "${SUDO} bash ${REMOTE_DIR}/scripts/setup_audio.sh"
+    echo "  -> 音频配置完成"
+else
+    echo "  [警告] setup_audio.sh 不存在，跳过音频配置"
+fi
+
 echo "  -> 检查依赖文件..."
 cd ${REMOTE_DIR}
 if [ ! -f "${REQUIREMENTS_FILE}" ]; then
