@@ -500,7 +500,7 @@ class WebRTCService:
                     sdpMid=sdp_mid if sdp_mid else None,
                     sdpMLineIndex=sdp_mline_index if sdp_mline_index is not None else None,
                 )
-                pc.addIceCandidate(ice)
+                await pc.addIceCandidate(ice)
                 self.logger.info(f"[{client_id}] ICE candidate added: {ip}:{port} ({cand_type})")
             else:
                 self.logger.warning(f"[{client_id}] Invalid candidate format: {candidate[:60]}")

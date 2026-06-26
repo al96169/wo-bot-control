@@ -54,7 +54,7 @@ def _fix_sctp_duplicate_stream() -> None:
                     return
             return await _data_channel_receive_original(self, stream_id, pp_id, data)
 
-        RTCSctpTransport._data_channel_receive = _data_channel_receive_fixed
+        RTCSctpTransport._data_channel_receive = _data_channel_receive_fixed  # type: ignore[method-assign]
         _PATCH_LOG.info("RTCSctpTransport._data_channel_receive() PATCHED: duplicate stream")
     except Exception as e:
         _PATCH_LOG.warning("Failed to patch SCTP duplicate stream: %s", e)
