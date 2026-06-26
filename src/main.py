@@ -243,15 +243,16 @@ class WoBotControl:
         motion_config = self.config.get("motion", {})
         shared_bot = None
         if self.gimbal_controller is not None:
-            hw = getattr(self.gimbal_controller, '_hardware', None)
-            if hw is not None and hasattr(hw, '_ensure_init'):
+            hw = getattr(self.gimbal_controller, "_hardware", None)
+            if hw is not None and hasattr(hw, "_ensure_init"):
                 hw._ensure_init()  # 触发懒加载，创建 Rosmaster Bot
-                shared_bot = getattr(hw, '_bot', None)
+                shared_bot = getattr(hw, "_bot", None)
                 if shared_bot is not None:
                     self.logger.info("Motion will share Rosmaster Bot instance with gimbal")
 
         if shared_bot is not None:
             from modules.motion.hardware import create_hardware
+
             motion_hw = create_hardware(motion_config, bot=shared_bot)
             self.motion_controller = MotionController(motion_config, self.logger, hardware=motion_hw)
         else:
@@ -318,10 +319,12 @@ class WoBotControl:
     async def _on_service_message(self, message: dict) -> None:
         """服务管理器消息回调：将子服务异常通知转发给所有 WebSocket 客户端"""
         if self.ws_server:
-            await self.ws_server.broadcast_message({
-                "type": "service_message",
-                "data": message,
-            })
+            await self.ws_server.broadcast_message(
+                {
+                    "type": "service_message",
+                    "data": message,
+                }
+            )
 
     def handle_signal(self, signum, frame):
         """处理信号（Python 3.6 兼容：用 ensure_future + call_soon_threadsafe）"""

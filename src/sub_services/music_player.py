@@ -28,14 +28,16 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger("music_player")
+
 
 # ---- 配置 ----
 # 媒体目录：优先从实际用户 home 获取（systemd 环境 HOME 可能是 / 或 /root）
 def _resolve_media_dir() -> str:
     import pwd
+
     # 方案 A: 查找真实登录用户 (trae / ubuntu / jetson) 的 home
     for username in ["trae", "ubuntu", "jetson"]:
         try:
@@ -51,6 +53,7 @@ def _resolve_media_dir() -> str:
         return expanded
     # 方案 C: 硬编码兜底
     return "/home/trae/media/music"
+
 
 DEFAULT_MEDIA_DIR = _resolve_media_dir()
 DEFAULT_STREAM_NAME = "Wo-Bot"
@@ -74,10 +77,13 @@ def _get_interface_name() -> str:
     """获取活跃的网络接口名（用于 UPnP 广播），返回如 wlan0 / eth0"""
     try:
         import subprocess
+
         result = subprocess.run(
             ["ip", "route", "get", "8.8.8.8"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            universal_newlines=True, timeout=5,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
         )
         parts = result.stdout.strip().split()
         if "dev" in parts:
@@ -93,10 +99,11 @@ def _detect_usb_audio_device() -> str:
     """检测 USB 音频设备，返回 ALSA softvol 设备名 (独立音量控制)，未找到则返回 default"""
     try:
         import re
-        with open("/proc/asound/cards", "r") as f:
+
+        with open("/proc/asound/cards") as f:
             content = f.read()
         # 优先匹配 USB 设备，通过 softvol → dmix 实现独立音量控制
-        for m in re.finditer(r"^\s*(\d+)\s*\[(\w+)\s*\].*USB", content, re.MULTILINE):
+        for _m in re.finditer(r"^\s*(\d+)\s*\[(\w+)\s*\].*USB", content, re.MULTILINE):
             return "wobot_local"
     except Exception:
         pass
@@ -107,7 +114,8 @@ def _detect_usb_card_number() -> int:
     """检测 USB 声卡编号 (如 2)，用于 amixer 音量控制。未找到返回 -1"""
     try:
         import re
-        with open("/proc/asound/cards", "r") as f:
+
+        with open("/proc/asound/cards") as f:
             content = f.read()
         for m in re.finditer(r"^\s*(\d+)\s*\[(\w+)\s*\].*USB", content, re.MULTILINE):
             return int(m.group(1))
@@ -120,9 +128,11 @@ def _detect_mixer_control(card_number: int) -> str:
     """检测声卡上的可用音量控制器名称，优先 Master → PCM → Speaker"""
     try:
         import subprocess
+
         result = subprocess.run(
             ["amixer", "-c", str(card_number), "scontrols"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+            capture_output=True,
+            text=True,
             timeout=5,
         )
         output = result.stdout
@@ -147,55 +157,61 @@ class MusicPlayer:
 
         # 播放状态
         self._status = "stopped"  # stopped | playing | paused
-        self._current_track: Optional[Dict[str, Any]] = None
+        self._current_track: dict[str, Any] | None = None
         self._current_process = None  # type: Optional[asyncio.subprocess.Process]
         self._monitor_task = None  # type: Optional[asyncio.Task]  # 用于取消旧的播放监控任务
         self._volume = 75  # 默认音量 75%
         self._position = 0.0  # 当前播放位置（秒）
-        self._playlist: List[Dict[str, Any]] = []  # 播放队列
+        self._playlist: list[dict[str, Any]] = []  # 播放队列
         self._start_time = 0.0
 
         # 推流状态 — 支持多个服务同时运行
         self._streaming_services: set = set()  # 当前活跃的推流服务类型
-        self._stream_processes: Dict[str, asyncio.subprocess.Process] = {}  # stream_type → 进程
-        self._stream_ports: Dict[str, int] = {}  # stream_type → 端口
-        self._active_source: Optional[str] = None  # 当前活跃音源 (Last-one-wins): "local"/"dlna"/"airplay"/None
+        self._stream_processes: dict[str, asyncio.subprocess.Process] = {}  # stream_type → 进程
+        self._stream_ports: dict[str, int] = {}  # stream_type → 端口
+        self._active_source: str | None = None  # 当前活跃音源 (Last-one-wins): "local"/"dlna"/"airplay"/None
         self._airplay_watchdog_started = False
         self._airplay_watchdog_task = None  # type: Optional[asyncio.Task]
-        self._dlna_watchdog_task = None     # type: Optional[asyncio.Task]
+        self._dlna_watchdog_task = None  # type: Optional[asyncio.Task]
 
         # gmediarender DLNA 渲染器子进程
-        self._gmediarender_proc: Optional[asyncio.subprocess.Process] = None
+        self._gmediarender_proc: asyncio.subprocess.Process | None = None
 
         # DLNA 播放位置跟踪（用于前端进度条）
-        self._dlna_position = 0.0       # gmediarender 上报的播放位置（秒）
-        self._dlna_query_time = 0.0     # 上次查询位置的时间戳（用于推算实时位置）
+        self._dlna_position = 0.0  # gmediarender 上报的播放位置（秒）
+        self._dlna_query_time = 0.0  # 上次查询位置的时间戳（用于推算实时位置）
 
     # ---- 歌曲管理 ----
 
-    def list_songs(self) -> List[Dict[str, Any]]:
+    def list_songs(self) -> list[dict[str, Any]]:
         """列出媒体文件夹中的歌曲"""
         songs = []
         supported = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".wma"}
         if self.media_dir.exists():
             for f in sorted(self.media_dir.iterdir()):
                 if f.is_file() and f.suffix.lower() in supported:
-                    songs.append({
-                        "name": f.stem,
-                        "filename": f.name,
-                        "path": str(f),
-                        "size": f.stat().st_size,
-                        "format": f.suffix.lower().lstrip("."),
-                    })
+                    songs.append(
+                        {
+                            "name": f.stem,
+                            "filename": f.name,
+                            "path": str(f),
+                            "size": f.stat().st_size,
+                            "format": f.suffix.lower().lstrip("."),
+                        }
+                    )
         return songs
 
     async def _get_duration(self, filepath: str) -> float:
         """用 ffprobe 获取音频文件的实际时长（秒）"""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "csv=p=0",
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
                 filepath,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
@@ -209,7 +225,7 @@ class MusicPlayer:
 
     # ---- 播放控制 ----
 
-    async def play(self, filename: Optional[str] = None) -> Dict[str, Any]:
+    async def play(self, filename: str | None = None) -> dict[str, Any]:
         """播放指定歌曲或恢复播放 (Last-one-wins: 会挂起推流服务)"""
         # 如果指定了文件名，先加载到当前曲目
         if filename:
@@ -263,18 +279,19 @@ class MusicPlayer:
             cmd = [
                 "mpg123",
                 "-q",  # 安静模式
-                "--buffer", "65536",  # 64KB 缓冲区（减少 underrun 噪音）
-                "--preload", "0.5",   # 预加载 0.5 秒
-                "-o", "alsa",
-                "-a", _detect_usb_audio_device(),
+                "--buffer",
+                "65536",  # 64KB 缓冲区（减少 underrun 噪音）
+                "--preload",
+                "0.5",  # 预加载 0.5 秒
+                "-o",
+                "alsa",
+                "-a",
+                _detect_usb_audio_device(),
             ]
             if self._position > 0.5:
                 # 安全跳转：用 ffprobe 获取的实际时长做边界保护
                 duration = track.get("duration", 0)
-                if duration > 0:
-                    safe_pos = min(self._position, max(0, duration - 2))
-                else:
-                    safe_pos = self._position
+                safe_pos = min(self._position, max(0, duration - 2)) if duration > 0 else self._position
                 skip_frames = int(safe_pos * 38)  # ~38 frames/sec for MP3
                 if skip_frames > 0:
                     cmd += ["-k", str(skip_frames)]
@@ -328,7 +345,7 @@ class MusicPlayer:
 
     async def seek(self, position: float) -> dict:
         """跳转到指定位置（秒）。
-        
+
         使用 mpg123 -k 帧跳过实现跳转。有实际时长时做安全边界保护，
         防止跳过 EOF 导致 mpg123 异常退出和音乐中断。
         """
@@ -382,7 +399,9 @@ class MusicPlayer:
                     await asyncio.get_event_loop().run_in_executor(
                         None,
                         lambda c=cmd: subprocess.run(
-                            c, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                            c,
+                            capture_output=True,
+                            timeout=5,
                         ),
                     )
                     success = True
@@ -416,13 +435,16 @@ class MusicPlayer:
                     result = await asyncio.get_event_loop().run_in_executor(
                         None,
                         lambda c=cmd: subprocess.run(
-                            c, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            universal_newlines=True, timeout=5,
+                            c,
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
                         ),
                     )
                     for line in result.stdout.split("\n"):
                         if "Playback" in line and "%" in line:
                             import re
+
                             m = re.search(r"\[(\d+)%\]", line)
                             if m:
                                 self._volume = int(m.group(1))
@@ -464,12 +486,12 @@ class MusicPlayer:
 
     # ---- 推流控制 ----
 
-    async def _set_active_source(self, source: Optional[str]) -> None:
+    async def _set_active_source(self, source: str | None) -> None:
         """Last-one-wins: 将指定音源设为 100%，其他音源静音 (0%)
-        
+
         Args:
             source: "local" / "dlna" / "airplay" / None (全部恢复 100%)
-        
+
         通过 ALSA softvol 独立控制每个音源的音量，不杀进程，保持手机连接不断开。
         """
         all_sources = {"local": "WoBot Local", "dlna": "WoBot DLNA", "airplay": "WoBot AirPlay"}
@@ -478,7 +500,12 @@ class MusicPlayer:
             for key, mixer_name in all_sources.items():
                 vol = "100%" if (source is None or key == source) else "0%"
                 proc = await asyncio.create_subprocess_exec(
-                    "amixer", "-c", card, "sset", mixer_name, vol,
+                    "amixer",
+                    "-c",
+                    card,
+                    "sset",
+                    mixer_name,
+                    vol,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
@@ -517,17 +544,17 @@ class MusicPlayer:
             except Exception as e:
                 logger.error(f"AirPlay 信号监控异常: {e}")
 
-    async def _query_dlna_state(self, ip: str, port: int) -> Optional[str]:
+    async def _query_dlna_state(self, ip: str, port: int) -> str | None:
         """通过 UPnP SOAP 查询 DLNA 播放状态（返回 TransportState 或 None）"""
         soap_body = (
             '<?xml version="1.0"?>'
             '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
-            '<s:Body>'
+            "<s:Body>"
             '<u:GetTransportInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
-            '<InstanceID>0</InstanceID>'
-            '</u:GetTransportInfo>'
-            '</s:Body>'
-            '</s:Envelope>'
+            "<InstanceID>0</InstanceID>"
+            "</u:GetTransportInfo>"
+            "</s:Body>"
+            "</s:Envelope>"
         )
         req = urllib.request.Request(
             f"http://{ip}:{port}/upnp/control/rendertransport1",
@@ -549,13 +576,13 @@ class MusicPlayer:
         soap_body = (
             '<?xml version="1.0"?>'
             '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
-            '<s:Body>'
+            "<s:Body>"
             '<u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
-            '<InstanceID>0</InstanceID>'
-            '<Speed>1</Speed>'
-            '</u:Play>'
-            '</s:Body>'
-            '</s:Envelope>'
+            "<InstanceID>0</InstanceID>"
+            "<Speed>1</Speed>"
+            "</u:Play>"
+            "</s:Body>"
+            "</s:Envelope>"
         )
         try:
             req = urllib.request.Request(
@@ -577,7 +604,7 @@ class MusicPlayer:
     async def _watch_dlna_signal(self) -> None:
         """后台监控 DLNA 播放状态（通过 UPnP GetTransportInfo），检测 PLAYING 转变时抢占 (Last-one-wins)
         同时查询 DLNA 播放位置，用于前端进度条显示。"""
-        prev_state: Optional[str] = "NO_MEDIA_PRESENT"
+        prev_state: str | None = "NO_MEDIA_PRESENT"
         local_ip = _get_local_ip()
         dlna_port = DLNA_RENDERER_PORT
         while True:
@@ -614,17 +641,17 @@ class MusicPlayer:
             except Exception as e:
                 logger.error(f"DLNA 状态监控异常: {e}")
 
-    async def _query_dlna_position(self, ip: str, port: int) -> Optional[float]:
+    async def _query_dlna_position(self, ip: str, port: int) -> float | None:
         """通过 UPnP SOAP 查询 DLNA 当前播放位置（秒），返回 None 表示查询失败"""
         soap_body = (
             '<?xml version="1.0"?>'
             '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
-            '<s:Body>'
+            "<s:Body>"
             '<u:GetPositionInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
-            '<InstanceID>0</InstanceID>'
-            '</u:GetPositionInfo>'
-            '</s:Body>'
-            '</s:Envelope>'
+            "<InstanceID>0</InstanceID>"
+            "</u:GetPositionInfo>"
+            "</s:Body>"
+            "</s:Envelope>"
         )
         try:
             req = urllib.request.Request(
@@ -675,7 +702,7 @@ class MusicPlayer:
             logger.error(f"启动推流失败: {e}")
             return {"error": f"启动推流失败: {e}"}
 
-    async def stream_stop(self, stream_type: Optional[str] = None) -> dict:
+    async def stream_stop(self, stream_type: str | None = None) -> dict:
         """停止推流服务，不指定则停止全部"""
         stopped = []
         if stream_type:
@@ -708,7 +735,9 @@ class MusicPlayer:
             try:
                 subprocess.run(
                     ["pkill", "-9", "pulseaudio"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
                 )
             except Exception:
                 pass
@@ -722,15 +751,24 @@ class MusicPlayer:
             #   --logfile: 独立日志文件，不依赖 systemd-journald
             proc = await asyncio.create_subprocess_exec(
                 "/usr/local/bin/gmediarender",
-                "-f", DEFAULT_STREAM_NAME,          # 设备名: Wo-Bot
-                "-p", str(DLNA_RENDERER_PORT),       # UPnP 端口
-                "-I", "wlan0",                    # 绑定无线网卡（0.0.0.0 不兼容 libupnp）
-                "--mime-filter", "audio",            # 只接受音频
-                "--gstout-audiosink", "alsasink",    # ALSA 输出
-                "--gstout-audiodevice", "wobot_dlna", # softvol 设备
-                "--gstout-videosink", "fakesink",    # 丢弃视频
-                "--gstout-initial-volume-db", "0.0", # 初始 100% 音量
-                "--logfile", "/tmp/wobot-gmediarender.log",
+                "-f",
+                DEFAULT_STREAM_NAME,  # 设备名: Wo-Bot
+                "-p",
+                str(DLNA_RENDERER_PORT),  # UPnP 端口
+                "-I",
+                "wlan0",  # 绑定无线网卡（0.0.0.0 不兼容 libupnp）
+                "--mime-filter",
+                "audio",  # 只接受音频
+                "--gstout-audiosink",
+                "alsasink",  # ALSA 输出
+                "--gstout-audiodevice",
+                "wobot_dlna",  # softvol 设备
+                "--gstout-videosink",
+                "fakesink",  # 丢弃视频
+                "--gstout-initial-volume-db",
+                "0.0",  # 初始 100% 音量
+                "--logfile",
+                "/tmp/wobot-gmediarender.log",
                 env={**os.environ, "UPNP_ENABLE_IPV6": "0"},  # 禁用 IPv6 避免绑定冲突
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -742,7 +780,12 @@ class MusicPlayer:
 
             # 恢复 DLNA softvol 为 100%
             await asyncio.create_subprocess_exec(
-                "amixer", "-c", card, "sset", "WoBot DLNA", "100%",
+                "amixer",
+                "-c",
+                card,
+                "sset",
+                "WoBot DLNA",
+                "100%",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -768,16 +811,26 @@ class MusicPlayer:
             # shairport-sync 默认找 Master 控制，USB 声卡只有 PCM，需显式指定
             # -B/-E 钩子: AirPlay 开始/停止播放时通知 music_player (Last-one-wins)
             card_num = self._usb_card if self._usb_card >= 0 else 2
-            hook_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts")
+            hook_dir = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts"
+            )
             proc = await asyncio.create_subprocess_exec(
                 "shairport-sync",
-                "-a", DEFAULT_STREAM_NAME,   # 设备名: Wo-Bot
-                "-o", "alsa",                # ALSA 后端
-                "-B", f"{hook_dir}/airplay-start.sh",   # 开始播放钩子
-                "-E", f"{hook_dir}/airplay-stop.sh",    # 停止播放钩子
-                "--", "-d", "wobot_airplay",   # softvol → dmix (独立音量控制, 与 DLNA 共享声卡)
-                "-m", f"hw:{card_num}",      # 混音器设备: 动态检测 USB 声卡编号
-                "-c", "PCM",                 # 混音器控制: USB 声卡仅有的 PCM 控制器
+                "-a",
+                DEFAULT_STREAM_NAME,  # 设备名: Wo-Bot
+                "-o",
+                "alsa",  # ALSA 后端
+                "-B",
+                f"{hook_dir}/airplay-start.sh",  # 开始播放钩子
+                "-E",
+                f"{hook_dir}/airplay-stop.sh",  # 停止播放钩子
+                "--",
+                "-d",
+                "wobot_airplay",  # softvol → dmix (独立音量控制, 与 DLNA 共享声卡)
+                "-m",
+                f"hw:{card_num}",  # 混音器设备: 动态检测 USB 声卡编号
+                "-c",
+                "PCM",  # 混音器控制: USB 声卡仅有的 PCM 控制器
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
@@ -787,7 +840,12 @@ class MusicPlayer:
             # 重启后恢复 AirPlay softvol 为 100%（防止之前被抢占静音后重启导致无声）
             card = str(card_num)
             await asyncio.create_subprocess_exec(
-                "amixer", "-c", card, "sset", "WoBot AirPlay", "100%",
+                "amixer",
+                "-c",
+                card,
+                "sset",
+                "WoBot AirPlay",
+                "100%",
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -816,7 +874,8 @@ class MusicPlayer:
                 # 先尝试 SIGTERM 优雅退出
                 subprocess.run(
                     ["pkill", "-f", match_pattern],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     timeout=3,
                 )
             except Exception:
@@ -826,7 +885,8 @@ class MusicPlayer:
             while time.time() < deadline:
                 result = subprocess.run(
                     ["pgrep", "-f", match_pattern],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
                 if result.returncode != 0:
                     logger.info(f"已清理孤儿进程: {proc_name}")
@@ -838,7 +898,8 @@ class MusicPlayer:
                 try:
                     subprocess.run(
                         ["pkill", "-9", "-f", match_pattern],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                         timeout=3,
                     )
                 except Exception:
@@ -858,14 +919,16 @@ class MusicPlayer:
     async def _detect_and_reuse_streams(self) -> None:
         """检测已有推流进程（gmediarender/shairport-sync）并复用，避免重启服务时
         DLNA 设备反复出现消失（#14）和 AirPlay 连接断开（#13）。
-        
+
         如果进程已存在：注册到 _streaming_services，启动对应的状态监控。
         如果进程不存在：清理残留信号文件。
         """
         # 检测 gmediarender（DLNA）
         try:
             result = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", "gmediarender",
+                "pgrep",
+                "-f",
+                "gmediarender",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -886,7 +949,9 @@ class MusicPlayer:
         # 检测 shairport-sync（AirPlay）
         try:
             result = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", "shairport-sync",
+                "pgrep",
+                "-f",
+                "shairport-sync",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -920,11 +985,16 @@ class MusicPlayer:
             # ffmpeg 监听 RTMP 端口，将推流音频输出到 ALSA
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
-                "-loglevel", "quiet",
-                "-listen", "1",
-                "-f", "flv",
-                "-i", f"rtmp://0.0.0.0:{RTMP_PORT}/live",
-                "-f", "alsa",
+                "-loglevel",
+                "quiet",
+                "-listen",
+                "1",
+                "-f",
+                "flv",
+                "-i",
+                f"rtmp://0.0.0.0:{RTMP_PORT}/live",
+                "-f",
+                "alsa",
                 _detect_usb_audio_device(),
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -978,9 +1048,10 @@ class MusicPlayer:
             # 恢复 PulseAudio
             try:
                 subprocess.run(
-                    ["/sbin/runuser", "-l", "jetson", "-c",
-                     "pulseaudio --start --log-target=syslog"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+                    ["/sbin/runuser", "-l", "jetson", "-c", "pulseaudio --start --log-target=syslog"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
                 )
             except Exception:
                 pass
@@ -1112,7 +1183,7 @@ class MusicPlayer:
 
 # ---- 命令处理 ----
 
-_player: Optional[MusicPlayer] = None
+_player: MusicPlayer | None = None
 
 
 def get_player() -> MusicPlayer:
@@ -1277,9 +1348,11 @@ async def main():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+
     # SIGTERM handler: 立即终止进程，子进程清理由 service_manager.stop_service() 的 pkill 兜底
     # （asyncio 中 sys.exit(0) 无法可靠触发 finally 块的 shutdown()，#5/#6 通过 service_manager 层解决）
     def _sigterm_handler(_signum, _frame):
         os._exit(0)
+
     signal.signal(signal.SIGTERM, _sigterm_handler)
     asyncio.run(main())

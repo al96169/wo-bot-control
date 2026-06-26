@@ -10,13 +10,11 @@ import asyncio
 import json
 import logging
 import os
-import signal
-import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
 
 logger = logging.getLogger("service_manager")
 
@@ -84,10 +82,11 @@ MAX_RESTART_ATTEMPTS = 10
 @dataclass
 class ServiceState:
     """子服务状态"""
+
     service_id: str
     name: str
     status: str = "stopped"  # stopped | starting | running | failed
-    pid: Optional[int] = None
+    pid: int | None = None
     restart_count: int = 0
     last_error: str = ""
     started_at: float = 0.0
@@ -97,7 +96,7 @@ class ServiceState:
 class ServiceManager:
     """主服务的进程管理器，负责守护所有子服务"""
 
-    def __init__(self, config: dict, message_callback: Optional[Callable] = None):
+    def __init__(self, config: dict, message_callback: Callable | None = None):
         self.config = config
         self._message_callback = message_callback  # 发送消息至前端的回调
         self._services: dict[str, ServiceState] = {}
@@ -198,7 +197,7 @@ class ServiceManager:
 
         # 主服务不可停止
         if defn.get("is_main"):
-            logger.warning(f"ServiceManager: cannot stop main service")
+            logger.warning("ServiceManager: cannot stop main service")
             return False
 
         if state.status == "stopped":
@@ -256,6 +255,7 @@ class ServiceManager:
             # 因此需要 pkill 兜底强制清理
             if service_id == "music_player":
                 import subprocess as sp
+
                 logger.info("ServiceManager: 清理 music_player 残留下游进程...")
                 downstream_procs = [
                     ("gmediarender", "gmediarender", 5),
@@ -394,7 +394,9 @@ class ServiceManager:
         try:
             module = defn.get("module") or script_name.replace(".py", "").replace("/", ".")
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", module,
+                sys.executable,
+                "-m",
+                module,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -409,9 +411,7 @@ class ServiceManager:
             asyncio.create_task(self._read_subprocess_stdout(service_id, defn))
 
             # 启动监控任务
-            self._tasks[service_id] = asyncio.create_task(
-                self._monitor_subprocess(service_id, defn)
-            )
+            self._tasks[service_id] = asyncio.create_task(self._monitor_subprocess(service_id, defn))
             return True
         except Exception as e:
             logger.error(f"ServiceManager: failed to create subprocess for '{service_id}': {e}")
@@ -452,7 +452,9 @@ class ServiceManager:
                         state.last_error = (
                             f"Exited with code {returncode} after {MAX_RESTART_ATTEMPTS} restart attempts"
                         )
-                        logger.error(f"ServiceManager: service '{service_id}' FAILED after {MAX_RESTART_ATTEMPTS} restarts")
+                        logger.error(
+                            f"ServiceManager: service '{service_id}' FAILED after {MAX_RESTART_ATTEMPTS} restarts"
+                        )
                         await self._send_failure_notification(service_id)
                         await self._notify_status(service_id)
                         break
@@ -480,9 +482,9 @@ class ServiceManager:
             "subject": f"[服务异常] {state.name} 启动失败",
             "summary": f"{state.name} 在连续 {MAX_RESTART_ATTEMPTS} 次重启尝试后仍然失败",
             "body": f"服务 {state.name} ({service_id}) 已停止响应。\n"
-                    f"最后错误: {state.last_error}\n"
-                    f"重试次数: {state.restart_count}/{MAX_RESTART_ATTEMPTS}\n"
-                    f"请检查系统日志排查问题。",
+            f"最后错误: {state.last_error}\n"
+            f"重试次数: {state.restart_count}/{MAX_RESTART_ATTEMPTS}\n"
+            f"请检查系统日志排查问题。",
             "severity": "error",
             "source": "service_manager",
         }
@@ -498,9 +500,7 @@ class ServiceManager:
         state = self._services.get(service_id)
         if not state:
             return
-        logger.info(
-            f"ServiceManager: status update '{service_id}' -> {state.status}"
-        )
+        logger.info(f"ServiceManager: status update '{service_id}' -> {state.status}")
 
     # ---- 子进程 IPC ----
 
@@ -539,7 +539,9 @@ class ServiceManager:
         except Exception as e:
             logger.error(f"ServiceManager: stdout reader error for '{service_id}': {e}")
 
-    async def send_subprocess_command(self, service_id: str, cmd: str, params: dict = None, timeout: float = 30.0) -> dict:
+    async def send_subprocess_command(
+        self, service_id: str, cmd: str, params: dict = None, timeout: float = 30.0
+    ) -> dict:
         """向子进程发送命令并等待响应"""
         writer = self._subproc_stdin.get(service_id)
         if not writer:

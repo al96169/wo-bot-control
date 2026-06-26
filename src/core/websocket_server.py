@@ -236,9 +236,7 @@ class WebSocketServer:
 
         if client_protocol < min_protocol:
             if self.logger:
-                self.logger.info(
-                    f"Client {remote} rejected: protocol version {client_protocol} < min {min_protocol}"
-                )
+                self.logger.info(f"Client {remote} rejected: protocol version {client_protocol} < min {min_protocol}")
             await websocket.close(4001, "Connection refused")
             return
 
@@ -376,8 +374,7 @@ class WebSocketServer:
                             f"2122252543 {client_real_ip} {parts[5]} typ host"
                         )
                         self.logger.info(
-                            f"[{client_id}] Adding host candidate with real IP first: "
-                            f"{client_real_ip}:{parts[5]}"
+                            f"[{client_id}] Adding host candidate with real IP first: {client_real_ip}:{parts[5]}"
                         )
                         # 先添加真实 IP 候选（猴子补丁按添加顺序尝试，优先命中）
                         await self.webrtc_service.add_ice_candidate(

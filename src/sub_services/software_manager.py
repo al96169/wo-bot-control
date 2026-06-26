@@ -47,11 +47,13 @@ async def _cmd_list(params: dict) -> dict:
         for line in result.stdout.split("\n")[5:]:  # 跳过头部
             parts = line.split()
             if len(parts) >= 3:
-                packages.append({
-                    "name": parts[1],
-                    "version": parts[2],
-                    "status": "installed",
-                })
+                packages.append(
+                    {
+                        "name": parts[1],
+                        "version": parts[2],
+                        "status": "installed",
+                    }
+                )
         return {"type": "software_list", "data": {"packages": packages[:50]}}
     except Exception as e:
         return {"type": "error", "data": {"code": 500, "message": str(e)}}
@@ -94,7 +96,9 @@ async def _cmd_install(params: dict) -> dict:
                 None,
                 lambda: subprocess.run(
                     ["apt-get", "install", "-y", package],
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
                 ),
             )
         elif source == "pip":
@@ -102,7 +106,9 @@ async def _cmd_install(params: dict) -> dict:
                 None,
                 lambda: subprocess.run(
                     ["pip", "install", package, "--break-system-packages"],
-                    capture_output=True, text=True, timeout=120,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
                 ),
             )
         else:
@@ -134,7 +140,9 @@ async def _cmd_uninstall(params: dict) -> dict:
             None,
             lambda: subprocess.run(
                 ["apt-get", "remove", "-y", package],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             ),
         )
         ok = result.returncode == 0
@@ -161,7 +169,9 @@ async def _cmd_upgrade(params: dict) -> dict:
             None,
             lambda: subprocess.run(
                 ["apt-get", "install", "--only-upgrade", "-y", package],
-                capture_output=True, text=True, timeout=120,
+                capture_output=True,
+                text=True,
+                timeout=120,
             ),
         )
         ok = result.returncode == 0

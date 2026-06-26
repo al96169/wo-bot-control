@@ -7,6 +7,7 @@ aioice / aiortc 猴子补丁
   2. aiortc 0.9.10 SCTP DataChannel 重复 OPEN 崩溃：浏览器 DTLS 重连时可能重复发送
      DataChannel OPEN，将 assert 改为 warn + return 优雅忽略。
 """
+
 import asyncio
 import logging
 
@@ -42,13 +43,13 @@ def _fix_sctp_duplicate_stream() -> None:
             # 检查是否重复 OPEN
             if pp_id == 50 and len(data) >= 1:  # WEBRTC_DCEP = 50
                 from struct import unpack
-                msg_type = unpack('!B', data[0:1])[0]
+
+                msg_type = unpack("!B", data[0:1])[0]
                 if msg_type == 3 and stream_id in self._data_channels:  # DATA_CHANNEL_OPEN
                     _PATCH_LOG.warning(
-                        "SCTP: ignoring duplicate DATA_CHANNEL_OPEN for stream_id=%d "
-                        "(label=%s)",
+                        "SCTP: ignoring duplicate DATA_CHANNEL_OPEN for stream_id=%d (label=%s)",
                         stream_id,
-                        getattr(self._data_channels.get(stream_id, None), 'label', '?'),
+                        getattr(self._data_channels.get(stream_id, None), "label", "?"),
                     )
                     return
             return await _data_channel_receive_original(self, stream_id, pp_id, data)
@@ -64,7 +65,6 @@ def apply() -> None:
     global _PENDING_CANDIDATES
     _PENDING_CANDIDATES = []
 
-    import aioice
     from aioice.ice import Connection as AioiceConnection
 
     _aioice_connect_original = AioiceConnection.connect
@@ -88,7 +88,10 @@ def apply() -> None:
         if c["tx"] <= 5 or c["tx"] % 20 == 0:
             _PATCH_LOG.info(
                 "ICE data TX #%d: %d bytes → %s (comp=%d)",
-                c["tx"], len(data), remote_str, component,
+                c["tx"],
+                len(data),
+                remote_str,
+                component,
             )
 
     def _aioice_data_received_diag(self, data, component):
@@ -106,7 +109,10 @@ def apply() -> None:
             first_byte = data[0] if data else 0
             _PATCH_LOG.info(
                 "ICE data RX #%d: %d bytes (0x%02x) comp=%d",
-                c["rx"], len(data), first_byte, component,
+                c["rx"],
+                len(data),
+                first_byte,
+                component,
             )
 
     AioiceConnection.sendto = _aioice_sendto_diag  # type: ignore[method-assign]
@@ -155,12 +161,15 @@ def apply() -> None:
         _PENDING_CANDIDATES.append(cand)
         ip_ver = "IPv6" if ":" in remote_cand.host else "IPv4"
         _PATCH_LOG.info(
-            "ICE forced (%s): local=%s:%d remote=%s:%d component=%d "
-            "(v6_candidates=%d, v4_candidates=%d)",
-            ip_ver, lc.host, lc.port,
-            remote_cand.host, remote_cand.port,
+            "ICE forced (%s): local=%s:%d remote=%s:%d component=%d (v6_candidates=%d, v4_candidates=%d)",
+            ip_ver,
+            lc.host,
+            lc.port,
+            remote_cand.host,
+            remote_cand.port,
             lc.component,
-            len(pairs_v6), len(pairs_v4),
+            len(pairs_v6),
+            len(pairs_v4),
         )
         return  # start() 会在返回后调用 _set_state("completed")
 

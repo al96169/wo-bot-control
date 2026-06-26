@@ -14,15 +14,13 @@ Python Native DLNA/UPnP Media Renderer (纯 Python stdlib 实现)
 
 import asyncio
 import logging
-import os
 import socket
 import struct
 import subprocess
 import threading
 import time
 import uuid
-import xml.etree.ElementTree as ET
-from typing import Optional, Dict, Callable, Awaitable
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +50,7 @@ class PyDlnaRenderer:
         port: int = 49452,
         audio_device: str = "wobot_dlna",
         usb_card: int = 2,
-        on_state_change: Optional[Callable[..., Awaitable[None]]] = None,
+        on_state_change: Callable[..., Awaitable[None]] | None = None,
     ):
         self.uuid = str(uuid.uuid4())
         self.friendly_name = friendly_name
@@ -72,8 +70,8 @@ class PyDlnaRenderer:
         self._volume: int = 100
 
         # GStreamer 播放进程
-        self._gst_proc: Optional[asyncio.subprocess.Process] = None
-        self._gst_monitor_task: Optional[asyncio.Task] = None
+        self._gst_proc: asyncio.subprocess.Process | None = None
+        self._gst_monitor_task: asyncio.Task | None = None
 
         # 播放进度跟踪（用 monotonic 避免系统时间跳变）
         self._playback_start_time: float = 0.0
@@ -81,12 +79,12 @@ class PyDlnaRenderer:
         self._eos_detected: bool = False  # 区分真实 EOS 与进程异常退出
 
         # SSDP / HTTP 服务
-        self._ssdp_sock: Optional[socket.socket] = None
-        self._ssdp_thread: Optional[threading.Thread] = None
-        self._http_server: Optional[asyncio.AbstractServer] = None
+        self._ssdp_sock: socket.socket | None = None
+        self._ssdp_thread: threading.Thread | None = None
+        self._http_server: asyncio.AbstractServer | None = None
 
         # GENA 事件订阅者
-        self._subscribers: Dict[str, Dict] = {}  # sid -> {url, timeout, seq}
+        self._subscribers: dict[str, dict] = {}  # sid -> {url, timeout, seq}
 
         # 本地 IP
         self._local_ip = self._get_local_ip()
@@ -110,8 +108,10 @@ class PyDlnaRenderer:
         try:
             result = subprocess.run(
                 ["ip", "route", "get", "8.8.8.8"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                universal_newlines=True, timeout=5,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
             )
             parts = result.stdout.strip().split()
             if "dev" in parts:
@@ -127,7 +127,7 @@ class PyDlnaRenderer:
     def _build_device_desc(self) -> str:
         ip = self._local_ip
         port = self.port
-        return f'''<?xml version="1.0"?>
+        return f"""<?xml version="1.0"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
 <specVersion><major>1</major><minor>0</minor></specVersion>
 <device>
@@ -164,9 +164,9 @@ class PyDlnaRenderer:
 </serviceList>
 <presentationURL>http://{ip}:{port}/</presentationURL>
 </device>
-</root>'''
+</root>"""
 
-    _AV_TRANSPORT_SCPD = '''<?xml version="1.0"?>
+    _AV_TRANSPORT_SCPD = """<?xml version="1.0"?>
 <scpd xmlns="urn:schemas-upnp-org:service-1-0">
 <specVersion><major>1</major><minor>0</minor></specVersion>
 <actionList>
@@ -269,9 +269,9 @@ class PyDlnaRenderer:
 <stateVariable sendEvents="yes"><name>NextAVTransportURI</name><dataType>string</dataType></stateVariable>
 <stateVariable sendEvents="yes"><name>NextAVTransportURIMetaData</name><dataType>string</dataType></stateVariable>
 </serviceStateTable>
-</scpd>'''
+</scpd>"""
 
-    _CONN_MGR_SCPD = '''<?xml version="1.0"?>
+    _CONN_MGR_SCPD = """<?xml version="1.0"?>
 <scpd xmlns="urn:schemas-upnp-org:service-1-0">
 <specVersion><major>1</major><minor>0</minor></specVersion>
 <actionList>
@@ -285,9 +285,9 @@ class PyDlnaRenderer:
 <stateVariable sendEvents="yes"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>
 <stateVariable sendEvents="yes"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable>
 </serviceStateTable>
-</scpd>'''
+</scpd>"""
 
-    _RENDER_CTRL_SCPD = '''<?xml version="1.0"?>
+    _RENDER_CTRL_SCPD = """<?xml version="1.0"?>
 <scpd xmlns="urn:schemas-upnp-org:service-1-0">
 <specVersion><major>1</major><minor>0</minor></specVersion>
 <actionList>
@@ -309,7 +309,7 @@ class PyDlnaRenderer:
 <stateVariable sendEvents="no"><name>A_ARG_TYPE_Channel</name><dataType>string</dataType><allowedValueList><allowedValue>Master</allowedValue></allowedValueList></stateVariable>
 <stateVariable sendEvents="yes"><name>Volume</name><dataType>ui2</dataType><allowedValueRange><minimum>0</minimum><maximum>100</maximum></allowedValueRange></stateVariable>
 </serviceStateTable>
-</scpd>'''
+</scpd>"""
 
     # ---- 生命周期 ----
 
@@ -317,9 +317,7 @@ class PyDlnaRenderer:
         """启动 DLNA 渲染器"""
         logger.info(f"PyDlnaRenderer starting on {self._local_ip}:{self.port}")
         self._start_ssdp()
-        self._http_server = await asyncio.start_server(
-            self._handle_http, "0.0.0.0", self.port
-        )
+        self._http_server = await asyncio.start_server(self._handle_http, "0.0.0.0", self.port)
         logger.info(f"PyDlnaRenderer ready: {self.friendly_name}")
 
     async def stop(self):
@@ -363,7 +361,7 @@ class PyDlnaRenderer:
         while self._ssdp_sock:
             try:
                 data, addr = sock.recvfrom(4096)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except Exception:
                 break
@@ -398,7 +396,7 @@ class PyDlnaRenderer:
     # ---- HTTP Server ----
 
     def _soap_error(self, code: int, desc: str) -> str:
-        return f'''<?xml version="1.0"?>
+        return f"""<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
 <s:Body>
 <s:Fault>
@@ -407,15 +405,15 @@ class PyDlnaRenderer:
 <detail><UPnPError xmlns="urn:schemas-upnp-org:control-1-0"><errorCode>{code}</errorCode><errorDescription>{desc}</errorDescription></UPnPError></detail>
 </s:Fault>
 </s:Body>
-</s:Envelope>'''
+</s:Envelope>"""
 
     def _soap_response(self, body: str) -> str:
-        return f'''<?xml version="1.0"?>
+        return f"""<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
 <s:Body>
 {body}
 </s:Body>
-</s:Envelope>'''
+</s:Envelope>"""
 
     async def _handle_http(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -463,7 +461,7 @@ class PyDlnaRenderer:
             except Exception:
                 pass
 
-    async def _dispatch(self, method: str, path: str, headers: Dict, body: bytes) -> bytes:
+    async def _dispatch(self, method: str, path: str, headers: dict, body: bytes) -> bytes:
         # GET: 设备描述、SCPD
         if method == "GET":
             if path == f"/upnp/dev/{self.uuid}/desc.xml" or path == "/":
@@ -481,7 +479,7 @@ class PyDlnaRenderer:
 
         # POST: SOAP 控制
         elif method == "POST":
-            soap_action = headers.get("SOAPACTION", "").strip("\"")
+            soap_action = headers.get("SOAPACTION", "").strip('"')
             return await self._handle_soap(path, soap_action, body)
 
         return self._http_error(404, "Not Found")
@@ -500,17 +498,12 @@ class PyDlnaRenderer:
 
     @staticmethod
     def _http_error(code: int, msg: str) -> bytes:
-        resp = (
-            f"HTTP/1.1 {code} {msg}\r\n"
-            f"Content-Length: 0\r\n"
-            f"Connection: close\r\n"
-            f"\r\n"
-        )
+        resp = f"HTTP/1.1 {code} {msg}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
         return resp.encode()
 
     # ---- GENA ----
 
-    async def _handle_subscribe(self, path: str, headers: Dict) -> bytes:
+    async def _handle_subscribe(self, path: str, headers: dict) -> bytes:
         sid = str(uuid.uuid4())
         timeout = "Second-300"
 
@@ -573,12 +566,16 @@ class PyDlnaRenderer:
         elif soap_action.endswith("#GetPositionInfo"):
             return self._handle_get_position_info()
         elif soap_action.endswith("#GetTransportSettings"):
-            return self._soap_ok("<u:GetTransportSettingsResponse xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\"><PlayMode>NORMAL</PlayMode></u:GetTransportSettingsResponse>")
+            return self._soap_ok(
+                '<u:GetTransportSettingsResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><PlayMode>NORMAL</PlayMode></u:GetTransportSettingsResponse>'
+            )
         elif soap_action.endswith("#GetMediaInfo"):
             return self._handle_get_media_info()
         # ConnectionManager
         elif soap_action.endswith("#GetProtocolInfo"):
-            return self._soap_ok("<u:GetProtocolInfoResponse xmlns:u=\"urn:schemas-upnp-org:service:ConnectionManager:1\"><Source>http-get:*:*:*</Source><Sink>http-get:*:audio/mpeg:*,http-get:*:audio/wav:*,http-get:*:audio/flac:*,http-get:*:audio/aac:*,http-get:*:audio/ogg:*</Sink></u:GetProtocolInfoResponse>")
+            return self._soap_ok(
+                '<u:GetProtocolInfoResponse xmlns:u="urn:schemas-upnp-org:service:ConnectionManager:1"><Source>http-get:*:*:*</Source><Sink>http-get:*:audio/mpeg:*,http-get:*:audio/wav:*,http-get:*:audio/flac:*,http-get:*:audio/aac:*,http-get:*:audio/ogg:*</Sink></u:GetProtocolInfoResponse>'
+            )
         # RenderingControl
         elif soap_action.endswith("#GetVolume"):
             return self._handle_get_volume(xml_body)
@@ -596,6 +593,7 @@ class PyDlnaRenderer:
     def _parse_soap_arg(self, xml_str: str, tag: str) -> str:
         """从 SOAP XML 中提取参数值"""
         import re
+
         pattern = f"<{tag}>([^<]*)</{tag}>"
         m = re.search(pattern, xml_str)
         return m.group(1) if m else ""
@@ -621,7 +619,10 @@ class PyDlnaRenderer:
         if not self._current_uri:
             logger.warning("Play: no URI set")
             return self._http_ok(self._soap_error(701, "No URI set"), "text/xml")
-        if self._transport_state == TRANSPORT_STATES["STOPPED"] or self._transport_state == TRANSPORT_STATES["NO_MEDIA_PRESENT"]:
+        if (
+            self._transport_state == TRANSPORT_STATES["STOPPED"]
+            or self._transport_state == TRANSPORT_STATES["NO_MEDIA_PRESENT"]
+        ):
             # 如果当前没有播放任何内容，从当前 URI 开始播放
             self._set_state(TRANSPORT_STATES["TRANSITIONING"])
             await self._start_playback(self._current_uri)
@@ -677,10 +678,10 @@ class PyDlnaRenderer:
     def _handle_get_transport_info(self) -> bytes:
         resp = (
             '<u:GetTransportInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
-            f'<CurrentTransportState>{self._transport_state}</CurrentTransportState>'
-            '<CurrentTransportStatus>OK</CurrentTransportStatus>'
-            '<CurrentSpeed>1</CurrentSpeed>'
-            '</u:GetTransportInfoResponse>'
+            f"<CurrentTransportState>{self._transport_state}</CurrentTransportState>"
+            "<CurrentTransportStatus>OK</CurrentTransportStatus>"
+            "<CurrentSpeed>1</CurrentSpeed>"
+            "</u:GetTransportInfoResponse>"
         )
         return self._soap_ok(resp)
 
@@ -695,15 +696,15 @@ class PyDlnaRenderer:
         rel_time = self._format_time(int(elapsed))
         resp = (
             '<u:GetPositionInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
-            f'<Track>1</Track>'
-            f'<TrackDuration>{self._track_duration}</TrackDuration>'
-            f'<TrackMetaData>{self._current_metadata}</TrackMetaData>'
-            f'<TrackURI>{self._current_uri}</TrackURI>'
-            f'<RelTime>{rel_time}</RelTime>'
-            '<AbsTime>NOT_IMPLEMENTED</AbsTime>'
-            '<RelCount>2147483647</RelCount>'
-            '<AbsCount>2147483647</AbsCount>'
-            '</u:GetPositionInfoResponse>'
+            f"<Track>1</Track>"
+            f"<TrackDuration>{self._track_duration}</TrackDuration>"
+            f"<TrackMetaData>{self._current_metadata}</TrackMetaData>"
+            f"<TrackURI>{self._current_uri}</TrackURI>"
+            f"<RelTime>{rel_time}</RelTime>"
+            "<AbsTime>NOT_IMPLEMENTED</AbsTime>"
+            "<RelCount>2147483647</RelCount>"
+            "<AbsCount>2147483647</AbsCount>"
+            "</u:GetPositionInfoResponse>"
         )
         return self._soap_ok(resp)
 
@@ -719,24 +720,24 @@ class PyDlnaRenderer:
         nr_tracks = "1" if self._current_uri else "0"
         resp = (
             '<u:GetMediaInfoResponse xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
-            f'<NrTracks>{nr_tracks}</NrTracks>'
-            f'<MediaDuration>{self._track_duration}</MediaDuration>'
-            f'<CurrentURI>{self._current_uri}</CurrentURI>'
-            f'<CurrentURIMetaData>{self._current_metadata}</CurrentURIMetaData>'
-            f'<NextURI>{self._next_uri}</NextURI>'
-            f'<NextURIMetaData>{self._next_metadata}</NextURIMetaData>'
-            '<PlayMedium>NETWORK</PlayMedium>'
-            '<RecordMedium>NOT_IMPLEMENTED</RecordMedium>'
-            '<WriteStatus>NOT_IMPLEMENTED</WriteStatus>'
-            '</u:GetMediaInfoResponse>'
+            f"<NrTracks>{nr_tracks}</NrTracks>"
+            f"<MediaDuration>{self._track_duration}</MediaDuration>"
+            f"<CurrentURI>{self._current_uri}</CurrentURI>"
+            f"<CurrentURIMetaData>{self._current_metadata}</CurrentURIMetaData>"
+            f"<NextURI>{self._next_uri}</NextURI>"
+            f"<NextURIMetaData>{self._next_metadata}</NextURIMetaData>"
+            "<PlayMedium>NETWORK</PlayMedium>"
+            "<RecordMedium>NOT_IMPLEMENTED</RecordMedium>"
+            "<WriteStatus>NOT_IMPLEMENTED</WriteStatus>"
+            "</u:GetMediaInfoResponse>"
         )
         return self._soap_ok(resp)
 
     def _handle_get_volume(self, xml_str: str) -> bytes:
         resp = (
             '<u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">'
-            f'<CurrentVolume>{self._volume}</CurrentVolume>'
-            '</u:GetVolumeResponse>'
+            f"<CurrentVolume>{self._volume}</CurrentVolume>"
+            "</u:GetVolumeResponse>"
         )
         return self._soap_ok(resp)
 
@@ -748,7 +749,9 @@ class PyDlnaRenderer:
             # 通过 amixer 调整 wobot_dlna softvol (control name: "WoBot DLNA")
             subprocess.run(
                 ["amixer", "-c", str(self.usb_card), "sset", "WoBot DLNA", f"{self._volume}%"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
             )
         except ValueError:
             pass
@@ -784,6 +787,7 @@ class PyDlnaRenderer:
         """通过 HTTP NOTIFY 向订阅者发送 GENA 事件"""
         try:
             from urllib.parse import urlparse
+
             parsed = urlparse(callback_url)
             host = parsed.hostname
             port = parsed.port or 80
@@ -794,24 +798,24 @@ class PyDlnaRenderer:
             body = (
                 '<?xml version="1.0"?>'
                 '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">'
-                '<e:property>'
-                f'<LastChange>{escaped}</LastChange>'
-                '</e:property>'
-                '</e:propertyset>'
+                "<e:property>"
+                f"<LastChange>{escaped}</LastChange>"
+                "</e:property>"
+                "</e:propertyset>"
             )
             body_bytes = body.encode("utf-8")
 
             request = (
                 f"NOTIFY {path} HTTP/1.1\r\n"
                 f"HOST: {host}:{port}\r\n"
-                f"CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n"
+                f'CONTENT-TYPE: text/xml; charset="utf-8"\r\n'
                 f"NT: upnp:event\r\n"
                 f"NTS: upnp:propchange\r\n"
                 f"SID: uuid:{sid}\r\n"
                 f"SEQ: {seq}\r\n"
                 f"CONTENT-LENGTH: {len(body_bytes)}\r\n"
                 f"\r\n"
-            ).encode("utf-8") + body_bytes
+            ).encode() + body_bytes
 
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port),
@@ -835,7 +839,7 @@ class PyDlnaRenderer:
         text = text.replace("&", "&amp;")
         text = text.replace("<", "&lt;")
         text = text.replace(">", "&gt;")
-        text = text.replace("\"", "&quot;")
+        text = text.replace('"', "&quot;")
         text = text.replace("'", "&apos;")
         return text
 
@@ -860,9 +864,7 @@ class PyDlnaRenderer:
             return "PAUSE,STOP,SEEK,NEXT,PREVIOUS"
         elif state == TRANSPORT_STATES["PAUSED_PLAYBACK"]:
             return "PLAY,STOP"
-        elif state == TRANSPORT_STATES["NO_MEDIA_PRESENT"]:
-            return ""
-        elif state == TRANSPORT_STATES["TRANSITIONING"]:
+        elif state == TRANSPORT_STATES["NO_MEDIA_PRESENT"] or state == TRANSPORT_STATES["TRANSITIONING"]:
             return ""
         return ""
 
@@ -884,7 +886,8 @@ class PyDlnaRenderer:
 
         try:
             cmd = [
-                "gst-launch-1.0", "-q",
+                "gst-launch-1.0",
+                "-q",
                 "playbin",
                 f"uri={uri}",
                 f"audio-sink=alsasink device={self.audio_device}",
@@ -949,9 +952,7 @@ class PyDlnaRenderer:
         """监控 GStreamer 进程输出，检测 EOS"""
         try:
             while self._gst_proc and self._gst_proc.returncode is None:
-                line = await asyncio.wait_for(
-                    self._gst_proc.stderr.readline(), timeout=30
-                )
+                line = await asyncio.wait_for(self._gst_proc.stderr.readline(), timeout=30)
                 if not line:
                     break
                 text = line.decode(errors="replace").strip()
@@ -1007,6 +1008,7 @@ class PyDlnaRenderer:
 # 播放前杀掉 PA 释放设备，播放结束后重启 PA 恢复系统音频。
 # ---------------------------------------------------------------------------
 
+
 def _kill_pulseaudio():
     """杀掉 PulseAudio 进程，释放 ALSA 声卡"""
     try:
@@ -1025,8 +1027,7 @@ def _restore_pulseaudio():
     # 方法1: runuser（systemd 环境下有效）
     try:
         subprocess.run(
-            ["/sbin/runuser", "-l", "jetson", "-c",
-             "pulseaudio --start --log-target=syslog"],
+            ["/sbin/runuser", "-l", "jetson", "-c", "pulseaudio --start --log-target=syslog"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=5,

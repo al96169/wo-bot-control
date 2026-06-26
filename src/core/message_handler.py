@@ -309,15 +309,31 @@ class MessageHandler:
                 if service_id == "main":
                     self.logger.warning("Main service restart requested via systemd")
                     asyncio.create_task(self._delayed_restart_service())
-                    return {"type": "system_ack", "data": {"action": "restart_service", "service_id": "main", "status": "pending"}}
+                    return {
+                        "type": "system_ack",
+                        "data": {"action": "restart_service", "service_id": "main", "status": "pending"},
+                    }
                 success = await self.service_manager.restart_service(service_id)
-                return {"type": "system_ack", "data": {"action": "restart_service", "service_id": service_id, "status": "ok" if success else "failed"}}
+                return {
+                    "type": "system_ack",
+                    "data": {
+                        "action": "restart_service",
+                        "service_id": service_id,
+                        "status": "ok" if success else "failed",
+                    },
+                }
             else:
                 if service_id == "main":
                     self.logger.warning("Main service restart requested via systemd (no service_manager)")
                     asyncio.create_task(self._delayed_restart_service())
-                    return {"type": "system_ack", "data": {"action": "restart_service", "service_id": "main", "status": "pending"}}
-                return {"type": "system_ack", "data": {"action": "restart_service", "status": "pending", "service_id": service_id}}
+                    return {
+                        "type": "system_ack",
+                        "data": {"action": "restart_service", "service_id": "main", "status": "pending"},
+                    }
+                return {
+                    "type": "system_ack",
+                    "data": {"action": "restart_service", "status": "pending", "service_id": service_id},
+                }
 
         return {"type": "error", "data": {"code": 400, "message": "Invalid system action"}}
 
@@ -339,7 +355,15 @@ class MessageHandler:
             return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
         if service_id == "main":
-            return {"type": "service_control_ack", "data": {"service_id": "main", "action": action, "status": "main_not_restartable", "message": "主服务不可通过面板控制"}}
+            return {
+                "type": "service_control_ack",
+                "data": {
+                    "service_id": "main",
+                    "action": action,
+                    "status": "main_not_restartable",
+                    "message": "主服务不可通过面板控制",
+                },
+            }
 
         if action == "start":
             success = await self.service_manager.start_service(service_id)
@@ -497,17 +521,13 @@ class MessageHandler:
     async def _handle_software_list(self, data: dict) -> dict:
         """获取软件列表（转发至 software_manager 子服务）"""
         if self.service_manager:
-            return await self.service_manager.send_subprocess_command(
-                "software_manager", "list", data
-            )
+            return await self.service_manager.send_subprocess_command("software_manager", "list", data)
         return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     async def _handle_software_search(self, data: dict) -> dict:
         """搜索软件包（转发至 software_manager 子服务）"""
         if self.service_manager:
-            return await self.service_manager.send_subprocess_command(
-                "software_manager", "search", data
-            )
+            return await self.service_manager.send_subprocess_command("software_manager", "search", data)
         return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     async def _handle_software_install(self, data: dict) -> dict:
@@ -831,9 +851,7 @@ class MessageHandler:
         """转发命令到音乐子进程，若服务不可用则返回友好响应（不触发前端 Toast）"""
         if not self._is_music_service_running():
             return self._music_unavailable_response(resp_type)
-        result = await self.service_manager.send_subprocess_command(
-            "music_player", cmd, data
-        )
+        result = await self.service_manager.send_subprocess_command("music_player", cmd, data)
         # 防御性检查：子进程可能在状态检查和实际通信之间退出
         if result.get("type") == "error":
             return self._music_unavailable_response(resp_type)

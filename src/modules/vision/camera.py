@@ -167,7 +167,11 @@ class CameraManager:
         for video_dev in ["/dev/video0", "/dev/video1"]:
             try:
                 result = subprocess.run(["v4l2-ctl", "-d", video_dev, "-D"], capture_output=True, text=True, timeout=5)
-                if "tegra-video" in result.stdout or "imx219" in result.stdout.lower() or "ov5693" in result.stdout.lower():
+                if (
+                    "tegra-video" in result.stdout
+                    or "imx219" in result.stdout.lower()
+                    or "ov5693" in result.stdout.lower()
+                ):
                     cameras.append(
                         {
                             "id": 0,
@@ -236,7 +240,7 @@ class CameraManager:
 
     async def start_stream(self, camera_id: int | None = None) -> dict:
         """启动视频流（支持帧共享：共享摄像头复用源摄像头的帧）
-        
+
         引用计数：每次+1，stop_stream 减到 0 才真正暂停采集。
         防止多客户端场景下，一个客户端关摄像头影响其他客户端。
         """
@@ -255,9 +259,7 @@ class CameraManager:
             stream = self.active_streams[camera_id]
             if stream.running:
                 if self.logger:
-                    self.logger.debug(
-                        f"Camera {camera_id} already running, ref_count={self._ref_counts[camera_id]}"
-                    )
+                    self.logger.debug(f"Camera {camera_id} already running, ref_count={self._ref_counts[camera_id]}")
                 return stream.get_info()
             # 热恢复：流存在但已暂停
             await stream.start()
@@ -285,7 +287,7 @@ class CameraManager:
 
         return stream.get_info()
 
-    def _auto_start_shared_streams(self, source_id: int, source_stream: "CameraStream"):
+    def _auto_start_shared_streams(self, source_id: int, source_stream: CameraStream):
         """自动启动所有依赖于 source_id 的共享摄像头（创建或热恢复）"""
         for cam_id, cam_info in self.cameras.items():
             if cam_info.get("shared_from") == source_id:
@@ -303,27 +305,28 @@ class CameraManager:
 
     async def stop_stream(self, camera_id: int):
         """暂停视频流 — 引用计数减到 0 才真正停止采集
-        
+
         多客户端安全：只有当没有客户端引用时才真正暂停硬件采集。
         """
         if not hasattr(self, "_ref_counts"):
             self._ref_counts: dict[int, int] = {}
-        
+
         current = self._ref_counts.get(camera_id, 0)
         if current > 0:
             self._ref_counts[camera_id] = current - 1
-        
+
         if camera_id not in self.active_streams:
             if self.logger:
-                self.logger.debug(f"Camera {camera_id} not in active_streams (ref={self._ref_counts.get(camera_id, 0)})")
+                self.logger.debug(
+                    f"Camera {camera_id} not in active_streams (ref={self._ref_counts.get(camera_id, 0)})"
+                )
             return
 
         # 只有引用计数归零时才真正暂停
         if self._ref_counts.get(camera_id, 0) > 0:
             if self.logger:
                 self.logger.info(
-                    f"Camera {camera_id} stop deferred: "
-                    f"still referenced by {self._ref_counts[camera_id]} client(s)"
+                    f"Camera {camera_id} stop deferred: still referenced by {self._ref_counts[camera_id]} client(s)"
                 )
             return
 
@@ -698,7 +701,7 @@ class CameraStream:
 class SharedCameraStream:
     """共享摄像头流 — 不独立采集，复用源 CameraStream 的帧"""
 
-    def __init__(self, camera_info: dict, source_stream: "CameraStream", logger=None):
+    def __init__(self, camera_info: dict, source_stream: CameraStream, logger=None):
         self.camera_info = camera_info
         self.source: CameraStream | None = source_stream
         self.logger = logger

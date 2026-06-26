@@ -14,12 +14,19 @@ import time
 
 import cv2
 import numpy as np
+from aiortc import (
+    RTCConfiguration,
+    RTCDataChannel,
+    RTCIceCandidate,
+    RTCIceServer,
+    RTCPeerConnection,
+    RTCSessionDescription,
+    VideoStreamTrack,
+)
 from av import VideoFrame
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
-from aiortc import RTCDataChannel, VideoStreamTrack, RTCIceCandidate
 
 from .aioice_patch import apply as _apply_aioice_patch
-from .aioice_patch import get_pending_candidates, clear_pending_candidates
+from .aioice_patch import clear_pending_candidates, get_pending_candidates
 
 STUN_SERVER = "stun:stun.l.google.com:19302"
 
@@ -98,8 +105,7 @@ class CameraVideoTrack(VideoStreamTrack):
             self._frame_count += 1
             if self._frame_count == 1 and self.logger:
                 self.logger.warning(
-                    f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
-                    f"no frame from camera, using black"
+                    f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): no frame from camera, using black"
                 )
         else:
             frame = frame.copy()
@@ -173,11 +179,8 @@ class WebRTCService:
     def _postprocess_sdp(self, client_id: str, sdp: str) -> str:
         """SDP 回答后处理: 注入 ice-lite / 替换 .local → 真实 IP"""
 
-        orig_cands = [l for l in sdp.split("\r\n") if l.startswith("a=candidate")]
-        self.logger.info(
-            f"[{client_id}] Original SDP candidates ({len(orig_cands)}): "
-            f"{[c[:80] for c in orig_cands]}"
-        )
+        orig_cands = [line for line in sdp.split("\r\n") if line.startswith("a=candidate")]
+        self.logger.info(f"[{client_id}] Original SDP candidates ({len(orig_cands)}): {[c[:80] for c in orig_cands]}")
 
         new_lines = []
         ice_lite_inserted = False
@@ -192,9 +195,7 @@ class WebRTCService:
                     parts[4] = self._server_ip
                     line = " ".join(parts)
                     replaced_count += 1
-                    self.logger.info(
-                        f"[{client_id}] SDP ice .local→IP: {old_ip}→{self._server_ip}"
-                    )
+                    self.logger.info(f"[{client_id}] SDP ice .local→IP: {old_ip}→{self._server_ip}")
 
             # 在第一个 m= 行之前注入 a=ice-lite
             # 配合 aioice monkey-patch: 服务端不执行主动连通性检查，
@@ -219,6 +220,7 @@ class WebRTCService:
         """aiortc 0.9.10 workaround: 客户端 offer 不含 video 时，手动填充默认编解码器"""
         try:
             import copy as _copy
+
             from aiortc import rtp as _rtp
             from aiortc.codecs import MEDIA_CODECS
             from aiortc.rtcpeerconnection import HEADER_EXTENSIONS
@@ -274,8 +276,7 @@ class WebRTCService:
         transceivers = list(pc._RTCPeerConnection__transceivers)
         video_transceivers = [t for t in transceivers if t.kind == "video"]
         self.logger.info(
-            f"[{client_id}] Found {len(video_transceivers)} video transceivers "
-            f"(total={len(transceivers)})"
+            f"[{client_id}] Found {len(video_transceivers)} video transceivers (total={len(transceivers)})"
         )
 
         cam_ids = sorted(self.camera_manager.cameras.keys())
@@ -296,33 +297,31 @@ class WebRTCService:
             transceiver = video_transceivers[i]
             transceiver.direction = "sendonly"
             self.logger.info(
-                f"[{client_id}] Transceiver[{i}] → sendonly "
-                f"(mid={transceiver.mid}, kind={transceiver.kind})"
+                f"[{client_id}] Transceiver[{i}] → sendonly (mid={transceiver.mid}, kind={transceiver.kind})"
             )
 
             try:
                 video_track = CameraVideoTrack(
-                    self.camera_manager, camera_id=cam_id, fps=track_fps,
-                    logger=self.logger, client_id=client_id,
+                    self.camera_manager,
+                    camera_id=cam_id,
+                    fps=track_fps,
+                    logger=self.logger,
+                    client_id=client_id,
                 )
                 self._video_tracks[client_id][cam_id] = video_track
 
                 if transceiver.sender:
                     transceiver.sender.replaceTrack(video_track)
                     self.logger.info(
-                        f"[{client_id}] Video track on transceiver[{i}] "
-                        f"(camera {cam_id}, via replaceTrack)"
+                        f"[{client_id}] Video track on transceiver[{i}] (camera {cam_id}, via replaceTrack)"
                     )
                 else:
                     self.logger.warning(
-                        f"[{client_id}] Transceiver[{i}] no sender, "
-                        f"fallback to addTrack for camera {cam_id}"
+                        f"[{client_id}] Transceiver[{i}] no sender, fallback to addTrack for camera {cam_id}"
                     )
                     pc.addTrack(video_track)
             except Exception as e:
-                self.logger.warning(
-                    f"[{client_id}] Failed to setup video track camera {cam_id}: {e}"
-                )
+                self.logger.warning(f"[{client_id}] Failed to setup video track camera {cam_id}: {e}")
 
     # ---------- 服务端 DataChannel ----------
 
@@ -372,14 +371,16 @@ class WebRTCService:
                 try:
                     cand_str = candidate.candidate if hasattr(candidate, "candidate") else str(candidate)
                     if cand_str:
-                        await send_callback({
-                            "type": "webrtc_ice_candidate",
-                            "data": {
-                                "candidate": cand_str,
-                                "sdpMid": getattr(candidate, "sdpMid", None) or "",
-                                "sdpMLineIndex": getattr(candidate, "sdpMLineIndex", None) or 0,
-                            },
-                        })
+                        await send_callback(
+                            {
+                                "type": "webrtc_ice_candidate",
+                                "data": {
+                                    "candidate": cand_str,
+                                    "sdpMid": getattr(candidate, "sdpMid", None) or "",
+                                    "sdpMLineIndex": getattr(candidate, "sdpMLineIndex", None) or 0,
+                                },
+                            }
+                        )
                         self.logger.info(f"[{client_id}] Sent ICE candidate: {cand_str[:80]}")
                 except Exception as e:
                     self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}")
@@ -388,8 +389,7 @@ class WebRTCService:
         def on_datachannel(channel: RTCDataChannel):
             self.logger.info(f"DataChannel opened by client {client_id}: {channel.label}")
             self._data_channels[client_id] = channel
-            channel.on("message", lambda msg: asyncio.ensure_future(
-                self._on_dc_message(client_id, msg)))
+            channel.on("message", lambda msg: asyncio.ensure_future(self._on_dc_message(client_id, msg)))
             channel.on("close", lambda: self._on_dc_close(client_id))
 
         @pc.on("iceconnectionstatechange")
@@ -404,12 +404,11 @@ class WebRTCService:
             state = pc.connectionState
             dtls_state = (
                 pc._RTCPeerConnection__dtlsTransport.state
-                if hasattr(pc, '_RTCPeerConnection__dtlsTransport')
-                else 'N/A'
+                if hasattr(pc, "_RTCPeerConnection__dtlsTransport")
+                else "N/A"
             )
             self.logger.info(
-                f"[{client_id}] Connection state: {state}, "
-                f"ICE: {pc.iceConnectionState}, DTLS: {dtls_state}"
+                f"[{client_id}] Connection state: {state}, ICE: {pc.iceConnectionState}, DTLS: {dtls_state}"
             )
             if state in ("failed", "closed"):
                 self.logger.warning(f"[{client_id}] Connection failed/closed, cleaning up")
@@ -436,11 +435,11 @@ class WebRTCService:
         # 诊断: 确认 answer SDP 关键媒体行
         has_app = "m=application" in sdp
         has_video = "m=video" in sdp
-        self.logger.info(
-            f"[{client_id}] Answer SDP: DataChannel={has_app}, Video={has_video}"
-        )
+        self.logger.info(f"[{client_id}] Answer SDP: DataChannel={has_app}, Video={has_video}")
         if has_video:
-            vid_lines = [l for l in sdp.split("\r\n") if l.startswith("m=video") or l.startswith("a=rtpmap")]
+            vid_lines = [
+                line for line in sdp.split("\r\n") if line.startswith("m=video") or line.startswith("a=rtpmap")
+            ]
             self.logger.info(f"[{client_id}] Answer SDP video lines: {vid_lines[:5]}")
 
         # 服务端 DataChannel（SCTP 协商完成后）
@@ -512,6 +511,7 @@ class WebRTCService:
 
     async def _on_dc_message(self, client_id: str, msg):
         import json
+
         try:
             data = json.loads(msg) if isinstance(msg, (str, bytes)) else msg
         except Exception:
@@ -536,30 +536,28 @@ class WebRTCService:
         await asyncio.sleep(3)
         try:
             # 检查每个 transceiver 的 DTLS 状态
-            transceivers = getattr(pc, '_RTCPeerConnection__transceivers', [])
+            transceivers = getattr(pc, "_RTCPeerConnection__transceivers", [])
             for i, t in enumerate(transceivers):
-                dtls = getattr(t, '_transport', None)
+                dtls = getattr(t, "_transport", None)
                 if dtls:
-                    ice = getattr(dtls, 'transport', None)
-                    ice_state = getattr(ice, 'state', '?') if ice else '?'
-                    dtls_state = getattr(dtls, 'state', '?')
-                    encrypted = getattr(dtls, 'encrypted', None)
+                    ice = getattr(dtls, "transport", None)
+                    ice_state = getattr(ice, "state", "?") if ice else "?"
+                    dtls_state = getattr(dtls, "state", "?")
+                    encrypted = getattr(dtls, "encrypted", None)
                     self.logger.info(
                         f"[{client_id}] DTLS diag: transceiver[{i}] "
                         f"kind={getattr(t, 'kind', '?')} "
                         f"ICE={ice_state} DTLS={dtls_state} encrypted={encrypted}"
                     )
             # 检查 SCTP / DataChannel
-            sctp = getattr(pc, '_RTCPeerConnection__sctp', None)
+            sctp = getattr(pc, "_RTCPeerConnection__sctp", None)
             if sctp:
-                sctp_dtls = getattr(sctp, 'transport', None)
+                sctp_dtls = getattr(sctp, "transport", None)
                 if sctp_dtls:
-                    sctp_ice = getattr(sctp_dtls, 'transport', None)
-                    sctp_ice_state = getattr(sctp_ice, 'state', '?') if sctp_ice else '?'
-                    sctp_dtls_state = getattr(sctp_dtls, 'state', '?')
-                    self.logger.info(
-                        f"[{client_id}] DTLS diag: SCTP ICE={sctp_ice_state} DTLS={sctp_dtls_state}"
-                    )
+                    sctp_ice = getattr(sctp_dtls, "transport", None)
+                    sctp_ice_state = getattr(sctp_ice, "state", "?") if sctp_ice else "?"
+                    sctp_dtls_state = getattr(sctp_dtls, "state", "?")
+                    self.logger.info(f"[{client_id}] DTLS diag: SCTP ICE={sctp_ice_state} DTLS={sctp_dtls_state}")
         except Exception as e:
             self.logger.warning(f"[{client_id}] DTLS diag failed: {e}")
 
@@ -604,8 +602,7 @@ class WebRTCService:
             else:
                 other_ids = list(self._connections.keys())
                 self.logger.info(
-                    f"[{client_id}] Cleaned up ({len(tracks)} video tracks, "
-                    f"other connections: {other_ids})"
+                    f"[{client_id}] Cleaned up ({len(tracks)} video tracks, other connections: {other_ids})"
                 )
         finally:
             self._cleaning_up.discard(client_id)
@@ -617,6 +614,7 @@ class WebRTCService:
         dc = self._data_channels.get(client_id)
         if dc and dc.readyState == "open":
             import json
+
             dc.send(json.dumps(data) if isinstance(data, dict) else data)
 
     def get_connection_count(self) -> int:
