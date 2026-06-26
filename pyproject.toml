@@ -59,7 +59,7 @@ warn_unused_ignores = false
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 # 机器人硬件项目：大量 Optional 硬件属性在运行时已 guard
-disable_error_code = ["attr-defined"]
+disable_error_code = ["attr-defined", "import-untyped"]
 exclude = [
     "tests/",
     ".venv/",
