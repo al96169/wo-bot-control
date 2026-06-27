@@ -235,7 +235,7 @@ class RosmasterMotion(HardwareInterface):
             return True
         except ImportError:
             logger.error("Rosmaster_Lib not found.")
-            raise
+            return False
         except Exception as e:
             logger.warning(f"Rosmaster motion init failed (will retry): {e}")
             return False

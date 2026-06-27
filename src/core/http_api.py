@@ -5,7 +5,13 @@ HTTP API 服务器
 
 import asyncio
 
-import cv2
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None  # type: ignore[assignment]
+    CV2_AVAILABLE = False
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -53,6 +59,8 @@ class HttpAPIServer:
 
     async def get_snapshot(self, camera_id: int):
         """GET /api/camera/{camera_id}/snapshot - JPEG 截图"""
+        if not CV2_AVAILABLE:
+            raise HTTPException(status_code=503, detail="OpenCV (cv2) not installed")
         if not self.camera_manager:
             raise HTTPException(status_code=503, detail="Camera manager not available")
         frame = self.camera_manager.get_frame(camera_id)
@@ -63,6 +71,8 @@ class HttpAPIServer:
 
     async def get_stream(self, camera_id: int):
         """GET /api/camera/{camera_id}/stream - MJPEG 视频流"""
+        if not CV2_AVAILABLE:
+            raise HTTPException(status_code=503, detail="OpenCV (cv2) not installed")
         if not self.camera_manager:
             raise HTTPException(status_code=503, detail="Camera manager not available")
 

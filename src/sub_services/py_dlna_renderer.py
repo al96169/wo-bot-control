@@ -12,6 +12,8 @@ Python Native DLNA/UPnP Media Renderer (纯 Python stdlib 实现)
 设计: 无第三方依赖，仅用 asyncio + xml.etree + socket
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import socket

@@ -280,7 +280,7 @@ class RosmasterGimbal(GimbalInterface):
             return True
         except ImportError:
             logger.error("Rosmaster_Lib not found. Install the Yahboom Rosmaster driver library.")
-            raise
+            return False
         except Exception as e:
             # 不抛异常，保留 _bot=None 允许下次调用时重试
             # 典型场景：ROS 串口板在服务启动后才插入
