@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+
+from core.service_manager import SERVICE_DEFINITIONS
 import pty
 import re
 import select
@@ -80,6 +82,9 @@ class MessageHandler:
                     features.append("dance")
             else:
                 features.append("dance")
+        # 检查音乐播放服务是否配置
+        if "music_player" in SERVICE_DEFINITIONS:
+            features.append("music")
         status_data["features"] = features
         return {"type": "status", "data": status_data}
 

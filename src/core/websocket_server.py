@@ -13,6 +13,8 @@ from typing import Any
 
 import websockets
 
+from core.service_manager import SERVICE_DEFINITIONS
+
 # 协议版本：服务端与客户端协商的通信协议版本号
 # 仅递增，不做后向兼容的大版本变更
 PROTOCOL_VERSION = 1
@@ -265,6 +267,13 @@ class WebSocketServer:
             features.append("websocket-fallback")  # 标记 WebSocket 可处理业务消息
         if getattr(self, "gimbal_controller", None):
             features.append("gimbal")
+        # 检查舞蹈控制器
+        dance_ctrl = getattr(self.message_handler, "dance_controller", None)
+        if dance_ctrl:
+            features.append("dance")
+        # 检查音乐播放服务是否配置
+        if "music_player" in SERVICE_DEFINITIONS:
+            features.append("music")
 
         try:
             # 发送握手消息（设备发现兼容）
