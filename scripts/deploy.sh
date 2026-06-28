@@ -166,10 +166,10 @@ crontab -l 2>/dev/null | grep -v "wo-bot-control" | crontab - 2>/dev/null || tru
 echo "  -> 创建目标目录..."
 mkdir -p ${REMOTE_DIR}
 
-echo "  -> 清理旧文件..."
-eval "${SUDO} rm -rf ${REMOTE_DIR}/*" 2>/dev/null || true
-# 如果 sudo rm 失败（权限不足），手动删除可删的文件
-rm -rf ${REMOTE_DIR}/* 2>/dev/null || true
+echo "  -> 清理旧文件（保留 venv/）..."
+# 删除除 venv 外的所有内容，避免破坏已安装依赖
+find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 ! -name 'venv' -exec rm -rf {} + 2>/dev/null || true
+eval "${SUDO} find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 ! -name 'venv' -exec rm -rf {} +" 2>/dev/null || true
 
 echo "  -> 解压部署包..."
 tar -xzf /tmp/${PACKAGE_NAME} -C ${REMOTE_DIR}
@@ -190,14 +190,18 @@ if [ ! -f "${REQUIREMENTS_FILE}" ]; then
     REQUIREMENTS_FILE="requirements.txt"
 fi
 
-echo "  -> 创建虚拟环境（Python 3.7）..."
-python3.7 -m venv venv 2>/dev/null || python3 -m venv venv
-source venv/bin/activate
-
-echo "  -> 安装依赖..."
-pip install --upgrade pip -q
-pip install -r ${REQUIREMENTS_FILE} -q
-echo "  -> 依赖安装完成"
+if [ -d "${REMOTE_DIR}/venv" ]; then
+    echo "  -> venv 已存在，跳过依赖安装"
+    source ${REMOTE_DIR}/venv/bin/activate
+else
+    echo "  -> 创建虚拟环境（Python 3.7）..."
+    python3.7 -m venv ${REMOTE_DIR}/venv 2>/dev/null || python3 -m venv ${REMOTE_DIR}/venv
+    source ${REMOTE_DIR}/venv/bin/activate
+    echo "  -> 安装依赖..."
+    pip install --upgrade pip -q
+    pip install -r ${REQUIREMENTS_FILE} -q
+    echo "  -> 依赖安装完成"
+fi
 
 # 安装 Rosmaster_Lib 硬件驱动（如果 Jetson 上存在）
 if [ -d "/home/jetson/py_install/Rosmaster_Lib" ]; then
