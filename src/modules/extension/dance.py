@@ -28,6 +28,7 @@ class DanceController(ExtensionModule):
         self._step_index: int = 0  # 当前播放帧 index
         self._playing: bool = False
         self._paused: bool = False
+        self._loop: bool = False  # 循环播放
         self._task: asyncio.Task | None = None
         self._progress: float = 0.0  # 进度 0.0~1.0
         self._dances: dict[str, Any] = {}  # 舞蹈数据缓存
@@ -156,17 +157,18 @@ class DanceController(ExtensionModule):
         self._step_index = 0
         self._playing = True
         self._paused = False
+        self._loop = data.get("loop", False)
         self._progress = 0.0
 
         dance_info = self._dances[dance_id]
         if self.logger:
-            self.logger.info(f"Dance started: {dance_info.get('name', dance_id)} ({dance_id})")
+            self.logger.info(f"Dance started: {dance_info.get('name', dance_id)} ({dance_id}) loop={self._loop}")
 
         # 异步播放
         self._task = asyncio.ensure_future(self._play_loop(dance_info))
         return {
             "type": "dance_status",
-            "data": {"status": "playing", "dance_id": dance_id, "progress": 0.0},
+            "data": {"status": "playing", "dance_id": dance_id, "progress": 0.0, "loop": self._loop},
         }
 
     async def _cmd_pause(self, data: dict) -> dict:
@@ -203,6 +205,7 @@ class DanceController(ExtensionModule):
                 "status": status,
                 "dance_id": self._current_dance,
                 "progress": self._progress,
+                "loop": self._loop,
             },
         }
 
@@ -229,44 +232,56 @@ class DanceController(ExtensionModule):
         total_duration_ms = sum(s.get("duration", 100) for s in steps)
 
         try:
-            while self._playing and self._step_index < total_steps:
-                if self._paused:
-                    # 暂停时指令停止，等待恢复
+            while self._playing:
+                # ----- 单轮播放 -----
+                while self._playing and self._step_index < total_steps:
+                    if self._paused:
+                        # 暂停时指令停止，等待恢复
+                        await self._send_stop_cmd()
+                        while self._paused and self._playing:
+                            await asyncio.sleep(0.1)
+                        if not self._playing:
+                            break
+                        # 恢复后从暂停处继续
+
+                    step = steps[self._step_index]
+                    duration = step.get("duration", 100) / 1000.0  # ms → s
+
+                    # 发送运动指令
+                    await self._motion.set_mecanum_velocity(
+                        step.get("v_x", 0.0),
+                        step.get("v_y", 0.0),
+                        step.get("v_z", 0.0),
+                    )
+
+                    # 等待这一步的执行时间
+                    await asyncio.sleep(duration)
+
+                    self._step_index += 1
+                    # 更新进度
+                    elapsed_ms = sum(s.get("duration", 100) for s in steps[: self._step_index])
+                    self._progress = min(elapsed_ms / total_duration_ms, 1.0) if total_duration_ms > 0 else 0.0
+
+                    if self.logger and self._step_index % 10 == 0:
+                        self.logger.debug(f"Dance step {self._step_index}/{total_steps} progress={self._progress:.1%}")
+
+                # ----- 一轮播放完成 -----
+                if not self._playing:
+                    break
+
+                if self._loop:
+                    # 循环：重置步骤索引，继续播放
+                    self._step_index = 0
+                    self._progress = 0.0
+                    if self.logger:
+                        self.logger.info(f"Dance loop restart: {dance_info.get('name', 'unknown')}")
+                else:
+                    # 非循环：停止
                     await self._send_stop_cmd()
-                    while self._paused and self._playing:
-                        await asyncio.sleep(0.1)
-                    if not self._playing:
-                        break
-                    # 恢复后从暂停处继续
-
-                step = steps[self._step_index]
-                duration = step.get("duration", 100) / 1000.0  # ms → s
-
-                # 发送运动指令
-                await self._motion.set_mecanum_velocity(
-                    step.get("v_x", 0.0),
-                    step.get("v_y", 0.0),
-                    step.get("v_z", 0.0),
-                )
-
-                # 等待这一步的执行时间
-                await asyncio.sleep(duration)
-
-                self._step_index += 1
-                # 更新进度
-                elapsed_ms = sum(s.get("duration", 100) for s in steps[: self._step_index])
-                self._progress = min(elapsed_ms / total_duration_ms, 1.0) if total_duration_ms > 0 else 0.0
-
-                if self.logger and self._step_index % 10 == 0:
-                    self.logger.debug(f"Dance step {self._step_index}/{total_steps} progress={self._progress:.1%}")
-
-            # 播放完成
-            if self._step_index >= total_steps:
-                await self._send_stop_cmd()
-                self._playing = False
-                self._progress = 1.0
-                if self.logger:
-                    self.logger.info(f"Dance finished: {dance_info.get('name', 'unknown')}")
+                    self._playing = False
+                    self._progress = 1.0
+                    if self.logger:
+                        self.logger.info(f"Dance finished: {dance_info.get('name', 'unknown')}")
 
         except asyncio.CancelledError:
             pass
@@ -280,6 +295,7 @@ class DanceController(ExtensionModule):
         """停止播放并归零"""
         self._playing = False
         self._paused = False
+        self._loop = False
         self._current_dance = None
         self._step_index = 0
         self._progress = 0.0
