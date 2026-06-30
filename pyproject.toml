@@ -1,6 +1,6 @@
 [project]
 name = "wo-bot-control"
-version = "0.2.3"
+version = "0.2.4"
 description = "wo-bot 机器人设备服务端"
 requires-python = ">=3.10"
 

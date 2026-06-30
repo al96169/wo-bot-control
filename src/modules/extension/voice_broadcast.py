@@ -88,6 +88,13 @@ class VoiceBroadcastController(ExtensionModule):
             }
 
         # 异步播放，不阻塞消息循环
+        # 电话模式：chunk 还在播放则跳过，避免不断取消对方导致无声
+        if mode == "phone" and self._current_task and not self._current_task.done():
+            return {
+                "type": "voice_broadcast_ack",
+                "data": {"success": True, "message": "播放中", "mode": mode},
+            }
+
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
 
@@ -119,28 +126,35 @@ class VoiceBroadcastController(ExtensionModule):
             if self.logger:
                 self.logger.info(f"Voice broadcast: mode={mode}, size={len(audio_data)} bytes, file={tmp_path}")
 
-            # 用 ffplay 播放（支持 Opus/WebM），若无 ffmpeg 则回退到 aplay
-            if shutil.which("ffplay"):
-                cmd = [
-                    "ffplay",
-                    "-nodisp",
-                    "-autoexit",
-                    "-loglevel",
-                    "quiet",
-                    tmp_path,
-                ]
-            else:
-                cmd = ["aplay", "-q", tmp_path]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.wait()
+            # ffmpeg 解码 Opus/WebM → WAV → aplay 播放（ALSA 输出到 USB 声卡）
+            stderr = ""
+            if shutil.which("ffmpeg"):
+                # 通过 shell 管道: ffmpeg 解码 → aplay 播放
+                import shlex
 
-            if proc.returncode != 0 and self.logger:
-                stderr = (await proc.stderr.read()).decode(errors="replace") if proc.stderr else ""
-                self.logger.warning(f"aplay exited with code {proc.returncode}: {stderr.strip()}")
+                cmd_str = f"ffmpeg -i {shlex.quote(tmp_path)} -f wav -loglevel error pipe:1 | aplay -q"
+                proc = await asyncio.create_subprocess_shell(
+                    cmd_str,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.wait()
+                if proc.returncode != 0 and self.logger:
+                    stderr = (await proc.stderr.read()).decode(errors="replace") if proc.stderr else ""
+                    self.logger.warning(f"voice playback pipe exited with code {proc.returncode}: {stderr.strip()}")
+            else:
+                # 无 ffmpeg 时直接 aplay（不支持 WebM，仅 PCM/WAV）
+                proc = await asyncio.create_subprocess_exec(
+                    "aplay",
+                    "-q",
+                    tmp_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.wait()
+                if proc.returncode != 0 and self.logger:
+                    stderr = (await proc.stderr.read()).decode(errors="replace") if proc.stderr else ""
+                    self.logger.warning(f"aplay exited with code {proc.returncode}: {stderr.strip()}")
 
         except asyncio.CancelledError:
             if self.logger:
