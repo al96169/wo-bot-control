@@ -15,9 +15,79 @@ import psutil
 class SystemCollector:
     """系统信息采集器"""
 
+    # 12V 锂电池 (3S LiPo) 电压-电量映射
+    # 满电 12.6V → 100%, 标称 11.1V → 50%, 截止 10.5V → 0%
+    BATTERY_VOLTAGE_MAX = 12.6
+    BATTERY_VOLTAGE_MIN = 10.5
+
+    # 剩余时长估计参数
+    ESTIMATION_WINDOW_SECONDS = 3600  # 1 小时历史窗口（锂电池中段电压变化极慢，需要大窗口）
+    MIN_DISCHARGE_RATE = 0.0001  # 最小放速率 (V/分钟)，极低值确保锂电平坦区也能估算
+    # 当实测放速率不可信时，使用保守估算：~0.002 V/min ≈ 约 17 小时从满到空（10Ah 电池 + Jetson 约 10W 负载）
+    FALLBACK_DISCHARGE_RATE = 0.002  # V/分钟
+
     def __init__(self, logger=None):
         self.logger = logger
         self.start_time = datetime.now()
+        self._rosmaster_bot = None  # Rosmaster bot 实例引用（用于读取电池电压）
+        self._battery_history: list[tuple[float, float]] = []  # (timestamp, voltage) 用于剩余时长估计
+
+    def set_bot(self, bot) -> None:
+        """注入 Rosmaster bot 实例（与运动/云台共享串口），用于读取电池电压"""
+        self._rosmaster_bot = bot
+        if self.logger:
+            self.logger.info("SystemCollector: Rosmaster bot injected for battery monitoring")
+
+    @staticmethod
+    def _voltage_to_percent(voltage: float) -> int:
+        """将 12V 锂电池电压转换为电量百分比"""
+        if voltage >= SystemCollector.BATTERY_VOLTAGE_MAX:
+            return 100
+        if voltage <= SystemCollector.BATTERY_VOLTAGE_MIN:
+            return 0
+        return round((voltage - SystemCollector.BATTERY_VOLTAGE_MIN)
+                     / (SystemCollector.BATTERY_VOLTAGE_MAX - SystemCollector.BATTERY_VOLTAGE_MIN) * 100)
+
+    def _estimate_remaining_minutes(self, voltage: float, level: int, now: float) -> int | None:
+        """根据历史电压变化估算剩余使用时长（分钟），返回 None 表示数据不足。
+        
+        锂电池在中段（50%-90%）电压曲线非常平坦，可能长时间不变化。
+        策略：优先用实测放速率；若数据不足或不稳定，用保守估算。
+        """
+        self._battery_history.append((now, voltage))
+        # 清理过期数据
+        cutoff = now - self.ESTIMATION_WINDOW_SECONDS
+        self._battery_history = [(t, v) for t, v in self._battery_history if t >= cutoff]
+
+        if len(self._battery_history) < 10:
+            return None  # 历史数据不足
+
+        # 用最早和最新采样点计算电压降速率
+        first_time, first_voltage = self._battery_history[0]
+        last_time, last_voltage = self._battery_history[-1]
+        time_delta_minutes = (last_time - first_time) / 60.0
+        voltage_drop = first_voltage - last_voltage  # 正数表示在放电
+
+        # 计算电压降速率
+        if time_delta_minutes >= 1.0 and voltage_drop > 0:
+            rate = voltage_drop / time_delta_minutes  # V/分钟
+            if rate >= self.MIN_DISCHARGE_RATE:
+                # 实测放速率可信，直接用
+                remaining_voltage = last_voltage - self.BATTERY_VOLTAGE_MIN
+                if remaining_voltage <= 0:
+                    return 0
+                return max(1, round(remaining_voltage / rate))
+
+        # 放速率过低或无法测量 → 使用保守估算
+        # 仅在有足够历史（>5分钟）且至少有一次采样后才给出保守值
+        if time_delta_minutes >= 5.0:
+            remaining_voltage = last_voltage - self.BATTERY_VOLTAGE_MIN
+            if remaining_voltage <= 0:
+                return 0
+            estimated = remaining_voltage / self.FALLBACK_DISCHARGE_RATE
+            return max(1, round(estimated))
+
+        return None
 
     async def collect(self) -> dict:
         """采集所有系统信息"""
@@ -35,23 +105,82 @@ class SystemCollector:
     async def _collect_battery(self) -> dict:
         """采集电池信息"""
         try:
-            # 尝试读取电池信息（Jetson 可能没有电池）
-            battery = psutil.sensors_battery()
+            now = datetime.now().timestamp()
+            # 优先从 Rosmaster 串口读取真实电池电压
+            if self._rosmaster_bot is not None:
+                voltage = self._read_rosmaster_battery_voltage()
+                if voltage is not None:
+                    level = self._voltage_to_percent(voltage)
+                    estimated = self._estimate_remaining_minutes(voltage, level, now)
+                    return {
+                        "level": level,
+                        "status": "discharging",
+                        "temperature": None,
+                        "voltage": round(voltage, 1),
+                        "estimated_minutes": estimated,
+                    }
 
+            # 回退: psutil（笔记本/树莓派可能支持）
+            battery = psutil.sensors_battery()
             if battery:
+                level = int(battery.percent)
+                # psutil 无电压数据，用百分比换算为近似电压用于趋势追踪
+                approx_voltage = self.BATTERY_VOLTAGE_MIN + level / 100.0 * (self.BATTERY_VOLTAGE_MAX - self.BATTERY_VOLTAGE_MIN)
+                estimated = self._estimate_remaining_minutes(approx_voltage, level, now)
                 return {
-                    "level": int(battery.percent),
+                    "level": level,
                     "status": "charging" if battery.power_plugged else "discharging",
                     "temperature": None,
                     "voltage": None,
+                    "estimated_minutes": estimated,
                 }
 
-            # Jetson 设备：尝试从系统文件读取
-            # 这里返回模拟数据，实际需要根据硬件调整
-            return {"level": 100, "status": "plugged", "temperature": 25.0, "voltage": 12.0}
+            # 最终回退: 无电池数据
+            return {"level": 100, "status": "unknown", "temperature": None, "voltage": None, "estimated_minutes": None}
 
         except Exception:
-            return {"level": 100, "status": "unknown", "temperature": None, "voltage": None}
+            return {"level": 100, "status": "unknown", "temperature": None, "voltage": None, "estimated_minutes": None}
+
+    def _read_rosmaster_battery_voltage(self) -> float | None:
+        """从 Rosmaster bot 读取电池电压（伏特）。
+        
+        Rosmaster_Lib 通过自动上报帧解析电池数据，常见 API：
+        - bot.get_battery_voltage() 返回电压值
+        - 或直接访问属性
+        """
+        bot = self._rosmaster_bot
+        try:
+            # 尝试方法1: get_battery_voltage()
+            if hasattr(bot, 'get_battery_voltage'):
+                voltage = bot.get_battery_voltage()
+                if voltage is not None and voltage > 0:
+                    return float(voltage)
+        except Exception:
+            pass
+
+        try:
+            # 尝试方法2: 读取属性 battery_voltage
+            if hasattr(bot, 'battery_voltage'):
+                voltage = bot.battery_voltage
+                if voltage is not None and voltage > 0:
+                    return float(voltage)
+        except Exception:
+            pass
+
+        try:
+            # 尝试方法3: get_battery() 返回字典
+            if hasattr(bot, 'get_battery'):
+                data = bot.get_battery()
+                if isinstance(data, dict) and 'voltage' in data:
+                    return float(data['voltage'])
+                if isinstance(data, (int, float)) and data > 0:
+                    return float(data)
+        except Exception:
+            pass
+
+        if self.logger:
+            self.logger.debug("SystemCollector: unable to read battery from Rosmaster bot")
+        return None
 
     async def _collect_system(self) -> dict:
         """采集系统资源信息"""

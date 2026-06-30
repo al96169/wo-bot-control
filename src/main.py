@@ -27,6 +27,7 @@ except (ImportError, AttributeError) as e:
     print(f"Warning: WebRTC not available: {e}")
 from modules.motion.controller import MotionController
 from modules.system.collector import SystemCollector
+from modules.system.power_policy import PowerPolicy
 
 # Camera 可选导入（兼容无opencv环境）
 try:
@@ -70,6 +71,7 @@ class WoBotControl:
         self.http_server = None
         self.webrtc_service = None
         self.dance_controller = None
+        self.power_policy = None
 
         # 运行状态
         self.running = False
@@ -151,6 +153,31 @@ class WoBotControl:
         # 注入 service_manager 到 message_handler
         self.message_handler.service_manager = self.service_manager
 
+        # 注入 power_policy 到 message_handler
+        if self.power_policy:
+            self.message_handler.power_policy = self.power_policy
+            # 设置模式变更回调：通过 WebSocket 广播通知所有客户端
+            async def on_power_mode_change(from_mode: str, to_mode: str):
+                if self.ws_server:
+                    message = {
+                        "type": "service_message",
+                        "data": {
+                            "subject": "省电模式变更" if to_mode == "eco" else "恢复正常模式",
+                            "summary": f"机器人已{'进入省电模式' if to_mode == 'eco' else '恢复正常模式'}",
+                            "body": f"电量策略自动切换: {from_mode} → {to_mode}",
+                            "severity": "warning" if to_mode == "eco" else "info",
+                            "source": "power_policy",
+                        },
+                    }
+                    await self.ws_server.broadcast_message(message)
+                    # 同步广播 power_policy_status
+                    await self.ws_server.broadcast_message({
+                        "type": "power_policy_status",
+                        "data": self.power_policy.get_status(),
+                    })
+            self.power_policy.set_on_mode_change(on_power_mode_change)
+            self.logger.info("Power policy injected into message handler")
+
         # 注册进程内服务
         if self.webrtc_service:
             self.service_manager.register_in_process_service("webrtc", self.webrtc_service)
@@ -226,6 +253,10 @@ class WoBotControl:
         self.system_collector = SystemCollector(self.logger)
         self.logger.info("System collector initialized")
 
+        # 省电策略引擎
+        self.power_policy = PowerPolicy()
+        self.logger.info("Power policy initialized")
+
         # 云台控制（先初始化，因为运动控制需要共享其 Rosmaster Bot 串口实例）
         gimbal_config = self.config.get("gimbal", {})
         if gimbal_config.get("enabled", False) and GIMBAL_AVAILABLE and create_gimbal:
@@ -255,6 +286,9 @@ class WoBotControl:
 
             motion_hw = create_hardware(motion_config, bot=shared_bot)
             self.motion_controller = MotionController(motion_config, self.logger, hardware=motion_hw)
+            # 将 shared_bot 注入 SystemCollector，用于读取真实电池电压
+            if self.system_collector:
+                self.system_collector.set_bot(shared_bot)
         else:
             self.motion_controller = MotionController(motion_config, self.logger)
         self.logger.info("Motion controller initialized")

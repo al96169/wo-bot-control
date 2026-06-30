@@ -70,6 +70,13 @@ class MessageHandler:
         status_data = {}
         if self.system_collector:
             status_data = await self.system_collector.collect()
+
+        # 省电策略评估：根据当前电量自动切换模式
+        if hasattr(self, 'power_policy') and self.power_policy:
+            battery = status_data.get("battery", {})
+            battery_level = battery.get("level", 100) if battery else 100
+            await self.power_policy.evaluate(battery_level)
+            status_data["power_policy"] = self.power_policy.get_status()
         # 附带 features，确保客户端始终能获取最新功能列表
         features = ["websocket", "exec", "motion", "system", "camera"]
         if hasattr(self, "gimbal_controller") and self.gimbal_controller:
@@ -254,6 +261,12 @@ class MessageHandler:
 
     async def _handle_dance(self, data: dict) -> dict:
         """处理舞蹈控制命令"""
+        command = data.get("command", "status")
+
+        # 省电模式下跳舞不可用——但允许只读查询（status/list）通过，避免轮询持续弹 403
+        if command not in ("status", "list"):
+            if hasattr(self, 'power_policy') and self.power_policy and self.power_policy.is_eco:
+                return {"type": "error", "data": {"code": 403, "message": "电量不足，省电模式下跳舞不可用"}}
         # 检查 service_manager 中的运行状态（防止进程管理器停服后仍响应）
         if self.service_manager:
             svc = self.service_manager.get_service_status("dance")
@@ -600,8 +613,75 @@ class MessageHandler:
         """处理设备控制（寻找设备/手电/充电/静音/省电等）"""
         action = data.get("action", "")
         enabled = data.get("enabled", True)
+
+        # 省电模式通过 PowerPolicy 处理
+        if action == "eco":
+            return await self._handle_power_policy_toggle(data)
+
         self.logger.info(f"Device control: {action} -> {'ON' if enabled else 'OFF'}")
         return {"type": "device_control_ack", "data": {"action": action, "enabled": enabled, "status": "ok"}}
+
+    async def _handle_power_policy_toggle(self, data: dict) -> dict:
+        """处理省电模式切换"""
+        if not hasattr(self, 'power_policy') or not self.power_policy:
+            return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
+
+        new_mode = await self.power_policy.toggle()
+        return {
+            "type": "power_policy_status",
+            "data": self.power_policy.get_status(),
+        }
+
+    async def _handle_power_policy_status(self, data: dict) -> dict:
+        """获取省电策略状态"""
+        if not hasattr(self, 'power_policy') or not self.power_policy:
+            return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
+        return {
+            "type": "power_policy_status",
+            "data": self.power_policy.get_status(),
+        }
+
+    async def _handle_power_policy_config(self, data: dict) -> dict:
+        """获取/设置省电策略配置"""
+        if not hasattr(self, 'power_policy') or not self.power_policy:
+            return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
+
+        action = data.get("action", "get")
+        if action == "set":
+            threshold = data.get("threshold")
+            if threshold is not None:
+                await self.power_policy.set_threshold(int(threshold))
+            return {
+                "type": "power_policy_config",
+                "data": self.power_policy.get_status(),
+            }
+        # get
+        return {
+            "type": "power_policy_config",
+            "data": self.power_policy.get_status(),
+        }
+
+    async def _handle_power_policy_simulate(self, data: dict) -> dict:
+        """模拟电量用于测试省电自动切换（调试用）。level=-1 清除模拟。"""
+        if not hasattr(self, 'power_policy') or not self.power_policy:
+            return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
+
+        level = data.get("level")
+        if level is None or level == -1:
+            self.power_policy.set_simulated_battery_level(None)
+        else:
+            level = int(level)
+            self.power_policy.set_simulated_battery_level(level)
+            # 直接根据模拟电量强制切换模式
+            if level <= self.power_policy._threshold:
+                await self.power_policy.set_mode(self.power_policy.MODE_ECO, from_auto=True)
+            elif level >= self.power_policy.AUTO_EXIT_THRESHOLD:
+                await self.power_policy.set_mode(self.power_policy.MODE_NORMAL, from_auto=True)
+
+        return {
+            "type": "power_policy_status",
+            "data": self.power_policy.get_status(),
+        }
 
     async def _handle_software_uninstall(self, data: dict) -> dict:
         """卸载软件（转发至 software_manager 子服务）"""
@@ -892,6 +972,12 @@ class MessageHandler:
 
     async def _handle_music_volume(self, data: dict) -> dict:
         """设置音量"""
+        # 省电模式下限制音量上限 ≤50%
+        if hasattr(self, 'power_policy') and self.power_policy and self.power_policy.is_eco:
+            requested = data.get("volume", 50)
+            if isinstance(requested, (int, float)) and requested > 50:
+                data = dict(data)  # 不修改原始 dict
+                data["volume"] = 50
         return await self._forward_music_command("set_volume", data, "music_action")
 
     async def _handle_music_status(self, data: dict) -> dict:
