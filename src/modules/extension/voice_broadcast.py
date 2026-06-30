@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import tempfile
 
 from ..extension.base import ExtensionModule
@@ -118,11 +119,20 @@ class VoiceBroadcastController(ExtensionModule):
             if self.logger:
                 self.logger.info(f"Voice broadcast: mode={mode}, size={len(audio_data)} bytes, file={tmp_path}")
 
-            # 用 aplay 播放（ALSA）
+            # 用 ffplay 播放（支持 Opus/WebM），若无 ffmpeg 则回退到 aplay
+            if shutil.which("ffplay"):
+                cmd = [
+                    "ffplay",
+                    "-nodisp",
+                    "-autoexit",
+                    "-loglevel",
+                    "quiet",
+                    tmp_path,
+                ]
+            else:
+                cmd = ["aplay", "-q", tmp_path]
             proc = await asyncio.create_subprocess_exec(
-                "aplay",
-                "-q",
-                tmp_path,
+                *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
