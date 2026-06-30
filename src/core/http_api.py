@@ -7,6 +7,7 @@ import asyncio
 
 try:
     import cv2
+
     CV2_AVAILABLE = True
 except ImportError:
     cv2 = None  # type: ignore[assignment]

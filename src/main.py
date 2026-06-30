@@ -156,6 +156,7 @@ class WoBotControl:
         # 注入 power_policy 到 message_handler
         if self.power_policy:
             self.message_handler.power_policy = self.power_policy
+
             # 设置模式变更回调：通过 WebSocket 广播通知所有客户端
             async def on_power_mode_change(from_mode: str, to_mode: str):
                 if self.ws_server:
@@ -171,10 +172,13 @@ class WoBotControl:
                     }
                     await self.ws_server.broadcast_message(message)
                     # 同步广播 power_policy_status
-                    await self.ws_server.broadcast_message({
-                        "type": "power_policy_status",
-                        "data": self.power_policy.get_status(),
-                    })
+                    await self.ws_server.broadcast_message(
+                        {
+                            "type": "power_policy_status",
+                            "data": self.power_policy.get_status(),
+                        }
+                    )
+
             self.power_policy.set_on_mode_change(on_power_mode_change)
             self.logger.info("Power policy injected into message handler")
 

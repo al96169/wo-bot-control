@@ -8,8 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-
-from core.service_manager import SERVICE_DEFINITIONS
 import pty
 import re
 import select
@@ -17,6 +15,8 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+
+from core.service_manager import SERVICE_DEFINITIONS
 
 
 class MessageHandler:
@@ -72,7 +72,7 @@ class MessageHandler:
             status_data = await self.system_collector.collect()
 
         # 省电策略评估：根据当前电量自动切换模式
-        if hasattr(self, 'power_policy') and self.power_policy:
+        if hasattr(self, "power_policy") and self.power_policy:
             battery = status_data.get("battery", {})
             battery_level = battery.get("level", 100) if battery else 100
             await self.power_policy.evaluate(battery_level)
@@ -264,9 +264,13 @@ class MessageHandler:
         command = data.get("command", "status")
 
         # 省电模式下跳舞不可用——但允许只读查询（status/list）通过，避免轮询持续弹 403
-        if command not in ("status", "list"):
-            if hasattr(self, 'power_policy') and self.power_policy and self.power_policy.is_eco:
-                return {"type": "error", "data": {"code": 403, "message": "电量不足，省电模式下跳舞不可用"}}
+        if (
+            command not in ("status", "list")
+            and hasattr(self, "power_policy")
+            and self.power_policy
+            and self.power_policy.is_eco
+        ):
+            return {"type": "error", "data": {"code": 403, "message": "电量不足，省电模式下跳舞不可用"}}
         # 检查 service_manager 中的运行状态（防止进程管理器停服后仍响应）
         if self.service_manager:
             svc = self.service_manager.get_service_status("dance")
@@ -623,10 +627,10 @@ class MessageHandler:
 
     async def _handle_power_policy_toggle(self, data: dict) -> dict:
         """处理省电模式切换"""
-        if not hasattr(self, 'power_policy') or not self.power_policy:
+        if not hasattr(self, "power_policy") or not self.power_policy:
             return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
 
-        new_mode = await self.power_policy.toggle()
+        await self.power_policy.toggle()
         return {
             "type": "power_policy_status",
             "data": self.power_policy.get_status(),
@@ -634,7 +638,7 @@ class MessageHandler:
 
     async def _handle_power_policy_status(self, data: dict) -> dict:
         """获取省电策略状态"""
-        if not hasattr(self, 'power_policy') or not self.power_policy:
+        if not hasattr(self, "power_policy") or not self.power_policy:
             return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
         return {
             "type": "power_policy_status",
@@ -643,7 +647,7 @@ class MessageHandler:
 
     async def _handle_power_policy_config(self, data: dict) -> dict:
         """获取/设置省电策略配置"""
-        if not hasattr(self, 'power_policy') or not self.power_policy:
+        if not hasattr(self, "power_policy") or not self.power_policy:
             return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
 
         action = data.get("action", "get")
@@ -663,7 +667,7 @@ class MessageHandler:
 
     async def _handle_power_policy_simulate(self, data: dict) -> dict:
         """模拟电量用于测试省电自动切换（调试用）。level=-1 清除模拟。"""
-        if not hasattr(self, 'power_policy') or not self.power_policy:
+        if not hasattr(self, "power_policy") or not self.power_policy:
             return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
 
         level = data.get("level")
@@ -973,7 +977,7 @@ class MessageHandler:
     async def _handle_music_volume(self, data: dict) -> dict:
         """设置音量"""
         # 省电模式下限制音量上限 ≤50%
-        if hasattr(self, 'power_policy') and self.power_policy and self.power_policy.is_eco:
+        if hasattr(self, "power_policy") and self.power_policy and self.power_policy.is_eco:
             requested = data.get("volume", 50)
             if isinstance(requested, (int, float)) and requested > 50:
                 data = dict(data)  # 不修改原始 dict

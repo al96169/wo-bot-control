@@ -45,12 +45,15 @@ class SystemCollector:
             return 100
         if voltage <= SystemCollector.BATTERY_VOLTAGE_MIN:
             return 0
-        return round((voltage - SystemCollector.BATTERY_VOLTAGE_MIN)
-                     / (SystemCollector.BATTERY_VOLTAGE_MAX - SystemCollector.BATTERY_VOLTAGE_MIN) * 100)
+        return round(
+            (voltage - SystemCollector.BATTERY_VOLTAGE_MIN)
+            / (SystemCollector.BATTERY_VOLTAGE_MAX - SystemCollector.BATTERY_VOLTAGE_MIN)
+            * 100
+        )
 
     def _estimate_remaining_minutes(self, voltage: float, level: int, now: float) -> int | None:
         """根据历史电压变化估算剩余使用时长（分钟），返回 None 表示数据不足。
-        
+
         锂电池在中段（50%-90%）电压曲线非常平坦，可能长时间不变化。
         策略：优先用实测放速率；若数据不足或不稳定，用保守估算。
         """
@@ -125,7 +128,9 @@ class SystemCollector:
             if battery:
                 level = int(battery.percent)
                 # psutil 无电压数据，用百分比换算为近似电压用于趋势追踪
-                approx_voltage = self.BATTERY_VOLTAGE_MIN + level / 100.0 * (self.BATTERY_VOLTAGE_MAX - self.BATTERY_VOLTAGE_MIN)
+                approx_voltage = self.BATTERY_VOLTAGE_MIN + level / 100.0 * (
+                    self.BATTERY_VOLTAGE_MAX - self.BATTERY_VOLTAGE_MIN
+                )
                 estimated = self._estimate_remaining_minutes(approx_voltage, level, now)
                 return {
                     "level": level,
@@ -143,15 +148,18 @@ class SystemCollector:
 
     def _read_rosmaster_battery_voltage(self) -> float | None:
         """从 Rosmaster bot 读取电池电压（伏特）。
-        
+
         Rosmaster_Lib 通过自动上报帧解析电池数据，常见 API：
         - bot.get_battery_voltage() 返回电压值
         - 或直接访问属性
         """
         bot = self._rosmaster_bot
+        if bot is None:
+            return None
+
         try:
             # 尝试方法1: get_battery_voltage()
-            if hasattr(bot, 'get_battery_voltage'):
+            if hasattr(bot, "get_battery_voltage"):
                 voltage = bot.get_battery_voltage()
                 if voltage is not None and voltage > 0:
                     return float(voltage)
@@ -160,7 +168,7 @@ class SystemCollector:
 
         try:
             # 尝试方法2: 读取属性 battery_voltage
-            if hasattr(bot, 'battery_voltage'):
+            if hasattr(bot, "battery_voltage"):
                 voltage = bot.battery_voltage
                 if voltage is not None and voltage > 0:
                     return float(voltage)
@@ -169,10 +177,10 @@ class SystemCollector:
 
         try:
             # 尝试方法3: get_battery() 返回字典
-            if hasattr(bot, 'get_battery'):
+            if hasattr(bot, "get_battery"):
                 data = bot.get_battery()
-                if isinstance(data, dict) and 'voltage' in data:
-                    return float(data['voltage'])
+                if isinstance(data, dict) and "voltage" in data:
+                    return float(data["voltage"])
                 if isinstance(data, (int, float)) and data > 0:
                     return float(data)
         except Exception:
