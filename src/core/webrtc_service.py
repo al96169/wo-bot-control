@@ -511,11 +511,44 @@ class WebRTCService:
 
     async def _on_dc_message(self, client_id: str, msg):
         import json
+        import struct
 
-        try:
-            data = json.loads(msg) if isinstance(msg, (str, bytes)) else msg
-        except Exception:
-            data = {"type": "raw", "data": str(msg)}
+        if isinstance(msg, str):
+            try:
+                data = json.loads(msg)
+            except Exception:
+                self.logger.warning(f"[{client_id}] Invalid JSON in DataChannel")
+                return
+        elif isinstance(msg, bytes):
+            # 尝试先当 JSON 文本解析
+            try:
+                data = json.loads(msg.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                # 二进制消息：解析混合协议 [4B header 长度(大端)] [JSON header] [payload]
+                try:
+                    if len(msg) < 4:
+                        self.logger.warning(f"[{client_id}] DC binary too short: {len(msg)} bytes")
+                        return
+                    header_len = struct.unpack(">I", msg[:4])[0]
+                    if 4 + header_len > len(msg):
+                        self.logger.warning(f"[{client_id}] DC binary header length mismatch: {header_len}")
+                        return
+                    header_json = msg[4 : 4 + header_len].decode("utf-8")
+                    header = json.loads(header_json)
+                    msg_type = header.get("type", "raw")
+                    msg_data = header.get("data", {})
+                    msg_data["_audio_data"] = msg[4 + header_len :]
+
+                    if self.message_handler:
+                        result = await self.message_handler.handle(msg_type, msg_data)
+                        if result and isinstance(result, dict):
+                            await self.send_message(client_id, result)
+                    return
+                except Exception as e:
+                    self.logger.error(f"[{client_id}] Failed to parse DC binary: {e}")
+                    return
+        else:
+            return
 
         if self.message_handler:
             msg_type = data.get("type", "raw")
