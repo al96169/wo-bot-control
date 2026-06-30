@@ -71,6 +71,7 @@ class WoBotControl:
         self.http_server = None
         self.webrtc_service = None
         self.dance_controller = None
+        self.voice_broadcast_controller = None
         self.power_policy = None
 
         # 运行状态
@@ -143,6 +144,10 @@ class WoBotControl:
         if self.dance_controller:
             self.message_handler.dance_controller = self.dance_controller
 
+        # 注入喊话控制器到消息处理器
+        if self.voice_broadcast_controller:
+            self.message_handler.voice_broadcast_controller = self.voice_broadcast_controller
+
         # 初始化服务进程管理器（负责守护所有子服务）
         self.service_manager = ServiceManager(
             config=self.config,
@@ -187,6 +192,9 @@ class WoBotControl:
             self.service_manager.register_in_process_service("webrtc", self.webrtc_service)
         if self.dance_controller:
             self.service_manager.register_in_process_service("dance", self.dance_controller)
+        if self.voice_broadcast_controller:
+            self.voice_broadcast_controller._service_manager = self.service_manager
+            self.service_manager.register_in_process_service("voice_broadcast", self.voice_broadcast_controller)
 
         # 启动所有子服务
         await self.service_manager.start_all()
@@ -321,6 +329,20 @@ class WoBotControl:
             self.dance_controller = None
             self.logger.warning(f"Dance controller init failed: {e}")
 
+        # 喊话控制（进程内服务，依赖 service_manager 服务已启动后注入）
+        try:
+            from modules.extension.voice_broadcast import VoiceBroadcastController
+
+            self.voice_broadcast_controller = VoiceBroadcastController(
+                power_policy=self.power_policy,
+                logger=self.logger,
+            )
+            await self.voice_broadcast_controller.start()
+            self.logger.info("Voice broadcast controller initialized")
+        except Exception as e:
+            self.voice_broadcast_controller = None
+            self.logger.warning(f"Voice broadcast controller init failed: {e}")
+
     async def stop(self):
         """停止服务"""
         self.logger.info("Stopping wo-bot-control...")
@@ -351,6 +373,9 @@ class WoBotControl:
 
         if self.dance_controller:
             await self.dance_controller.stop()
+
+        if self.voice_broadcast_controller:
+            await self.voice_broadcast_controller.stop()
 
         self.logger.info("wo-bot-control stopped")
 

@@ -92,6 +92,9 @@ class MessageHandler:
         # 检查音乐播放服务是否配置
         if "music_player" in SERVICE_DEFINITIONS:
             features.append("music")
+        # 检查喊话服务
+        if hasattr(self, "voice_broadcast_controller") and self.voice_broadcast_controller:
+            features.append("voice_broadcast")
         status_data["features"] = features
         return {"type": "status", "data": status_data}
 
@@ -635,6 +638,24 @@ class MessageHandler:
             "type": "power_policy_status",
             "data": self.power_policy.get_status(),
         }
+
+    async def _handle_voice_broadcast(self, data: dict) -> dict:
+        """处理客户端喊话音频消息（由 WebSocket 二进制帧解析后调用）"""
+        if not hasattr(self, "voice_broadcast_controller") or not self.voice_broadcast_controller:
+            return {"type": "error", "data": {"code": 503, "message": "Voice broadcast not available"}}
+
+        mode = data.get("mode", "record")
+        audio_data = data.get("_audio_data")
+        if isinstance(audio_data, str):
+            # 如果是从 JSON 中传来的 base64，解码为 bytes（仅用于测试）
+            import base64
+
+            audio_data = base64.b64decode(audio_data)
+
+        if not isinstance(audio_data, bytes):
+            return {"type": "error", "data": {"code": 400, "message": "Missing audio data"}}
+
+        return await self.voice_broadcast_controller.play_audio(audio_data, mode)
 
     async def _handle_power_policy_status(self, data: dict) -> dict:
         """获取省电策略状态"""

@@ -74,6 +74,14 @@ SERVICE_DEFINITIONS: dict[str, dict] = {
         "description": "本地音乐播放与网络推流 (DLNA/AirPlay/RTMP)",
         "auto_start": True,
     },
+    "voice_broadcast": {
+        "name": "喊话服务",
+        "module": "modules.extension.voice_broadcast",
+        "script": None,
+        "description": "客户端一键喊话，接收音频在机器人端播放",
+        "auto_start": True,
+        "in_process": True,
+    },
 }
 
 MAX_RESTART_ATTEMPTS = 10

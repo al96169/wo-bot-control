@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 import uuid
 from typing import Any
 
@@ -274,6 +275,10 @@ class WebSocketServer:
         # 检查音乐播放服务是否配置
         if "music_player" in SERVICE_DEFINITIONS:
             features.append("music")
+        # 检查喊话服务（检查 message_handler 上的控制器）
+        voice_ctrl = getattr(self.message_handler, "voice_broadcast_controller", None)
+        if voice_ctrl:
+            features.append("voice_broadcast")
 
         try:
             # 发送握手消息（设备发现兼容）
@@ -287,18 +292,22 @@ class WebSocketServer:
             )
 
             async for raw in websocket:
-                try:
-                    msg = json.loads(raw)
-                    await self._process_message(websocket, client_id, remote, msg)
-                except json.JSONDecodeError:
-                    await websocket.send(
-                        json.dumps(
-                            {
-                                "type": "error",
-                                "data": {"code": 400, "message": "Invalid JSON"},
-                            }
+                if isinstance(raw, bytes):
+                    # 二进制消息：语音喊话音频数据
+                    await self._handle_binary_message(websocket, client_id, remote, raw)
+                else:
+                    try:
+                        msg = json.loads(raw)
+                        await self._process_message(websocket, client_id, remote, msg)
+                    except json.JSONDecodeError:
+                        await websocket.send(
+                            json.dumps(
+                                {
+                                    "type": "error",
+                                    "data": {"code": 400, "message": "Invalid JSON"},
+                                }
+                            )
                         )
-                    )
 
         except (websockets.exceptions.ConnectionClosed, websockets.ConnectionClosed):
             pass
@@ -440,6 +449,55 @@ class WebSocketServer:
                     }
                 )
             )
+
+    async def _handle_binary_message(self, websocket: ServerConnection, client_id: str, remote: tuple, raw: bytes):
+        """处理二进制 WebSocket 消息（语音喊话音频）
+
+        协议格式：
+          [4 bytes: JSON 头长度 uint32 big-endian]
+          [N bytes: JSON 头 {"type": "voice_broadcast", "data": {"mode": "record"}}]
+          [剩余 bytes: 音频二进制数据]
+        """
+        try:
+            if len(raw) < 4:
+                await websocket.send(
+                    json.dumps({"type": "error", "data": {"code": 400, "message": "Binary message too short"}})
+                )
+                return
+
+            header_len = struct.unpack(">I", raw[:4])[0]
+            if header_len < 2 or 4 + header_len > len(raw):
+                await websocket.send(
+                    json.dumps({"type": "error", "data": {"code": 400, "message": "Invalid binary header length"}})
+                )
+                return
+
+            header_json = raw[4 : 4 + header_len].decode("utf-8")
+            audio_data = raw[4 + header_len :]
+
+            msg = json.loads(header_json)
+            msg_type = msg.get("type", "")
+
+            if msg_type != "voice_broadcast":
+                await websocket.send(
+                    json.dumps(
+                        {"type": "error", "data": {"code": 400, "message": f"Unknown binary msg type: {msg_type}"}}
+                    )
+                )
+                return
+
+            msg_data = msg.get("data", {})
+            msg_data["_audio_data"] = audio_data
+
+            # 委托给 message_handler 处理
+            result = await self.message_handler.handle(msg_type, msg_data)
+            if result and isinstance(result, dict):
+                await websocket.send(json.dumps(result))
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Binary message handling error: {e}")
+            await websocket.send(json.dumps({"type": "error", "data": {"code": 500, "message": str(e)}}))
 
     async def _start_ws_status_broadcast(self, interval: float = 1.0):
         """启动 WebSocket 状态广播（向所有已连接客户端广播系统状态）"""
