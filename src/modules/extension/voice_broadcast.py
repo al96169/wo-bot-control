@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import shutil
 import tempfile
 
@@ -126,13 +127,11 @@ class VoiceBroadcastController(ExtensionModule):
             if self.logger:
                 self.logger.info(f"Voice broadcast: mode={mode}, size={len(audio_data)} bytes, file={tmp_path}")
 
-            # ffmpeg 解码 Opus/WebM → WAV → aplay 播放（ALSA 输出到 USB 声卡）
+            # ffmpeg 解码 Opus/WebM → WAV → aplay 播放（输出到 USB 声卡 wobot_local）
             stderr = ""
             if shutil.which("ffmpeg"):
                 # 通过 shell 管道: ffmpeg 解码 → aplay 播放
-                import shlex
-
-                cmd_str = f"ffmpeg -i {shlex.quote(tmp_path)} -f wav -loglevel error pipe:1 | aplay -q"
+                cmd_str = f"ffmpeg -i {shlex.quote(tmp_path)} -f wav -loglevel error pipe:1 | aplay -q -D wobot_local"
                 proc = await asyncio.create_subprocess_shell(
                     cmd_str,
                     stdout=asyncio.subprocess.DEVNULL,
@@ -141,12 +140,16 @@ class VoiceBroadcastController(ExtensionModule):
                 await proc.wait()
                 if proc.returncode != 0 and self.logger:
                     stderr = (await proc.stderr.read()).decode(errors="replace") if proc.stderr else ""
-                    self.logger.warning(f"voice playback pipe exited with code {proc.returncode}: {stderr.strip()}")
+                    # 电话模式的 WebM 分片不含完整文件头，ffmpeg 报错属正常，不警告
+                    if mode != "phone":
+                        self.logger.warning(f"voice playback pipe exited with code {proc.returncode}: {stderr.strip()}")
             else:
                 # 无 ffmpeg 时直接 aplay（不支持 WebM，仅 PCM/WAV）
                 proc = await asyncio.create_subprocess_exec(
                     "aplay",
                     "-q",
+                    "-D",
+                    "wobot_local",
                     tmp_path,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
