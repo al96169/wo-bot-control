@@ -89,13 +89,6 @@ class VoiceBroadcastController(ExtensionModule):
             }
 
         # 异步播放，不阻塞消息循环
-        # 电话模式：chunk 还在播放则跳过，避免不断取消对方导致无声
-        if mode == "phone" and self._current_task and not self._current_task.done():
-            return {
-                "type": "voice_broadcast_ack",
-                "data": {"success": True, "message": "播放中", "mode": mode},
-            }
-
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
 
@@ -143,6 +136,8 @@ class VoiceBroadcastController(ExtensionModule):
                     # 电话模式的 WebM 分片不含完整文件头，ffmpeg 报错属正常，不警告
                     if mode != "phone":
                         self.logger.warning(f"voice playback pipe exited with code {proc.returncode}: {stderr.strip()}")
+                elif self.logger:
+                    self.logger.info(f"Voice playback completed: mode={mode}")
             else:
                 # 无 ffmpeg 时直接 aplay（不支持 WebM，仅 PCM/WAV）
                 proc = await asyncio.create_subprocess_exec(
