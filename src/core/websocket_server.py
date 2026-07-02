@@ -490,6 +490,11 @@ class WebSocketServer:
             msg_data["_audio_data"] = audio_data
 
             # 委托给 message_handler 处理
+            if self.logger:
+                self.logger.info(
+                    f"[{client_id}] Binary WS msg: type={msg_type}, mode={msg_data.get('mode')}, "
+                    f"audio_bytes={len(audio_data)}"
+                )
             result = await self.message_handler.handle(msg_type, msg_data)
             if result and isinstance(result, dict):
                 await websocket.send(json.dumps(result))

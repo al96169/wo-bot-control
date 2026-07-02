@@ -646,6 +646,8 @@ class MessageHandler:
 
         mode = data.get("mode", "record")
         audio_data = data.get("_audio_data")
+        audio_format = data.get("format")  # "pcm_s16le" 表示原始 PCM
+        sample_rate = data.get("rate")     # 采样率，如 48000
         if isinstance(audio_data, str):
             # 如果是从 JSON 中传来的 base64，解码为 bytes（仅用于测试）
             import base64
@@ -655,7 +657,7 @@ class MessageHandler:
         if not isinstance(audio_data, bytes):
             return {"type": "error", "data": {"code": 400, "message": "Missing audio data"}}
 
-        return await self.voice_broadcast_controller.play_audio(audio_data, mode)
+        return await self.voice_broadcast_controller.play_audio(audio_data, mode, audio_format, sample_rate)
 
     async def _handle_power_policy_status(self, data: dict) -> dict:
         """获取省电策略状态"""
