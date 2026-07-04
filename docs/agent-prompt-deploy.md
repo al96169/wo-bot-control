@@ -9,7 +9,7 @@
 
 ## 正确的部署流程
 
-当需要将 wo-bot-control 代码部署到 Jetson 机器人（192.168.1.47）时，使用**打包推送**方式：
+当需要将 wo-bot-control 代码部署到 Jetson 机器人时，使用**打包推送**方式：
 
 ### 使用一键部署脚本
 
@@ -45,10 +45,10 @@ Jetson SSH 密码存储在 `secret/jetson.md`，**不要将此密码打印在对
 部署完成后，验证服务是否正常运行：
 ```bash
 # SSH 到机器人查看服务状态
-ssh trae@192.168.1.47 "systemctl status wobot-control --no-pager"
+ssh <JETSON_USER>@<JETSON_IP> "systemctl status wobot-control --no-pager"
 
 # 或查看实时日志
-ssh trae@192.168.1.47 "journalctl -u wobot-control -f"
+ssh <JETSON_USER>@<JETSON_IP> "journalctl -u wobot-control -f"
 ```
 
 ## 什么时候需要部署

@@ -97,7 +97,7 @@ ws://{robot_ip}:8765/ws
       "temperature": 42.0
     },
     "network": {
-      "ip": "192.168.1.47",
+      "ip": "<ROBOT_IP>",
       "ssid": "MyWiFi",
       "signal_strength": -45,
       "mac": "00:11:22:33:44:55"
@@ -188,7 +188,7 @@ ws://{robot_ip}:8765/ws
         "name": "CSI Camera",
         "status": "streaming",
         "resolution": "640x480",
-        "stream_url": "webrtc://192.168.1.47:8080/camera/0"
+        "stream_url": "webrtc://<ROBOT_IP>:8080/camera/0"
       }
     ]
   }
@@ -360,7 +360,7 @@ ws://{robot_ip}:8765/ws
   "timestamp": 1699999999002,
   "data": {
     "client_id": "app-abc123",
-    "candidate": "candidate:1 1 UDP 2130706431 192.168.1.47 53703 typ host",
+    "candidate": "candidate:1 1 UDP 2130706431 <ROBOT_IP> 53703 typ host",
     "sdp_mid": "0",
     "sdp_mline_index": 0
   }
