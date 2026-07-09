@@ -625,8 +625,32 @@ class MessageHandler:
         if action == "eco":
             return await self._handle_power_policy_toggle(data)
 
+        # 寻找设备：触发/停止声光提示
+        if action in ("find_device", "find"):
+            return await self._handle_find_device(enabled)
+
         self.logger.info(f"Device control: {action} -> {'ON' if enabled else 'OFF'}")
         return {"type": "device_control_ack", "data": {"action": action, "enabled": enabled, "status": "ok"}}
+
+    async def _handle_find_device(self, enabled: bool) -> dict:
+        """处理寻找设备（声光提示）"""
+        if not hasattr(self, "find_device_controller") or not self.find_device_controller:
+            return {"type": "error", "data": {"code": 503, "message": "Find device not available"}}
+
+        if enabled:
+            status = await self.find_device_controller.start_find()
+        else:
+            status = await self.find_device_controller.stop_find()
+        self.logger.info(f"Find device: {'ON' if enabled else 'OFF'} (active={status.get('active')})")
+        return {
+            "type": "device_control_ack",
+            "data": {
+                "action": "find_device",
+                "enabled": status.get("active", False),
+                "status": "ok",
+                **status,
+            },
+        }
 
     async def _handle_power_policy_toggle(self, data: dict) -> dict:
         """处理省电模式切换"""

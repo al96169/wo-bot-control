@@ -72,6 +72,7 @@ class WoBotControl:
         self.webrtc_service = None
         self.dance_controller = None
         self.voice_broadcast_controller = None
+        self.find_device_controller = None
         self.power_policy = None
 
         # 运行状态
@@ -148,6 +149,10 @@ class WoBotControl:
         if self.voice_broadcast_controller:
             self.message_handler.voice_broadcast_controller = self.voice_broadcast_controller
 
+        # 注入寻找设备控制器到消息处理器
+        if self.find_device_controller:
+            self.message_handler.find_device_controller = self.find_device_controller
+
         # 初始化服务进程管理器（负责守护所有子服务）
         self.service_manager = ServiceManager(
             config=self.config,
@@ -195,6 +200,8 @@ class WoBotControl:
         if self.voice_broadcast_controller:
             self.voice_broadcast_controller._service_manager = self.service_manager
             self.service_manager.register_in_process_service("voice_broadcast", self.voice_broadcast_controller)
+        if self.find_device_controller:
+            self.find_device_controller._service_manager = self.service_manager
 
         # 启动所有子服务
         await self.service_manager.start_all()
@@ -343,6 +350,22 @@ class WoBotControl:
             self.voice_broadcast_controller = None
             self.logger.warning(f"Voice broadcast controller init failed: {e}")
 
+        # 寻找设备控制（声光提示，复用 Rosmaster 实例控制 RGB LED）
+        try:
+            from modules.extension.find_device import FindDeviceController
+
+            self.find_device_controller = FindDeviceController(
+                bot=shared_bot,
+                power_policy=self.power_policy,
+                logger=self.logger,
+            )
+            await self.find_device_controller.start()
+            light_ok = self.find_device_controller._has_light()
+            self.logger.info(f"Find device controller initialized (light={'on' if light_ok else 'off'})")
+        except Exception as e:
+            self.find_device_controller = None
+            self.logger.warning(f"Find device controller init failed: {e}")
+
     async def stop(self):
         """停止服务"""
         self.logger.info("Stopping wo-bot-control...")
@@ -376,6 +399,9 @@ class WoBotControl:
 
         if self.voice_broadcast_controller:
             await self.voice_broadcast_controller.stop()
+
+        if self.find_device_controller:
+            await self.find_device_controller.stop()
 
         self.logger.info("wo-bot-control stopped")
 
