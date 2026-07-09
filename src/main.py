@@ -406,14 +406,9 @@ class WoBotControl:
         self.logger.info("wo-bot-control stopped")
 
     async def _on_service_message(self, message: dict) -> None:
-        """服务管理器消息回调：将子服务异常通知转发给所有 WebSocket 客户端"""
+        """服务管理器消息回调：将子服务推送消息（如 software_progress）原样转发给所有 WebSocket 客户端"""
         if self.ws_server:
-            await self.ws_server.broadcast_message(
-                {
-                    "type": "service_message",
-                    "data": message,
-                }
-            )
+            await self.ws_server.broadcast_message(message)
 
     def handle_signal(self, signum, frame):
         """处理信号（Python 3.6 兼容：用 ensure_future + call_soon_threadsafe）"""

@@ -549,10 +549,10 @@ class MessageHandler:
             return await self.service_manager.send_subprocess_command("software_manager", "list", data)
         return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
-    async def _handle_software_search(self, data: dict) -> dict:
-        """搜索软件包（转发至 software_manager 子服务）"""
+    async def _handle_software_available(self, data: dict) -> dict:
+        """获取白名单内未安装软件列表（转发至 software_manager 子服务）"""
         if self.service_manager:
-            return await self.service_manager.send_subprocess_command("software_manager", "search", data)
+            return await self.service_manager.send_subprocess_command("software_manager", "available", data)
         return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     async def _handle_software_install(self, data: dict) -> dict:
@@ -561,6 +561,12 @@ class MessageHandler:
             return await self.service_manager.send_subprocess_command(
                 "software_manager", "install", data, timeout=120.0
             )
+        return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
+
+    async def _handle_software_check_updates(self, data: dict) -> dict:
+        """检查软件更新（转发至 software_manager 子服务）"""
+        if self.service_manager:
+            return await self.service_manager.send_subprocess_command("software_manager", "check_updates", data)
         return {"type": "error", "data": {"code": 503, "message": "Service manager not available"}}
 
     async def _handle_module_list(self, data: dict) -> dict:

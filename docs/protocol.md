@@ -237,9 +237,12 @@ ws://{robot_ip}:8765/ws
 
 ---
 
-### 3.6 软件管理
+### 3.6 软件管理（白名单控制）
 
-#### software_list - 获取软件列表
+> 仅维护 wo-bot 官方白名单内软件，不支持搜索安装任意系统包。
+> 白名单由 wo-bot-market 市场服务器提供（manifest.json）。
+
+#### software_list - 获取已安装软件列表（白名单内）
 ```json
 // 客户端发送
 { "type": "software_list", "timestamp": 1699999999000, "data": {} }
@@ -251,23 +254,102 @@ ws://{robot_ip}:8765/ws
   "data": {
     "packages": [
       {
-        "name": "python3",
-        "version": "3.10.6",
-        "status": "installed"
+        "name": "wobot-control",
+        "display_name": "wo-bot 控制服务",
+        "version": "1.0.0",
+        "description": "机器人主控制服务",
+        "category": "core",
+        "critical": true,
+        "icon": "robot",
+        "installed": true
       }
     ]
   }
 }
 ```
 
-#### software_install - 安装软件
+#### software_available - 获取可安装软件列表（白名单内未安装）
 ```json
+// 客户端发送
+{ "type": "software_available", "timestamp": 1699999999000, "data": {} }
+
+// 服务端响应
+{
+  "type": "software_available",
+  "timestamp": 1699999999001,
+  "data": {
+    "packages": [
+      {
+        "name": "cmatrix",
+        "display_name": "终端矩阵屏保",
+        "description": "经典的 Matrix 终端屏保动画",
+        "category": "utility",
+        "critical": false,
+        "icon": "screen",
+        "installed": false
+      }
+    ]
+  }
+}
+```
+
+#### software_install - 安装白名单内软件
+```json
+// 客户端发送
 {
   "type": "software_install",
   "timestamp": 1699999999000,
   "data": {
-    "package": "vim",
-    "source": "apt"  // apt, pip, custom
+    "package": "cmatrix"
+  }
+}
+
+// 服务端响应
+{
+  "type": "software_install_ack",
+  "timestamp": 1699999999001,
+  "data": {
+    "package": "cmatrix",
+    "status": "installed",
+    "output": "...",
+    "requires_reconnect": false
+  }
+}
+```
+
+#### software_progress - 操作进度推送（服务端主动推送）
+```json
+{
+  "type": "software_progress",
+  "timestamp": 1699999999000,
+  "data": {
+    "package": "cmatrix",
+    "action": "install",
+    "progress": 45,
+    "stage": "downloading",
+    "output": "Get:1 http://archive.ubuntu.com cmatrix..."
+  }
+}
+```
+
+#### software_updates_available - 连接成功后推送可更新软件列表（服务端主动推送）
+
+| `software_updates_available` | S→C | 连接成功后推送可更新软件列表 `{ updates: [{name, display_name, current_version, latest_version, critical}] }` |
+
+```json
+{
+  "type": "software_updates_available",
+  "timestamp": 1699999999000,
+  "data": {
+    "updates": [
+      {
+        "name": "htop",
+        "display_name": "进程监控工具",
+        "current_version": "2.1.0-3",
+        "latest_version": "3.2.1",
+        "critical": false
+      }
+    ]
   }
 }
 ```
@@ -281,7 +363,7 @@ ws://{robot_ip}:8765/ws
   "type": "software_uninstall",
   "timestamp": 1699999999000,
   "data": {
-    "package": "vim"
+    "package": "cmatrix"
   }
 }
 
@@ -290,8 +372,19 @@ ws://{robot_ip}:8765/ws
   "type": "software_uninstall_ack",
   "timestamp": 1699999999001,
   "data": {
-    "package": "vim",
-    "status": "uninstalled"
+    "package": "cmatrix",
+    "status": "removed"
+  }
+}
+
+// 关键服务保护（critical=true 不可卸载）
+{
+  "type": "software_uninstall_ack",
+  "timestamp": 1699999999001,
+  "data": {
+    "package": "wobot-control",
+    "status": "protected",
+    "message": "关键服务不可卸载"
   }
 }
 ```
@@ -303,17 +396,18 @@ ws://{robot_ip}:8765/ws
   "type": "software_upgrade",
   "timestamp": 1699999999000,
   "data": {
-    "package": "vim"
+    "package": "wobot-control"
   }
 }
 
-// 服务端响应
+// 服务端响应（关键服务升级提示需重连）
 {
   "type": "software_upgrade_ack",
   "timestamp": 1699999999001,
   "data": {
-    "package": "vim",
-    "status": "upgraded"
+    "package": "wobot-control",
+    "status": "upgraded",
+    "requires_reconnect": true
   }
 }
 ```

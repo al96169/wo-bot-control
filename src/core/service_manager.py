@@ -34,7 +34,7 @@ SERVICE_DEFINITIONS: dict[str, dict] = {
         "name": "软件管理",
         "module": "sub_services.software_manager",
         "script": "software_manager.py",
-        "description": "软件包安装/卸载/搜索/升级",
+        "description": "软件包安装/卸载/升级（白名单控制）",
         "auto_start": True,
     },
     "remote_control": {
@@ -401,6 +401,13 @@ class ServiceManager:
 
         try:
             module = defn.get("module") or script_name.replace(".py", "").replace("/", ".")
+            # 构建子进程环境变量（继承父进程 + 注入服务配置）
+            child_env = os.environ.copy()
+            child_env["PYTHONUNBUFFERED"] = "1"  # 确保子进程 stdout 不缓冲，进度推送即时到达
+            sw_cfg = self.config.get("software_manager", {})
+            if sw_cfg:
+                child_env["WOBOT_MARKET_ENDPOINT"] = sw_cfg.get("market_endpoint", "http://localhost:9099")
+                child_env["WOBOT_OPERATION_TIMEOUT"] = str(sw_cfg.get("operation_timeout", 120))
             proc = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
@@ -409,6 +416,7 @@ class ServiceManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=os.path.dirname(os.path.dirname(__file__)),
+                env=child_env,
             )
             self._processes[service_id] = proc
             self._subproc_stdin[service_id] = proc.stdin  # type: ignore[assignment]
@@ -441,7 +449,7 @@ class ServiceManager:
                 # 读取 stderr 日志
                 if proc.stderr:
                     try:
-                        stderr_data = await proc.stdout.read() if proc.stdout else b""
+                        stderr_data = await proc.stderr.read() if proc.stderr else b""
                         err_text = stderr_data.decode(errors="replace")[-500:]
                         if err_text.strip():
                             state.last_error = err_text.strip().split("\n")[-1]
@@ -540,8 +548,14 @@ class ServiceManager:
                     if not future.done():
                         future.set_result(msg)
                 else:
-                    # 无匹配请求的响应（可能是广播消息）
-                    logger.debug(f"ServiceManager: unmatched response from '{service_id}': {msg.get('type')}")
+                    # 无匹配请求的响应（推送类消息，如 software_progress）
+                    msg_type = msg.get("type", "")
+                    logger.debug(f"ServiceManager: unmatched response from '{service_id}': {msg_type}")
+                    if msg_type and self._message_callback:
+                        try:
+                            await self._message_callback(msg)
+                        except Exception as e:
+                            logger.error(f"ServiceManager: message_callback error for '{msg_type}': {e}")
         except asyncio.CancelledError:
             pass
         except Exception as e:

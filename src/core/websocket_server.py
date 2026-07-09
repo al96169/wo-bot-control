@@ -291,6 +291,9 @@ class WebSocketServer:
                 )
             )
 
+            # 连接成功后异步检查软件更新并推送
+            asyncio.create_task(self._push_software_updates(websocket))
+
             async for raw in websocket:
                 if isinstance(raw, bytes):
                     # 二进制消息：语音喊话音频数据
@@ -319,6 +322,22 @@ class WebSocketServer:
                 await self.webrtc_service._cleanup_connection(client_id)
             if self.logger:
                 self.logger.info(f"Signaling client disconnected: {remote}")
+
+    async def _push_software_updates(self, websocket: ServerConnection) -> None:
+        """连接成功后检查软件更新并推送结果"""
+        try:
+            await asyncio.sleep(1)  # 等 connected 消息发完
+            if not self.message_handler or not self.message_handler.service_manager:
+                return
+            result = await self.message_handler._handle_software_check_updates({})
+            updates = result.get("data", {}).get("updates", [])
+            if updates:
+                await websocket.send(json.dumps(result))
+                if self.logger:
+                    self.logger.info(f"Pushed {len(updates)} software updates to client")
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"Failed to push software updates: {e}")
 
     async def _process_message(self, websocket: ServerConnection, client_id: str, remote: tuple, msg: dict):
         """处理信令消息"""
