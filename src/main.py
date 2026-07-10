@@ -432,7 +432,7 @@ async def main():
     except KeyboardInterrupt:
         await control.stop()
     except Exception as e:
-        control.logger.error(f"Fatal error: {e}")
+        control.logger.error(f"Fatal error: {e}", exc_info=True)
         await control.stop()
         sys.exit(1)
 

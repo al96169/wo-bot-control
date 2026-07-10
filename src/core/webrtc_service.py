@@ -117,7 +117,7 @@ class CameraVideoTrack(VideoStreamTrack):
                 )
             elif self._frame_count % 30 == 0 and self.logger:
                 dropped_info = f", dropped={self._dropped_count}" if self._dropped_count else ""
-                self.logger.info(
+                self.logger.debug(
                     f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
                     f"frame #{self._frame_count} shape={frame.shape}, ok{dropped_info}"
                 )
@@ -169,7 +169,7 @@ class WebRTCService:
                 await send_callback(payload)
                 self.logger.info(f"[{client_id}] Sent host ICE candidate (post-answer): {cand_str[:80]}")
             except Exception as e:
-                self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}")
+                self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}", exc_info=True)
 
         self.logger.info(f"[{client_id}] ICE candidates flushed ({len(pending)} candidates)")
         return len(pending)
@@ -383,7 +383,7 @@ class WebRTCService:
                         )
                         self.logger.info(f"[{client_id}] Sent ICE candidate: {cand_str[:80]}")
                 except Exception as e:
-                    self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}")
+                    self.logger.error(f"[{client_id}] Failed to send ICE candidate: {e}", exc_info=True)
 
         @pc.on("datachannel")
         def on_datachannel(channel: RTCDataChannel):
@@ -505,7 +505,7 @@ class WebRTCService:
             else:
                 self.logger.warning(f"[{client_id}] Invalid candidate format: {candidate[:60]}")
         except Exception as e:
-            self.logger.error(f"[{client_id}] Failed to add ICE candidate: {e}")
+            self.logger.error(f"[{client_id}] Failed to add ICE candidate: {e}", exc_info=True)
 
     # ---------- DataChannel 消息 ----------
 
@@ -545,7 +545,7 @@ class WebRTCService:
                             await self.send_message(client_id, result)
                     return
                 except Exception as e:
-                    self.logger.error(f"[{client_id}] Failed to parse DC binary: {e}")
+                    self.logger.error(f"[{client_id}] Failed to parse DC binary: {e}", exc_info=True)
                     return
         else:
             return

@@ -79,7 +79,7 @@ class DanceController(ExtensionModule):
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Failed to load dances: {e}")
+                self.logger.error(f"Failed to load dances: {e}", exc_info=True)
             return False
 
     def reload(self) -> bool:
@@ -287,7 +287,7 @@ class DanceController(ExtensionModule):
             pass
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Dance playback error: {e}")
+                self.logger.error(f"Dance playback error: {e}", exc_info=True)
         finally:
             await self._send_stop_cmd()
 

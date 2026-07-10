@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("wobot.motion.gimbal")
 
 
 class GimbalInterface(ABC):
@@ -130,7 +130,7 @@ class PCA9685Gimbal(GimbalInterface):
                 )
                 raise
             except Exception as e:
-                logger.error(f"PCA9685 init failed: {e}")
+                logger.error(f"PCA9685 init failed: {e}", exc_info=True)
                 raise
 
     async def set_angle(self, channel: int, angle: float) -> None:
@@ -147,7 +147,7 @@ class PCA9685Gimbal(GimbalInterface):
             elif channel == self.tilt_channel:
                 self._tilt_servo.angle = angle
         except Exception as e:
-            logger.error(f"PCA9685 set_angle(ch={channel}, {angle}°) failed: {e}")
+            logger.error(f"PCA9685 set_angle(ch={channel}, {angle}°) failed: {e}", exc_info=True)
 
     async def release(self) -> None:
         if self._pca:
@@ -225,7 +225,7 @@ class GPIOPWMGimbal(GimbalInterface):
             elif channel == 1:
                 self._tilt_pwm.ChangeDutyCycle(duty)
         except Exception as e:
-            logger.error(f"GPIO PWM set_angle(ch={channel}, {angle}°) failed: {e}")
+            logger.error(f"GPIO PWM set_angle(ch={channel}, {angle}°) failed: {e}", exc_info=True)
 
     async def release(self) -> None:
         if self._pan_pwm:
@@ -289,7 +289,6 @@ class RosmasterGimbal(GimbalInterface):
 
     async def set_angle(self, channel: int, angle: float) -> None:
         if not self._ensure_init():
-            logger.debug(f"Gimbal hardware not available (serial: {self.com}), set_angle ignored")
             return
 
         angle = int(max(0, min(180, angle)))
@@ -299,12 +298,11 @@ class RosmasterGimbal(GimbalInterface):
         try:
             await asyncio.get_event_loop().run_in_executor(None, self._bot.set_pwm_servo, servo_id, int(angle))
         except Exception as e:
-            logger.error(f"Rosmaster set_angle(ch={channel}, servo={servo_id}, {angle}°) failed: {e}")
+            logger.error(f"Rosmaster set_angle(ch={channel}, servo={servo_id}, {angle}°) failed: {e}", exc_info=True)
 
     async def set_angles(self, pan_angle: float, tilt_angle: float) -> None:
         """同时设置 pan 和 tilt — 单次 run_in_executor 避免双倍开销"""
         if not self._ensure_init():
-            logger.debug(f"Gimbal hardware not available (serial: {self.com}), set_angles ignored")
             return
 
         pan = int(max(0, min(180, pan_angle)))
@@ -319,14 +317,13 @@ class RosmasterGimbal(GimbalInterface):
         try:
             await asyncio.get_event_loop().run_in_executor(None, _write_both)
         except Exception as e:
-            logger.error(f"Rosmaster set_angles(pan={pan}°, tilt={tilt}°) failed: {e}")
+            logger.error(f"Rosmaster set_angles(pan={pan}°, tilt={tilt}°) failed: {e}", exc_info=True)
 
     def set_angles_sync(self, pan_angle: float, tilt_angle: float) -> None:
         """同步版双轴写入 — 用于 executor 线程内直接调用，避免逐 tick executor 调度抖动
         round() 替代 int() 消除 0.75°/tick 时的节拍效应（每4tick卡一次），
         set_pwm_servo_all 单包发送替代两次 set_pwm_servo 节省 2ms sleep"""
         if not self._ensure_init():
-            logger.debug(f"Gimbal hardware not available (serial: {self.com}), set_angles_sync ignored")
             return
         self._current_angles[0] = int(max(0, min(180, pan_angle)))
         self._current_angles[1] = int(max(0, min(180, tilt_angle)))

@@ -459,7 +459,7 @@ class WebSocketServer:
                 await websocket.send(json.dumps(result))
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Message handling error: {e}")
+                self.logger.error(f"Message handling error: {e}", exc_info=True)
             await websocket.send(
                 json.dumps(
                     {
@@ -520,7 +520,7 @@ class WebSocketServer:
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Binary message handling error: {e}")
+                self.logger.error(f"Binary message handling error: {e}", exc_info=True)
             await websocket.send(json.dumps({"type": "error", "data": {"code": 500, "message": str(e)}}))
 
     async def _start_ws_status_broadcast(self, interval: float = 1.0):
@@ -552,7 +552,7 @@ class WebSocketServer:
                     return
                 except Exception as e:
                     if self.logger:
-                        self.logger.error(f"WS status broadcast error: {e}")
+                        self.logger.error(f"WS status broadcast error: {e}", exc_info=True)
 
         self._ws_broadcast_task = asyncio.create_task(_broadcast())
         if self.logger:

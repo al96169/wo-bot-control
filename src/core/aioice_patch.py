@@ -70,29 +70,31 @@ def apply() -> None:
     _aioice_connect_original = AioiceConnection.connect
 
     # ---- 包装 sendto / data_received 以便诊断 DTLS 数据流 ----
+    # 仅在 DEBUG 级别记录，避免高频 ICE 数据传输日志刷屏
     _aioice_sendto_original = AioiceConnection.sendto
     _aioice_data_received_original = AioiceConnection.data_received
     _dtls_diag_counters = {}  # id(self) -> {"tx": 0, "rx": 0, "addr": str}
 
     async def _aioice_sendto_diag(self, data, component):
         await _aioice_sendto_original(self, data, component)
-        key = id(self)
-        pair = self._nominated.get(component)
-        remote_str = str(pair.remote_addr) if pair else "N/A"
-        if key not in _dtls_diag_counters:
-            _dtls_diag_counters[key] = {"tx": 0, "rx": 0, "remote": remote_str}
-        else:
-            _dtls_diag_counters[key]["remote"] = remote_str  # 每次更新
-        c = _dtls_diag_counters[key]
-        c["tx"] += 1  # type: ignore[operator,index]
-        if c["tx"] <= 5 or c["tx"] % 20 == 0:  # type: ignore[operator]
-            _PATCH_LOG.info(
-                "ICE data TX #%d: %d bytes → %s (comp=%d)",
-                c["tx"],
-                len(data),
-                remote_str,
-                component,
-            )
+        if _PATCH_LOG.isEnabledFor(logging.DEBUG):
+            key = id(self)
+            pair = self._nominated.get(component)
+            remote_str = str(pair.remote_addr) if pair else "N/A"
+            if key not in _dtls_diag_counters:
+                _dtls_diag_counters[key] = {"tx": 0, "rx": 0, "remote": remote_str}
+            else:
+                _dtls_diag_counters[key]["remote"] = remote_str
+            c = _dtls_diag_counters[key]
+            c["tx"] += 1  # type: ignore[operator,index]
+            if c["tx"] <= 5 or c["tx"] % 100 == 0:  # type: ignore[operator]
+                _PATCH_LOG.debug(
+                    "ICE data TX #%d: %d bytes → %s (comp=%d)",
+                    c["tx"],
+                    len(data),
+                    remote_str,
+                    component,
+                )
 
     def _aioice_data_received_diag(self, data, component):
         # data 为 None 表示连接断开（由 connection_lost 触发）
@@ -100,20 +102,21 @@ def apply() -> None:
             _aioice_data_received_original(self, data, component)
             return
         _aioice_data_received_original(self, data, component)
-        key = id(self)
-        if key not in _dtls_diag_counters:
-            _dtls_diag_counters[key] = {"tx": 0, "rx": 0, "remote": "?"}
-        c = _dtls_diag_counters[key]
-        c["rx"] += 1  # type: ignore[operator,index]
-        if c["rx"] <= 5 or c["rx"] % 20 == 0:  # type: ignore[operator]
-            first_byte = data[0] if data else 0
-            _PATCH_LOG.info(
-                "ICE data RX #%d: %d bytes (0x%02x) comp=%d",
-                c["rx"],
-                len(data),
-                first_byte,
-                component,
-            )
+        if _PATCH_LOG.isEnabledFor(logging.DEBUG):
+            key = id(self)
+            if key not in _dtls_diag_counters:
+                _dtls_diag_counters[key] = {"tx": 0, "rx": 0, "remote": "?"}
+            c = _dtls_diag_counters[key]
+            c["rx"] += 1  # type: ignore[operator,index]
+            if c["rx"] <= 5 or c["rx"] % 100 == 0:  # type: ignore[operator]
+                first_byte = data[0] if data else 0
+                _PATCH_LOG.debug(
+                    "ICE data RX #%d: %d bytes (0x%02x) comp=%d",
+                    c["rx"],
+                    len(data),
+                    first_byte,
+                    component,
+                )
 
     AioiceConnection.sendto = _aioice_sendto_diag  # type: ignore[method-assign]
     AioiceConnection.data_received = _aioice_data_received_diag  # type: ignore[method-assign]

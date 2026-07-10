@@ -151,7 +151,7 @@ class FindDeviceController(ExtensionModule):
                 self.logger.info("Find device loop cancelled")
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Find device loop error: {e}")
+                self.logger.error(f"Find device loop error: {e}", exc_info=True)
         finally:
             self._active = False
             await self._restore_devices()

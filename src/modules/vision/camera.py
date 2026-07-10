@@ -546,7 +546,7 @@ class CameraStream:
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Failed to start camera stream: {e}")
+                self.logger.error(f"Failed to start camera stream: {e}", exc_info=True)
             self.running = False
 
     async def stop(self):
@@ -630,7 +630,7 @@ class CameraStream:
                 break
             except Exception as e:
                 if self.logger:
-                    self.logger.error(f"Capture error: {e}")
+                    self.logger.error(f"Capture error: {e}", exc_info=True)
                 self.running = False  # 确保异常时流被标记为停止，允许后续重启
                 break
 
@@ -669,7 +669,7 @@ class CameraStream:
                 break
             except Exception as e:
                 if self.logger:
-                    self.logger.error(f"CSI capture error: {e}")
+                    self.logger.error(f"CSI capture error: {e}", exc_info=True)
                 self.running = False  # 确保异常时流被标记为停止，允许后续重启
                 break
 

@@ -135,7 +135,7 @@ class VoiceBroadcastController(ExtensionModule):
                 self.logger.info("Record playback cancelled")
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Record playback error: {e}")
+                self.logger.error(f"Record playback error: {e}", exc_info=True)
         finally:
             self._playing = False
             if music_was_playing:
@@ -235,7 +235,7 @@ class VoiceBroadcastController(ExtensionModule):
                 self.logger.info("Phone playback loop cancelled")
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Phone playback error: {e}")
+                self.logger.error(f"Phone playback error: {e}", exc_info=True)
         finally:
             # 关闭 aplay stdin 让它自然结束（带超时强制 kill，防止进程残留）
             if aplay_proc:
@@ -312,7 +312,7 @@ class VoiceBroadcastController(ExtensionModule):
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"PCM decode error: {e}")
+                self.logger.error(f"PCM decode error: {e}", exc_info=True)
             return None
         finally:
             self._cleanup_temp(tmp_path)

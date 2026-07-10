@@ -244,7 +244,7 @@ class MessageHandler:
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Gimbal thread error: {e}")
+                self.logger.error(f"Gimbal thread error: {e}", exc_info=True)
 
     async def _handle_motion_config(self, data: dict) -> dict:
         """处理运动配置"""
@@ -273,6 +273,7 @@ class MessageHandler:
             and self.power_policy
             and self.power_policy.is_eco
         ):
+            self.logger.warning(f"跳舞命令被拒绝: 省电模式 (command={command})")
             return {"type": "error", "data": {"code": 403, "message": "电量不足，省电模式下跳舞不可用"}}
         # 检查 service_manager 中的运行状态（防止进程管理器停服后仍响应）
         if self.service_manager:
@@ -292,6 +293,9 @@ class MessageHandler:
 
         action = data.get("action")
         camera_id = data.get("camera_id", 0)
+
+        if action in ("start", "stop", "switch"):
+            self.logger.info(f"摄像头控制: {action} (camera_id={camera_id})")
 
         if action == "list":
             status = await self.camera_manager.get_status()
@@ -417,7 +421,7 @@ class MessageHandler:
         try:
             subprocess.run(["sudo", "reboot"], check=False)
         except Exception as e:
-            self.logger.error(f"Reboot failed: {e}")
+            self.logger.error(f"Reboot failed: {e}", exc_info=True)
 
     async def _delayed_shutdown(self):
         """延迟关机"""
@@ -425,7 +429,7 @@ class MessageHandler:
         try:
             subprocess.run(["sudo", "shutdown", "-h", "now"], check=False)
         except Exception as e:
-            self.logger.error(f"Shutdown failed: {e}")
+            self.logger.error(f"Shutdown failed: {e}", exc_info=True)
 
     async def _delayed_restart_service(self):
         """延迟重启主服务（通过 systemd）"""
@@ -433,12 +437,15 @@ class MessageHandler:
         try:
             subprocess.run(["sudo", "systemctl", "restart", "wobot-control"], check=False)
         except Exception as e:
-            self.logger.error(f"Restart service failed: {e}")
+            self.logger.error(f"Restart service failed: {e}", exc_info=True)
 
     async def _handle_exec(self, data: dict) -> dict:
         """执行命令（持久 Shell 会话，保持工作目录）"""
         command = data.get("command", "").strip()
         timeout = data.get("timeout", 5000) / 1000
+
+        if command:
+            self.logger.warning(f"远程命令执行: {command} (cwd={self._shell_cwd}, timeout={timeout:.1f}s)")
 
         if not command:
             return {"type": "exec_result", "data": {"stdout": "", "stderr": "", "return_code": 0}}
@@ -518,30 +525,105 @@ class MessageHandler:
             return {"type": "exec_result", "data": {"stdout": "", "stderr": str(e), "return_code": 1}}
 
     async def _handle_logs(self, data: dict) -> dict:
-        """获取日志"""
-        lines = data.get("lines", 100)
+        """获取日志（基于行号游标的增量读取）
+
+        请求参数:
+          mode: "tail" (默认) 取最新 N 条 | "since" 取 since_line 之后的行
+          since_line: since 模式下的起始行号（0-based，不含该行）
+          limit: 最多返回条数（默认 200）
+          level: 级别过滤（"" 表示不过滤）
+
+        响应:
+          logs: 日志条目数组（每条带 line_no 字段）
+          total_lines: 服务端日志文件当前总行数
+          has_more: since 模式下是否还有更多未读日志
+          next_since: 下次 since 请求的起始行号
+        """
+        mode = data.get("mode", "tail")
+        since_line = int(data.get("since_line", 0))
+        before_line = int(data.get("before_line", 0))
+        limit = int(data.get("limit", 200))
         level = data.get("level", "")
 
         log_file_path = self.config.get("logging", {}).get("file", "logs/wobot.log")
         log_file = Path(log_file_path)
         if not log_file.is_absolute():
-            log_file = Path(__file__).parent.parent / log_file_path
+            # 与 setup_logger 保持一致：相对路径基于 cwd 解析
+            log_file = Path.cwd() / log_file_path
         logs = []
+        total_lines = 0
+        has_more = False
+        next_since = 0
 
         if log_file.exists():
             with open(log_file, encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
-                recent = all_lines[-lines:]
-                pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] (\w+): (.+)$")
-                for raw in recent:
-                    raw = raw.strip()
-                    m = pattern.match(raw)
+            total_lines = len(all_lines)
+
+            if mode == "since" and since_line > 0:
+                # 增量模式：取 since_line 之后的行
+                start = since_line
+                end = min(start + limit, total_lines)
+                recent = all_lines[start:end]
+                has_more = end < total_lines
+                next_since = end
+            elif mode == "before" and before_line > 0:
+                # 向上加载历史：取 before_line 之前的 limit 条
+                start = max(0, before_line - limit)
+                end = before_line
+                recent = all_lines[start:end]
+                has_more = start > 0
+                next_since = total_lines  # 不改变增量游标
+            else:
+                # tail 模式：取最新 limit 条
+                start = max(0, total_lines - limit)
+                recent = all_lines[start:total_lines]
+                has_more = False
+                next_since = total_lines
+
+            # 新格式: ts [LEVEL] [logger_name] module: message
+            pattern_new = re.compile(
+                r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] \[([\w.]+)\] (\w+): (.+)$"
+            )
+            # 旧格式兼容: ts [LEVEL] logger_name: message
+            pattern_old = re.compile(
+                r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] (\w+): (.+)$"
+            )
+            for i, raw in enumerate(recent):
+                line_no = start + i
+                raw = raw.strip()
+                m = pattern_new.match(raw)
+                if m:
+                    ts, lvl, logger_name, _module, msg = m.groups()
+                    source = logger_name
+                else:
+                    m = pattern_old.match(raw)
                     if m:
                         ts, lvl, source, msg = m.groups()
-                        if level and level.lower() != lvl.lower():
-                            continue
-                        logs.append({"timestamp": ts, "level": lvl, "source": source, "message": msg})
-        return {"type": "logs", "data": {"logs": logs}}
+                    else:
+                        continue
+                if level and level.lower() != lvl.lower():
+                    continue
+                logs.append(
+                    {
+                        "line_no": line_no,
+                        "timestamp": ts,
+                        "level": lvl,
+                        "source": source,
+                        "message": msg,
+                    }
+                )
+
+        return {
+            "type": "logs",
+            "data": {
+                "logs": logs,
+                "total_lines": total_lines,
+                "has_more": has_more,
+                "next_since": next_since,
+                "mode": mode,
+            },
+        }
 
     async def _handle_software_list(self, data: dict) -> dict:
         """获取软件列表（转发至 software_manager 子服务）"""
@@ -663,7 +745,10 @@ class MessageHandler:
         if not hasattr(self, "power_policy") or not self.power_policy:
             return {"type": "error", "data": {"code": 503, "message": "Power policy not available"}}
 
+        old_mode = self.power_policy.get_status().get("mode", "normal")
         await self.power_policy.toggle()
+        new_mode = self.power_policy.get_status().get("mode", "normal")
+        self.logger.info(f"省电模式手动切换: {old_mode} → {new_mode}")
         return {
             "type": "power_policy_status",
             "data": self.power_policy.get_status(),
@@ -687,6 +772,7 @@ class MessageHandler:
         if not isinstance(audio_data, bytes):
             return {"type": "error", "data": {"code": 400, "message": "Missing audio data"}}
 
+        self.logger.info(f"喊话: {len(audio_data)}B (mode={mode}, format={audio_format}, rate={sample_rate})")
         return await self.voice_broadcast_controller.play_audio(audio_data, mode, audio_format, sample_rate)
 
     async def _handle_power_policy_status(self, data: dict) -> dict:
@@ -944,7 +1030,7 @@ class MessageHandler:
                 },
             }
         except Exception as e:
-            self.logger.error(f"WiFi scan failed: {e}")
+            self.logger.error(f"WiFi scan failed: {e}", exc_info=True)
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
 
     async def _handle_wifi_connect(self, data: dict) -> dict:

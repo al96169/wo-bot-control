@@ -102,7 +102,7 @@ class SystemCollector:
             return {"battery": battery, "system": system, "network": network}
         except Exception as e:
             if self.logger:
-                self.logger.error(f"System collection error: {e}")
+                self.logger.error(f"System collection error: {e}", exc_info=True)
             return {}
 
     async def _collect_battery(self) -> dict:
@@ -222,7 +222,7 @@ class SystemCollector:
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"System collection error: {e}")
+                self.logger.error(f"System collection error: {e}", exc_info=True)
             return {}
 
     async def _get_cpu_temperature(self) -> float | None:
@@ -283,7 +283,7 @@ class SystemCollector:
 
         except Exception as e:
             if self.logger:
-                self.logger.error(f"Network collection error: {e}")
+                self.logger.error(f"Network collection error: {e}", exc_info=True)
             return {}
 
     async def _get_wifi_info(self, interface: str) -> dict:

@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("wobot.power_policy")
 
 
 class PowerPolicy:
@@ -133,12 +133,6 @@ class PowerPolicy:
         # 模拟电量优先（调试用）
         if self._simulated_battery_level is not None:
             battery_level = self._simulated_battery_level
-
-        logger.debug(
-            f"PowerPolicy evaluate: battery={battery_level}%, mode={self._mode}, "
-            f"threshold={self._threshold}, auto_exit={self.AUTO_EXIT_THRESHOLD}, "
-            f"simulated={self._simulated_battery_level}, manual_override={self._manual_override}"
-        )
 
         if self._mode == self.MODE_NORMAL and battery_level <= self._threshold:
             logger.info(f"PowerPolicy: auto-enter ECO (battery {battery_level}% <= {self._threshold}%)")

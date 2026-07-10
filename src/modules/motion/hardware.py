@@ -9,7 +9,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("wobot.motion.hardware")
 
 
 class HardwareInterface(ABC):
@@ -84,7 +84,7 @@ class SerialHardware(HardwareInterface):
                 logger.error("pyserial-asyncio not installed. Run: pip install pyserial-asyncio")
                 raise
             except Exception as e:
-                logger.error(f"Serial open failed ({self.port}): {e}")
+                logger.error(f"Serial open failed ({self.port}): {e}", exc_info=True)
                 raise
 
     async def _write(self, data: bytes):
@@ -255,7 +255,7 @@ class RosmasterMotion(HardwareInterface):
             try:
                 await asyncio.get_event_loop().run_in_executor(None, self._bot.set_car_motion, v_x, v_y, v_z)
             except Exception as e:
-                logger.error(f"Rosmaster set_car_motion failed: {e}")
+                logger.error(f"Rosmaster set_car_motion failed: {e}", exc_info=True)
 
     async def set_motor(self, name: str, speed: float) -> None:
         """回退到 Rosmaster.set_motor(s1, s2, s3, s4)"""

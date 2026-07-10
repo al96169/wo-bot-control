@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-logger = logging.getLogger("service_manager")
+logger = logging.getLogger("wobot.service_manager")
 
 # ---- 子服务定义 ----
 
@@ -191,7 +191,7 @@ class ServiceManager:
         except Exception as e:
             state.status = "failed"
             state.last_error = str(e)
-            logger.error(f"ServiceManager: failed to start '{service_id}': {e}")
+            logger.error(f"ServiceManager: failed to start '{service_id}': {e}", exc_info=True)
             await self._notify_status(service_id)
             return False
 
@@ -226,7 +226,7 @@ class ServiceManager:
                 try:
                     await svc.stop()
                 except Exception as e:
-                    logger.error(f"ServiceManager: error stopping in-process '{service_id}': {e}")
+                    logger.error(f"ServiceManager: error stopping in-process '{service_id}': {e}", exc_info=True)
 
         # 停止子进程
         if service_id in self._processes:
@@ -256,7 +256,7 @@ class ServiceManager:
             except ProcessLookupError:
                 pass
             except Exception as e:
-                logger.error(f"ServiceManager: error killing subprocess '{service_id}': {e}")
+                logger.error(f"ServiceManager: error killing subprocess '{service_id}': {e}", exc_info=True)
 
             # music_player 会启动 gmediarender/shairport-sync 子进程，
             # 这些子进程在父进程死亡后会变成孤儿继续运行，
@@ -430,7 +430,7 @@ class ServiceManager:
             self._tasks[service_id] = asyncio.create_task(self._monitor_subprocess(service_id, defn))
             return True
         except Exception as e:
-            logger.error(f"ServiceManager: failed to create subprocess for '{service_id}': {e}")
+            logger.error(f"ServiceManager: failed to create subprocess for '{service_id}': {e}", exc_info=True)
             state.last_error = str(e)
             return False
 
@@ -485,7 +485,7 @@ class ServiceManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"ServiceManager: monitor error for '{service_id}': {e}")
+                logger.error(f"ServiceManager: monitor error for '{service_id}': {e}", exc_info=True)
                 break
 
     async def _send_failure_notification(self, service_id: str) -> None:
@@ -509,7 +509,7 @@ class ServiceManager:
             try:
                 await self._message_callback(message)
             except Exception as e:
-                logger.error(f"ServiceManager: failed to send failure notification: {e}")
+                logger.error(f"ServiceManager: failed to send failure notification: {e}", exc_info=True)
 
     async def _notify_status(self, service_id: str) -> None:
         """通知前端服务状态变更（状态通过 WebSocket 周期性广播同步）"""
@@ -555,11 +555,11 @@ class ServiceManager:
                         try:
                             await self._message_callback(msg)
                         except Exception as e:
-                            logger.error(f"ServiceManager: message_callback error for '{msg_type}': {e}")
+                            logger.error(f"ServiceManager: message_callback error for '{msg_type}': {e}", exc_info=True)
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logger.error(f"ServiceManager: stdout reader error for '{service_id}': {e}")
+            logger.error(f"ServiceManager: stdout reader error for '{service_id}': {e}", exc_info=True)
 
     async def send_subprocess_command(
         self, service_id: str, cmd: str, params: dict | None = None, timeout: float = 30.0
