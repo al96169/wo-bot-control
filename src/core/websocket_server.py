@@ -56,7 +56,12 @@ class WebSocketServer:
         self._clients: set[ServerConnection] = set()
         self._ws_clients: dict[str, ServerConnection] = {}  # client_id -> WebSocket 连接
         self._client_real_ips: dict[str, str] = {}  # client_id -> 真实客户端 IP（来自代理传递的 client_ip 参数）
+        self._client_bound: dict[str, bool] = {}  # client_id -> 是否已绑定
+        self._client_user_ids: dict[str, str] = {}  # client_id -> 客户端持久 ID (user_client_id)
         self._ws_broadcast_task: asyncio.Task[Any] | None = None
+        # 绑定管理器和外设检测器（由 main.py 注入）
+        self.binding_manager = None
+        self.peripheral_detector = None
 
     async def start(self):
         """启动 WebSocket 信令服务器"""
@@ -101,6 +106,16 @@ class WebSocketServer:
         for cid in dead:
             self._ws_clients.pop(cid, None)
             self._clients.discard(self._ws_clients.get(cid))
+
+    async def send_to_client(self, ws_client_id: str, message: dict) -> None:
+        """向指定 WebSocket 客户端发送消息"""
+        ws = self._ws_clients.get(ws_client_id)
+        if ws:
+            try:
+                await ws.send(json.dumps(message))
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"Failed to send to client {ws_client_id}: {e}")
 
     async def _handle_client(self, websocket: ServerConnection, path=None):
         """处理客户端连接"""
@@ -251,6 +266,48 @@ class WebSocketServer:
             await websocket.close(4001, "Connection refused")
             return
 
+        # ---- 客户端绑定检查 ----
+        binding_config = self.config.get("binding", {})
+        binding_enabled = binding_config.get("enabled", False)
+        is_bound = False
+        user_client_id = ""
+
+        if binding_enabled and self.binding_manager:
+            # 从 URL query 提取 clientId 和 clientToken
+            try:
+                from urllib.parse import parse_qs
+
+                query_string = ""
+                if hasattr(websocket, "request") and hasattr(websocket.request, "query"):
+                    query_string = websocket.request.query or ""
+                elif hasattr(websocket, "path"):
+                    raw_path = websocket.path or ""
+                    if "?" in raw_path:
+                        query_string = raw_path.split("?", 1)[1]
+
+                if query_string:
+                    qs = parse_qs(query_string)
+                    user_client_id = qs.get("clientId", [""])[0]
+                    client_token = qs.get("clientToken", [""])[0]
+            except Exception:
+                pass
+
+            if user_client_id and client_token:
+                is_bound = self.binding_manager.is_bound(user_client_id, client_token)
+                if is_bound:
+                    self.binding_manager.update_last_seen(user_client_id)
+                    if self.logger:
+                        self.logger.info(f"[{client_id}] Client bound: {user_client_id}")
+                else:
+                    if self.logger:
+                        self.logger.info(f"[{client_id}] Client not bound or invalid token: {user_client_id}")
+            else:
+                if self.logger:
+                    self.logger.info(f"[{client_id}] No clientId/clientToken, binding required")
+
+        self._client_bound[client_id] = is_bound if binding_enabled else True
+        self._client_user_ids[client_id] = user_client_id
+
         self._clients.add(websocket)
         self._ws_clients[client_id] = websocket
         if self.logger:
@@ -258,6 +315,7 @@ class WebSocketServer:
                 f"Signaling client connected: {remote} ({client_id})"
                 f"{', authenticated' if auth_enabled else ''}"
                 f", protocol={client_protocol}"
+                f"{', bound' if self._client_bound.get(client_id) else ', unbound'}"
             )
 
         # 构建 features 列表
@@ -291,6 +349,25 @@ class WebSocketServer:
                 )
             )
 
+            # 绑定未通过：发送 auth_required，告知客户端可用的认证方式
+            if binding_enabled and not self._client_bound.get(client_id):
+                methods = []
+                if self.peripheral_detector:
+                    methods = self.peripheral_detector.get_available_methods()
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "auth_required",
+                            "data": {
+                                "methods": methods,
+                                "message": "请先完成客户端绑定认证",
+                            },
+                        }
+                    )
+                )
+                if self.logger:
+                    self.logger.info(f"[{client_id}] Sent auth_required, methods={methods}")
+
             # 连接成功后异步检查软件更新并推送
             asyncio.create_task(self._push_software_updates(websocket))
 
@@ -318,6 +395,11 @@ class WebSocketServer:
             self._clients.discard(websocket)
             self._ws_clients.pop(client_id, None)
             self._client_real_ips.pop(client_id, None)
+            self._client_bound.pop(client_id, None)
+            self._client_user_ids.pop(client_id, None)
+            # 清理该连接的绑定会话
+            if self.binding_manager:
+                self.binding_manager.cleanup_client_sessions(client_id)
             if self.webrtc_service:
                 await self.webrtc_service._cleanup_connection(client_id)
             if self.logger:
@@ -343,6 +425,27 @@ class WebSocketServer:
         """处理信令消息"""
         msg_type = msg.get("type", "")
         msg_data = msg.get("data", {})
+
+        # ---- 绑定认证门控 ----
+        # 未绑定客户端只能访问白名单消息（bind_* / ping / subscribe 等）
+        if self.config.get("binding", {}).get("enabled", False) and not self._client_bound.get(client_id, True):
+            from core.binding_manager import BindingManager
+
+            if msg_type not in BindingManager.AUTH_ALLOWED_TYPES:
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "error",
+                            "data": {"code": 401, "message": "Binding required: 请先完成客户端绑定"},
+                        }
+                    )
+                )
+                if self.logger:
+                    self.logger.info(f"[{client_id}] Rejected '{msg_type}' — client not bound")
+                return
+
+        # 注入 WebSocket 连接 ID，供 bind_* 处理器识别来源连接
+        msg_data["_ws_client_id"] = client_id
 
         # ---- WebRTC 信令 ----
         if msg_type == "webrtc_offer":

@@ -594,6 +594,159 @@ ws://{robot_ip}:8765/ws
 
 ---
 
+### 3.10 客户端绑定认证 (R00035)
+
+> 绑定启用后，未绑定客户端只能发送 `bind_*` / `ping` / `subscribe` 等白名单消息，其余消息返回 401 错误。
+
+#### auth_required - 服务端要求绑定认证
+
+服务端在 `connected` 消息后，若客户端未绑定，发送此消息告知可用认证方式。
+
+```json
+{
+  "type": "auth_required",
+  "data": {
+    "methods": ["display", "qr_scan", "tts", "gimbal"],
+    "message": "请先完成客户端绑定认证"
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| methods | string[] | 可用认证方式：display/qr_scan/tts/gimbal |
+| message | string | 提示消息 |
+
+#### bind_request - 客户端发起绑定请求
+
+```json
+{
+  "type": "bind_request",
+  "data": {
+    "requestToken": "rt-abc123...",
+    "clientId": "c-xxx-yyy",
+    "clientName": "Chrome 2026-01-01",
+    "method": "tts"
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| requestToken | string | 客户端生成的会话令牌 |
+| clientId | string | 客户端持久 ID（localStorage） |
+| clientName | string | 客户端名称 |
+| method | string | 认证方式：display/qr_scan/tts/gimbal |
+
+#### bind_request_ack - 绑定请求确认
+
+```json
+{
+  "type": "bind_request_ack",
+  "data": {
+    "requestToken": "rt-abc123...",
+    "method": "tts",
+    "options": [["左","右","左","右","左"], ...]
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| requestToken | string | 会话令牌 |
+| method | string | 认证方式 |
+| options | string[][] | 仅 gimbal 方式：4 个方向选项 |
+
+#### bind_verify - 客户端提交验证码
+
+```json
+{
+  "type": "bind_verify",
+  "data": {
+    "requestToken": "rt-abc123...",
+    "randomCode": "1234"
+  }
+}
+```
+
+#### bind_success - 绑定成功
+
+```json
+{
+  "type": "bind_success",
+  "data": {
+    "clientToken": "1700000000.abc123...",
+    "clientId": "c-xxx-yyy"
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| clientToken | string | HMAC-SHA256 签名的持久凭据，后续连接需携带 |
+| clientId | string | 客户端持久 ID |
+
+#### bind_failed - 绑定失败
+
+```json
+{
+  "type": "bind_failed",
+  "data": {
+    "error": "验证码错误",
+    "attempts": 2
+  }
+}
+```
+
+#### bind_list - 获取已绑定客户端列表
+
+```json
+{
+  "type": "bind_list",
+  "data": {}
+}
+```
+
+#### bind_list_ack - 绑定列表响应
+
+```json
+{
+  "type": "bind_list_ack",
+  "data": {
+    "bindings": [
+      {
+        "clientId": "c-xxx-yyy",
+        "clientName": "Chrome 2026-01-01",
+        "boundAt": "2026-01-01T00:00:00+00:00",
+        "lastSeen": "2026-01-01T12:00:00+00:00"
+      }
+    ]
+  }
+}
+```
+
+#### bind_remove - 移除指定客户端绑定
+
+```json
+{
+  "type": "bind_remove",
+  "data": {
+    "clientId": "c-xxx-yyy"
+  }
+}
+```
+
+#### bind_remove_all - 移除所有绑定
+
+```json
+{
+  "type": "bind_remove_all",
+  "data": {}
+}
+```
+
+---
+
 ## 4. 状态码
 
 | 代码 | 说明 |

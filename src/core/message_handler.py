@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import pty
@@ -43,6 +44,8 @@ class MessageHandler:
         self._gimbal_speed = {"pan": 0.0, "tilt": 0.0}
         self._gimbal_running = threading.Event()
         self._gimbal_task: asyncio.Task | None = None
+        # 绑定认证异步任务跟踪（ws_client_id -> [task, ...]）
+        self._bind_tasks: dict[str, list[asyncio.Task]] = {}
 
     async def handle(self, msg_type: str, msg_data: dict) -> dict | None:
         """处理消息"""
@@ -1176,3 +1179,425 @@ class MessageHandler:
             return {"type": "wifi_disconnect_result", "data": {"status": "disconnected"}}
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
+
+    # ------------------------------------------------------------------
+    # 客户端绑定认证 (R00035)
+    # ------------------------------------------------------------------
+
+    async def _handle_bind_request(self, data: dict) -> dict:
+        """处理绑定请求：创建会话并启动验证方式"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+
+        ws_client_id = data.get("_ws_client_id", "")
+        request_token = data.get("requestToken", "")
+        user_client_id = data.get("clientId", "")
+        client_name = data.get("clientName", "未命名设备")
+        method = data.get("method", "")
+
+        if not request_token or not user_client_id or not method:
+            return {"type": "error", "data": {"code": 400, "message": "Missing requestToken/clientId/method"}}
+
+        # 检查冷却期
+        if self.binding_manager._check_cooldown(ws_client_id):
+            return {"type": "error", "data": {"code": 429, "message": "验证失败次数过多，请稍后再试"}}
+
+        # 检查绑定上限
+        if not self.binding_manager.can_add_binding():
+            return {"type": "error", "data": {"code": 403, "message": "已达到最大绑定客户端数"}}
+
+        # 清理该客户端的旧会话
+        self.binding_manager.cleanup_client_sessions(ws_client_id)
+
+        # 创建会话（后端生成 requestToken）
+        session = self.binding_manager.create_session(ws_client_id, user_client_id, client_name)
+        # 启动验证方式（使用后端生成的 requestToken）
+        session = self.binding_manager.start_method(session.request_token, method)
+        if session is None:
+            return {"type": "error", "data": {"code": 400, "message": "无效或已过期的 requestToken"}}
+
+        # 后端生成的 requestToken，覆盖前端传来的值
+        request_token = session.request_token
+
+        # 根据方式执行对应操作
+        ack_data: dict = {"requestToken": request_token, "method": method}
+
+        if method == "display":
+            # 屏幕显示：暂时只记录日志（渲染待实现）
+            if self.logger:
+                self.logger.info(f"[Bind] Display code: {session.random_code} (display rendering not implemented)")
+
+        elif method == "tts":
+            # TTS 播报配对数字
+            if hasattr(self, "tts_engine") and self.tts_engine:
+                self._track_bind_task(ws_client_id, asyncio.create_task(self.tts_engine.speak_pairing_code(session.random_code)))
+
+        elif method == "qr_scan":
+            # QR 扫描改为手动触发（前端点击"开始扫描"按钮后发送 bind_start_scan）
+            if not (hasattr(self, "qr_scanner") and self.qr_scanner and self.qr_scanner.is_available()):
+                return {"type": "error", "data": {"code": 503, "message": "QR 扫描不可用（需要摄像头和 OpenCV）"}}
+
+        elif method == "gimbal":
+            # 启动云台转动
+            if hasattr(self, "gimbal_controller") and self.gimbal_controller:
+                self._track_bind_task(ws_client_id, asyncio.create_task(self._perform_gimbal_sequence(session.gimbal_sequence or [])))
+            else:
+                return {"type": "error", "data": {"code": 503, "message": "云台不可用"}}
+
+        return {"type": "bind_request_ack", "data": ack_data}
+
+    async def _handle_bind_verify(self, data: dict) -> dict:
+        """处理绑定验证：校验随机码并创建绑定"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+
+        ws_client_id = data.get("_ws_client_id", "")
+        request_token = data.get("requestToken", "")
+        random_code = str(data.get("randomCode", "")).strip()
+
+        if not request_token or not random_code:
+            return {"type": "error", "data": {"code": 400, "message": "Missing requestToken/randomCode"}}
+
+        result = self.binding_manager.verify(request_token, random_code, ws_client_id)
+        if result["success"]:
+            # 绑定成功，TTS 播报
+            if hasattr(self, "tts_engine") and self.tts_engine:
+                asyncio.create_task(self.tts_engine.speak_bind_success())
+            # 更新当前连接的绑定状态，无需重连
+            if hasattr(self, "ws_server") and self.ws_server:
+                self.ws_server._client_bound[ws_client_id] = True
+                self.ws_server._client_user_ids[ws_client_id] = result["binding"]["clientId"]
+                if self.logger:
+                    self.logger.info(f"[{ws_client_id}] Binding verified, client marked as bound")
+            # 广播通知所有已绑定客户端：绑定列表已更新
+            await self._broadcast_bind_list()
+            return {
+                "type": "bind_success",
+                "data": {
+                    "clientToken": result["client_token"],
+                    "clientId": result["binding"]["clientId"],
+                },
+            }
+        else:
+            return {
+                "type": "bind_failed",
+                "data": {"error": result["error"], "attempts": self.binding_manager._failure_counts.get(ws_client_id, 0)},
+            }
+
+    async def _handle_bind_replay(self, data: dict) -> dict:
+        """重播当前验证方式（TTS/云台/屏幕）"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+
+        ws_client_id = data.get("_ws_client_id", "")
+        request_token = data.get("requestToken", "")
+        session = self.binding_manager.get_session(request_token)
+        if session is None:
+            return {"type": "error", "data": {"code": 400, "message": "会话不存在或已过期"}}
+
+        method = session.method
+        if self.logger:
+            self.logger.info(f"[Bind] Replay requested: method={method}, token={request_token[:16]}...")
+
+        if method == "tts":
+            if hasattr(self, "tts_engine") and self.tts_engine:
+                self._track_bind_task(ws_client_id, asyncio.create_task(self.tts_engine.speak_pairing_code(session.random_code)))
+            else:
+                return {"type": "error", "data": {"code": 503, "message": "TTS 不可用"}}
+        elif method == "gimbal":
+            if hasattr(self, "gimbal_controller") and self.gimbal_controller:
+                self._track_bind_task(ws_client_id, asyncio.create_task(self._perform_gimbal_sequence(session.gimbal_sequence or [])))
+            else:
+                return {"type": "error", "data": {"code": 503, "message": "云台不可用"}}
+        elif method == "display":
+            # display 方式重新显示数字（渲染待实现）
+            if self.logger:
+                self.logger.info(f"[Bind] Replay display code: {session.random_code}")
+        else:
+            return {"type": "error", "data": {"code": 400, "message": f"不支持重播: {method}"}}
+
+        return {"type": "bind_replay_ack", "data": {"method": method}}
+
+    async def _handle_bind_start_scan(self, data: dict) -> dict:
+        """手动触发 QR 扫描"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+
+        ws_client_id = data.get("_ws_client_id", "")
+        request_token = data.get("requestToken", "")
+        session = self.binding_manager.get_session(request_token)
+        if session is None:
+            return {"type": "error", "data": {"code": 400, "message": "会话不存在或已过期"}}
+
+        if session.method != "qr_scan":
+            return {"type": "error", "data": {"code": 400, "message": "当前方式不支持扫码"}}
+
+        if hasattr(self, "qr_scanner") and self.qr_scanner and self.qr_scanner.is_available():
+            self._track_bind_task(ws_client_id, asyncio.create_task(self._qr_scan_loop(request_token, ws_client_id)))
+            if self.logger:
+                self.logger.info(f"[Bind] QR scan started manually: token={request_token[:16]}...")
+            return {"type": "bind_scan_started", "data": {"requestToken": request_token}}
+        else:
+            return {"type": "error", "data": {"code": 503, "message": "QR 扫描不可用"}}
+
+    async def _handle_bind_list(self, data: dict) -> dict:
+        """获取已绑定客户端列表"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+        bindings = self.binding_manager.get_bindings()
+        # 不返回 clientToken（安全）
+        safe_bindings = [
+            {
+                "clientId": b.get("clientId"),
+                "clientName": b.get("clientName"),
+                "boundAt": b.get("boundAt"),
+                "lastSeen": b.get("lastSeen"),
+            }
+            for b in bindings
+        ]
+        return {"type": "bind_list_ack", "data": {"bindings": safe_bindings}}
+
+    async def _handle_bind_remove(self, data: dict) -> dict:
+        """移除指定客户端的绑定"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+        target_client_id = data.get("clientId", "")
+        if not target_client_id:
+            return {"type": "error", "data": {"code": 400, "message": "Missing clientId"}}
+        removed = self.binding_manager.remove_binding(target_client_id)
+        if removed:
+            # 踢下线被移除的客户端
+            await self._kick_client_by_user_id(target_client_id, "绑定已被移除")
+            # 广播通知所有客户端
+            await self._broadcast_bind_list()
+            return {"type": "bind_remove_ack", "data": {"clientId": target_client_id, "status": "removed"}}
+        else:
+            return {"type": "error", "data": {"code": 404, "message": "Binding not found"}}
+
+    async def _handle_bind_remove_all(self, data: dict) -> dict:
+        """移除所有绑定（排除当前请求者自身的绑定）"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+        ws_client_id = data.get("_ws_client_id", "")
+        # 获取当前请求者的 user_client_id，不移除其绑定
+        current_user_id = ""
+        if hasattr(self, "ws_server") and self.ws_server:
+            current_user_id = self.ws_server._client_user_ids.get(ws_client_id, "")
+        # 获取所有要移除的 client_id（排除当前请求者）
+        all_bindings = self.binding_manager.get_bindings()
+        removed_client_ids = [
+            b.get("clientId", "") for b in all_bindings
+            if b.get("clientId", "") != current_user_id
+        ]
+        # 逐个移除（保留当前请求者的绑定）
+        count = 0
+        for cid in removed_client_ids:
+            if self.binding_manager.remove_binding(cid):
+                count += 1
+        # 踢下线所有被移除的客户端
+        for cid in removed_client_ids:
+            await self._kick_client_by_user_id(cid, "绑定已被移除", exclude_ws_id=ws_client_id)
+        # 广播通知
+        await self._broadcast_bind_list()
+        return {"type": "bind_remove_all_ack", "data": {"count": count}}
+
+    async def _broadcast_bind_list(self) -> None:
+        """向所有已绑定的客户端广播最新绑定列表"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return
+        if not hasattr(self, "ws_server") or not self.ws_server:
+            return
+        bindings = self.binding_manager.get_bindings()
+        safe_bindings = [
+            {
+                "clientId": b.get("clientId", ""),
+                "clientName": b.get("clientName", ""),
+                "boundAt": b.get("boundAt", ""),
+                "lastSeen": b.get("lastSeen", ""),
+            }
+            for b in bindings
+        ]
+        await self.ws_server.broadcast_message({
+            "type": "bind_list_update",
+            "data": {"bindings": safe_bindings},
+        })
+
+    async def _kick_client_by_user_id(self, user_client_id: str, reason: str, exclude_ws_id: str = "") -> None:
+        """通过 user_client_id 踢下线对应的 WebSocket 客户端"""
+        if not hasattr(self, "ws_server") or not self.ws_server:
+            return
+        # 查找对应的 ws_client_id
+        to_kick = [
+            ws_id for ws_id, uid in self.ws_server._client_user_ids.items()
+            if uid == user_client_id and ws_id != exclude_ws_id
+        ]
+        for ws_id in to_kick:
+            ws = self.ws_server._ws_clients.get(ws_id)
+            if ws:
+                try:
+                    await ws.send(json.dumps({
+                        "type": "force_disconnect",
+                        "data": {"reason": reason},
+                    }))
+                    await ws.close()
+                    if self.logger:
+                        self.logger.info(f"[{ws_id}] Kicked: {reason} (user_client_id={user_client_id})")
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"[{ws_id}] Failed to kick: {e}")
+
+    async def _perform_gimbal_sequence(self, sequence: list[str]) -> None:
+        """执行云台随机转动序列（用于绑定认证方式4）"""
+        if not hasattr(self, "gimbal_controller") or not self.gimbal_controller:
+            return
+        gc = self.gimbal_controller
+        try:
+            # 回中
+            await gc.center()
+            await asyncio.sleep(1)
+
+            for direction in sequence:
+                # 检查任务是否被取消
+                if asyncio.current_task() and asyncio.current_task().cancelled():  # type: ignore[union-attr]
+                    return
+
+                if direction in ("左", "右"):
+                    # 水平转动：pan 轴
+                    pan_center = getattr(gc, "pan_center", 90)
+                    pan_min = getattr(gc, "pan_min", 0)
+                    pan_max = getattr(gc, "pan_max", 180)
+                    pan_invert = getattr(gc, "pan_invert", False)
+
+                    if direction == "左":
+                        target = pan_center - 30 if not pan_invert else pan_center + 30
+                    else:
+                        target = pan_center + 30 if not pan_invert else pan_center - 30
+                    target = max(pan_min, min(pan_max, target))
+                    await gc.set_pan(float(target))
+                    if self.logger:
+                        self.logger.info(f"[Bind] Gimbal move: {direction} → pan={target}")
+                else:
+                    # 垂直转动：tilt 轴
+                    tilt_center = getattr(gc, "tilt_center", 90)
+                    tilt_min = getattr(gc, "tilt_min", 0)
+                    tilt_max = getattr(gc, "tilt_max", 180)
+                    tilt_invert = getattr(gc, "tilt_invert", False)
+
+                    if direction == "上":
+                        target = tilt_center + 30 if not tilt_invert else tilt_center - 30
+                    else:
+                        target = tilt_center - 30 if not tilt_invert else tilt_center + 30
+                    target = max(tilt_min, min(tilt_max, target))
+                    await gc.set_tilt(float(target))
+                    if self.logger:
+                        self.logger.info(f"[Bind] Gimbal move: {direction} → tilt={target}")
+
+                await asyncio.sleep(2)
+
+                # 回中
+                await gc.center()
+                await asyncio.sleep(0.5)
+
+            if self.logger:
+                self.logger.info("[Bind] Gimbal sequence completed")
+        except asyncio.CancelledError:
+            # 被取消时回中
+            try:
+                await gc.center()
+            except Exception:
+                pass
+            if self.logger:
+                self.logger.info("[Bind] Gimbal sequence cancelled")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[Bind] Gimbal sequence error: {e}", exc_info=True)
+
+    def _track_bind_task(self, ws_client_id: str, task: asyncio.Task) -> None:
+        """跟踪绑定相关异步任务"""
+        if ws_client_id not in self._bind_tasks:
+            self._bind_tasks[ws_client_id] = []
+        self._bind_tasks[ws_client_id].append(task)
+        # 清理已完成任务
+        self._bind_tasks[ws_client_id] = [t for t in self._bind_tasks[ws_client_id] if not t.done()]
+
+    def _cancel_bind_tasks(self, ws_client_id: str) -> None:
+        """取消指定客户端的所有绑定任务"""
+        tasks = self._bind_tasks.pop(ws_client_id, [])
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+                if self.logger:
+                    self.logger.info(f"[Bind] Cancelled task for {ws_client_id}")
+
+    async def _handle_bind_cancel(self, data: dict) -> dict:
+        """取消当前绑定会话（前端返回时调用）"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+
+        ws_client_id = data.get("_ws_client_id", "")
+        request_token = data.get("requestToken", "")
+
+        # 取消异步任务（云台序列/QR扫描/TTS）
+        self._cancel_bind_tasks(ws_client_id)
+
+        # 清理会话
+        if request_token:
+            self.binding_manager.cleanup_session(request_token)
+
+        if self.logger:
+            self.logger.info(f"[Bind] Cancelled by client: ws={ws_client_id}, token={request_token[:16] if request_token else 'N/A'}...")
+
+        return {"type": "bind_cancel_ack", "data": {}}
+
+    async def _qr_scan_loop(self, request_token: str, ws_client_id: str) -> None:
+        """QR 扫描后台循环：扫描到 QR 码后自动完成绑定"""
+        if not hasattr(self, "qr_scanner") or not self.qr_scanner:
+            return
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return
+
+        try:
+            qr_data = await self.qr_scanner.scan_once(timeout=self.binding_manager._session_timeout)
+            if qr_data is None:
+                # 超时或取消
+                await self._send_to_client(ws_client_id, {
+                    "type": "bind_failed",
+                    "data": {"error": "QR 扫描超时或已取消", "attempts": 0},
+                })
+                return
+
+            # 验证 QR 数据
+            result = self.binding_manager.verify_qr(qr_data, ws_client_id)
+            if result["success"]:
+                # TTS 播报
+                if hasattr(self, "tts_engine") and self.tts_engine:
+                    asyncio.create_task(self.tts_engine.speak_bind_success())
+                # 更新当前连接的绑定状态
+                if hasattr(self, "ws_server") and self.ws_server:
+                    self.ws_server._client_bound[ws_client_id] = True
+                    self.ws_server._client_user_ids[ws_client_id] = result["binding"]["clientId"]
+                    if self.logger:
+                        self.logger.info(f"[{ws_client_id}] QR binding verified, client marked as bound")
+                await self._send_to_client(ws_client_id, {
+                    "type": "bind_success",
+                    "data": {
+                        "clientToken": result["client_token"],
+                        "clientId": result["binding"]["clientId"],
+                    },
+                })
+            else:
+                await self._send_to_client(ws_client_id, {
+                    "type": "bind_failed",
+                    "data": {"error": result["error"], "attempts": 0},
+                })
+        except asyncio.CancelledError:
+            if self.logger:
+                self.logger.info(f"[Bind] QR scan cancelled for {ws_client_id}")
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[Bind] QR scan loop error: {e}", exc_info=True)
+
+    async def _send_to_client(self, ws_client_id: str, message: dict) -> None:
+        """向指定 WebSocket 客户端发送消息"""
+        if hasattr(self, "ws_server") and self.ws_server:
+            await self.ws_server.send_to_client(ws_client_id, message)

@@ -119,6 +119,16 @@ debug:
   # 测试版本拒绝场景时，设置此值 > 客户端当前协议版本即可触发
   force_min_protocol_version: 0
 
+# Binding（客户端绑定认证）
+binding:
+  enabled: true
+  # ROBOT_SECRET：留空则首次启动自动生成并保存到 config/.binding_secret
+  secret: ""
+  max_clients: 10           # 最多绑定客户端数
+  max_failures: 5            # 连续验证失败上限
+  cooldown_seconds: 300      # 失败上限后冷却时间（秒）
+  session_timeout: 120       # 绑定会话有效期（秒）
+
 # Software Manager（软件包管理）
 software_manager:
   market_endpoint: "http://192.168.1.75:9099"  # wo-bot-market 市场服务器地址（开发电脑）

@@ -15,6 +15,8 @@ from core.mdns_service import MDNSService
 from core.message_handler import MessageHandler
 from core.service_manager import ServiceManager
 from core.websocket_server import WebSocketServer
+from core.binding_manager import BindingManager
+from core.peripheral_detector import PeripheralDetector
 
 # WebRTC 可选导入（兼容 Python 3.6）
 try:
@@ -48,6 +50,8 @@ except ImportError as e:
     GIMBAL_AVAILABLE = False
     print(f"Warning: Gimbal not available: {e}")
 from utils.logger import setup_logger
+from utils.tts import TTSEngine
+from utils.qr_scanner import QRScanner
 
 
 class WoBotControl:
@@ -74,6 +78,12 @@ class WoBotControl:
         self.voice_broadcast_controller = None
         self.find_device_controller = None
         self.power_policy = None
+
+        # 绑定认证模块
+        self.binding_manager = None
+        self.peripheral_detector = None
+        self.tts_engine = None
+        self.qr_scanner = None
 
         # 运行状态
         self.running = False
@@ -152,6 +162,14 @@ class WoBotControl:
         # 注入寻找设备控制器到消息处理器
         if self.find_device_controller:
             self.message_handler.find_device_controller = self.find_device_controller
+
+        # 注入绑定认证模块到消息处理器
+        if self.binding_manager:
+            self.message_handler.binding_manager = self.binding_manager
+        if self.tts_engine:
+            self.message_handler.tts_engine = self.tts_engine
+        if self.qr_scanner:
+            self.message_handler.qr_scanner = self.qr_scanner
 
         # 初始化服务进程管理器（负责守护所有子服务）
         self.service_manager = ServiceManager(
@@ -233,6 +251,14 @@ class WoBotControl:
             config=self.config,
             logger=self.logger,
         )
+
+        # 注入绑定管理器和外设检测器到 WebSocket 服务器
+        if self.binding_manager:
+            self.ws_server.binding_manager = self.binding_manager
+        if self.peripheral_detector:
+            self.ws_server.peripheral_detector = self.peripheral_detector
+        # 注入 ws_server 引用回 message_handler（用于 _send_to_client）
+        self.message_handler.ws_server = self.ws_server
 
         # 启动 mDNS 服务发现
         mdns_config = self.config.get("mdns", {})
@@ -365,6 +391,56 @@ class WoBotControl:
         except Exception as e:
             self.find_device_controller = None
             self.logger.warning(f"Find device controller init failed: {e}")
+
+        # ---- 绑定认证模块 ----
+        binding_config = self.config.get("binding", {})
+        if binding_config.get("enabled", False):
+            # 外设检测器
+            self.peripheral_detector = PeripheralDetector(
+                config=self.config,
+                camera_manager=self.camera_manager,
+                gimbal_controller=self.gimbal_controller,
+                logger=self.logger,
+            )
+            methods = self.peripheral_detector.get_available_methods()
+            self.logger.info(f"Peripheral detector initialized, available methods: {methods}")
+
+            # TTS 引擎
+            self.tts_engine = TTSEngine(logger=self.logger)
+            if self.tts_engine.is_available():
+                self.logger.info("TTS engine initialized (espeak)")
+            else:
+                self.logger.warning("TTS engine not available (espeak/aplay missing)")
+
+            # QR 扫描器
+            self.qr_scanner = QRScanner(camera_manager=self.camera_manager, logger=self.logger)
+            if self.qr_scanner.is_available():
+                self.logger.info("QR scanner initialized (opencv)")
+            else:
+                self.logger.warning("QR scanner not available (opencv/camera missing)")
+
+            # 绑定管理器
+            device_id = self.config.get("robot", {}).get("id", "wobot-001")
+            secret = binding_config.get("secret", "")
+            if not secret:
+                # 首次启动自动生成 secret 并写回配置
+                secret = BindingManager.generate_secret()
+                binding_config["secret"] = secret
+                self.logger.info(f"[Bind] Auto-generated ROBOT_SECRET: {secret[:16]}...")
+            config_dir = Path(__file__).parent.parent / "config"
+            self.binding_manager = BindingManager(
+                config_dir=config_dir,
+                device_id=device_id,
+                secret=secret,
+                logger=self.logger,
+                max_clients=binding_config.get("max_clients", 10),
+                max_failures=binding_config.get("max_failures", 5),
+                cooldown_seconds=binding_config.get("cooldown_seconds", 300),
+                session_timeout=binding_config.get("session_timeout", 120),
+            )
+            self.logger.info(f"Binding manager initialized (bindings: {len(self.binding_manager.get_bindings())})")
+        else:
+            self.logger.info("Binding disabled in config")
 
     async def stop(self):
         """停止服务"""
