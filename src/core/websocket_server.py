@@ -271,6 +271,8 @@ class WebSocketServer:
         binding_enabled = binding_config.get("enabled", False)
         is_bound = False
         user_client_id = ""
+        client_token = ""
+        share_code = ""
 
         if binding_enabled and self.binding_manager:
             # 从 URL query 提取 clientId 和 clientToken
@@ -289,6 +291,7 @@ class WebSocketServer:
                     qs = parse_qs(query_string)
                     user_client_id = qs.get("clientId", [""])[0]
                     client_token = qs.get("clientToken", [""])[0]
+                    share_code = qs.get("shareCode", [""])[0]
             except Exception:
                 pass
 
@@ -301,6 +304,21 @@ class WebSocketServer:
                 else:
                     if self.logger:
                         self.logger.info(f"[{client_id}] Client not bound or invalid token: {user_client_id}")
+            elif user_client_id and share_code:
+                # 通过分享码自动绑定
+                result = self.binding_manager.use_share_code(share_code, client_id, user_client_id, "")
+                if result["success"]:
+                    is_bound = True
+                    client_token = result["client_token"]
+                    if self.logger:
+                        self.logger.info(f"[{client_id}] Auto-bound via share code: {user_client_id}")
+                    # 语音播报绑定成功
+                    tts_engine = getattr(self.message_handler, "tts_engine", None)
+                    if tts_engine:
+                        asyncio.create_task(tts_engine.speak_bind_success())
+                else:
+                    if self.logger:
+                        self.logger.info(f"[{client_id}] Share code failed: {result['error']}")
             else:
                 if self.logger:
                     self.logger.info(f"[{client_id}] No clientId/clientToken, binding required")
@@ -340,11 +358,15 @@ class WebSocketServer:
 
         try:
             # 发送握手消息（设备发现兼容）
+            connected_data = {**self.robot_info, "features": features}
+            # 如果是通过分享码自动绑定，返回 clientToken 供前端保存
+            if binding_enabled and is_bound and client_token:
+                connected_data["clientToken"] = client_token
             await websocket.send(
                 json.dumps(
                     {
                         "type": "connected",
-                        "data": {**self.robot_info, "features": features},
+                        "data": connected_data,
                     }
                 )
             )

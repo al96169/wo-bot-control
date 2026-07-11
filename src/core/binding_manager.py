@@ -57,6 +57,8 @@ class BindingManager:
         "bind_cancel",
         "bind_methods",
         "bind_list",
+        "bind_share_create",
+        "bind_share_use",
     })
 
     def __init__(
@@ -84,6 +86,8 @@ class BindingManager:
         self._sessions: dict[str, BindingSession] = {}  # request_token -> session
         self._failure_counts: dict[str, int] = {}  # ws_client_id -> failure count
         self._cooldowns: dict[str, float] = {}  # ws_client_id -> cooldown_until
+        # 分享码: share_code -> {code, created_at, expires_at, used}
+        self._share_codes: dict[str, dict] = {}
 
         self._load_bindings()
 
@@ -447,3 +451,73 @@ class BindingManager:
         tokens = [token for token, s in self._sessions.items() if s.ws_client_id == ws_client_id]
         for token in tokens:
             del self._sessions[token]
+
+    # ------------------------------------------------------------------
+    # 分享绑定码
+    # ------------------------------------------------------------------
+
+    def create_share_code(self) -> dict:
+        """生成分享绑定码，有效期 2 分钟"""
+        self._cleanup_expired_share_codes()
+        # 生成 6 位字母数字混合码
+        code = secrets.token_urlsafe(4).upper()[:6]
+        now = time.time()
+        expires_at = now + 120  # 2 分钟有效
+        share_info = {
+            "code": code,
+            "created_at": now,
+            "expires_at": expires_at,
+            "used": False,
+        }
+        self._share_codes[code] = share_info
+        if self._logger:
+            self._logger.info(f"[Bind] Share code created: {code}, expires in 120s")
+        return share_info
+
+    def use_share_code(self, code: str, ws_client_id: str, user_client_id: str, client_name: str) -> dict:
+        """使用分享码直接完成绑定（无需验证码）"""
+        self._cleanup_expired_share_codes()
+        code = (code or "").strip().upper()
+        share_info = self._share_codes.get(code)
+        if share_info is None:
+            return {"success": False, "error": "分享码不存在"}
+        if share_info["used"]:
+            return {"success": False, "error": "分享码已使用"}
+        if time.time() > share_info["expires_at"]:
+            del self._share_codes[code]
+            return {"success": False, "error": "分享码已过期"}
+
+        # 检查绑定数量
+        if not self.can_add_binding():
+            return {"success": False, "error": "已达最大绑定数量"}
+
+        # 直接创建绑定
+        client_token = self._generate_client_token(user_client_id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        binding = {
+            "clientId": user_client_id,
+            "clientName": client_name or "分享绑定设备",
+            "clientToken": client_token,
+            "boundAt": now_iso,
+            "lastSeen": now_iso,
+        }
+        self._bindings = [b for b in self._bindings if b.get("clientId") != user_client_id]
+        self._bindings.append(binding)
+        self._save_bindings()
+
+        # 标记已使用
+        share_info["used"] = True
+        del self._share_codes[code]
+
+        if self._logger:
+            self._logger.info(f"[Bind] Share code used: {code}, clientId={user_client_id}")
+        return {"success": True, "client_token": client_token, "binding": binding}
+
+    def _cleanup_expired_share_codes(self) -> None:
+        """清理过期分享码"""
+        now = time.time()
+        expired = [code for code, info in self._share_codes.items() if now > info["expires_at"]]
+        for code in expired:
+            del self._share_codes[code]
+        if expired and self._logger:
+            self._logger.info(f"[Bind] Cleaned up {len(expired)} expired share codes")

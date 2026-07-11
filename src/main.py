@@ -4,8 +4,12 @@ wo-bot-control 主入口
 """
 
 import asyncio
+import platform
+import re
 import signal
+import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 import yaml
@@ -129,6 +133,59 @@ class WoBotControl:
             },
             "logging": {"level": "INFO"},
         }
+
+    def _get_device_id(self) -> str:
+        """获取设备唯一标识符（GUID）
+
+        优先级：
+        1. config.yaml 中 robot.id（手动配置，非默认值时优先）
+        2. /etc/machine-id（Linux 系统级唯一标识，安装时生成，重启不变）
+        3. macOS IOPlatformUUID（开发环境兼容）
+        4. 降级：Python uuid.getnode()（基于 MAC 地址的硬件标识）
+        """
+        # 1. 检查 config.yaml 中的 robot.id（用户显式配置时优先）
+        config_id = self.config.get("robot", {}).get("id", "")
+        if config_id and config_id != "wobot-001":
+            # 非默认值，说明用户手动配置了，直接使用
+            return config_id
+
+        # 2. Linux: /etc/machine-id（32位 hex，系统安装时生成）
+        try:
+            machine_id_path = Path("/etc/machine-id")
+            if machine_id_path.exists():
+                raw = machine_id_path.read_text(encoding="utf-8").strip()
+                if raw and re.match(r"^[0-9a-f]{32}$", raw):
+                    # 格式化为标准 UUID 格式：8-4-4-4-12
+                    formatted = f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
+                    return f"robot-{formatted}"
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f"[DeviceID] Failed to read /etc/machine-id: {e}")
+
+        # 3. macOS: IOPlatformUUID（开发环境兼容）
+        if platform.system() == "Darwin":
+            try:
+                result = subprocess.run(
+                    ["ioreg", "-d2", "-c", "IOPlatformExpertDevice"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', result.stdout)
+                if match:
+                    return f"robot-{match.group(1)}"
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"[DeviceID] Failed to get macOS UUID: {e}")
+
+        # 4. 降级：基于 MAC 地址的硬件标识（uuid.getnode）
+        try:
+            node = uuid.getnode()
+            if node:
+                return f"robot-{str(uuid.UUID(int=node))}"
+        except Exception:
+            pass
+
+        # 最终降级：使用 config.yaml 中的值（含默认值）
+        return config_id or "wobot-001"
 
     async def start(self):
         """启动服务"""
@@ -420,14 +477,24 @@ class WoBotControl:
                 self.logger.warning("QR scanner not available (opencv/camera missing)")
 
             # 绑定管理器
-            device_id = self.config.get("robot", {}).get("id", "wobot-001")
+            device_id = self._get_device_id()
+            # 更新 config 中的 robot.id，确保 connected 消息返回正确的设备 ID
+            self.config.setdefault("robot", {})["id"] = device_id
+            self.logger.info(f"[DeviceID] Device ID: {device_id}")
+            config_dir = Path(__file__).parent.parent / "config"
             secret = binding_config.get("secret", "")
             if not secret:
-                # 首次启动自动生成 secret 并写回配置
-                secret = BindingManager.generate_secret()
-                binding_config["secret"] = secret
-                self.logger.info(f"[Bind] Auto-generated ROBOT_SECRET: {secret[:16]}...")
-            config_dir = Path(__file__).parent.parent / "config"
+                # config.yaml 中 secret 为空：尝试从持久化文件读取
+                secret_file = config_dir / ".binding_secret"
+                if secret_file.exists():
+                    secret = secret_file.read_text(encoding="utf-8").strip()
+                    self.logger.info(f"[Bind] Loaded ROBOT_SECRET from {secret_file}")
+                if not secret:
+                    # 首次启动：生成新 secret 并持久化到文件
+                    secret = BindingManager.generate_secret()
+                    secret_file.parent.mkdir(parents=True, exist_ok=True)
+                    secret_file.write_text(secret, encoding="utf-8")
+                    self.logger.info(f"[Bind] Auto-generated and saved ROBOT_SECRET to {secret_file}")
             self.binding_manager = BindingManager(
                 config_dir=config_dir,
                 device_id=device_id,

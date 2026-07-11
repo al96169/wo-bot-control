@@ -1357,6 +1357,51 @@ class MessageHandler:
         ]
         return {"type": "bind_list_ack", "data": {"bindings": safe_bindings}}
 
+    async def _handle_bind_share_create(self, data: dict) -> dict:
+        """生成分享绑定码"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+        share_info = self.binding_manager.create_share_code()
+        return {
+            "type": "bind_share_created",
+            "data": {
+                "code": share_info["code"],
+                "expires_in": 120,
+            },
+        }
+
+    async def _handle_bind_share_use(self, data: dict) -> dict:
+        """使用分享绑定码完成绑定"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+        code = data.get("shareCode", "")
+        ws_client_id = data.get("_ws_client_id", "")
+        user_client_id = data.get("clientId", "")
+        client_name = data.get("clientName", "")
+        if not code or not user_client_id:
+            return {"type": "bind_failed", "data": {"error": "缺少分享码或客户端ID"}}
+        result = self.binding_manager.use_share_code(code, ws_client_id, user_client_id, client_name)
+        if result["success"]:
+            # 更新当前连接的绑定状态
+            if hasattr(self, "ws_server") and self.ws_server:
+                self.ws_server._client_bound[ws_client_id] = True
+                self.ws_server._client_user_ids[ws_client_id] = result["binding"]["clientId"]
+                if self.logger:
+                    self.logger.info(f"[{ws_client_id}] Share code binding verified, client marked as bound")
+            # 语音播报绑定成功
+            if hasattr(self, "tts_engine") and self.tts_engine:
+                asyncio.create_task(self.tts_engine.speak_bind_success())
+            # 广播绑定列表更新
+            await self._broadcast_bind_list()
+            return {
+                "type": "bind_success",
+                "data": {
+                    "clientId": result["binding"]["clientId"],
+                    "clientToken": result["client_token"],
+                },
+            }
+        return {"type": "bind_failed", "data": {"error": result["error"]}}
+
     async def _handle_bind_remove(self, data: dict) -> dict:
         """移除指定客户端的绑定"""
         if not hasattr(self, "binding_manager") or not self.binding_manager:
