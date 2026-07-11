@@ -6,7 +6,6 @@ QR 扫描模块
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -33,13 +32,13 @@ class QRScanner:
         """检查 QR 扫描是否可用（需要 OpenCV 和摄像头）"""
         return self._detector is not None and self.camera_manager is not None
 
-    async def scan_once(self, timeout: float = 120.0) -> dict[str, Any] | None:
-        """扫描一次 QR 码，返回解码后的 JSON 数据
+    async def scan_once(self, timeout: float = 120.0) -> str | None:
+        """扫描一次 QR 码，返回解码后的原始字符串
 
         Args:
             timeout: 扫描超时时间（秒）
         Returns:
-            解码后的 JSON 字典，未找到则返回 None
+            QR 码原始内容字符串，未找到则返回 None
         """
         if not self.is_available():
             if self.logger:
@@ -49,12 +48,16 @@ class QRScanner:
         # 确保摄像头流已启动
         try:
             await self.camera_manager.start_stream(0)
+            if self.logger:
+                self.logger.info("[QR] Camera stream started for scanning")
         except Exception as e:
             if self.logger:
                 self.logger.warning(f"[QR] Failed to start camera stream: {e}")
 
         deadline = asyncio.get_event_loop().time() + timeout
-        scan_interval = 0.15  # 150ms 扫描间隔
+        scan_interval = 0.2  # 200ms 扫描间隔
+        frame_count = 0
+        last_log_time = asyncio.get_event_loop().time()
 
         if self.logger:
             self.logger.info(f"[QR] Starting scan, timeout={timeout}s")
@@ -74,22 +77,25 @@ class QRScanner:
                     await asyncio.sleep(scan_interval)
                     continue
 
-                # OpenCV 返回 BGR numpy 数组
+                frame_count += 1
+
+                # OpenCV QRCodeDetector
                 ret, decoded_info, points, _ = self._detector.detectAndDecodeMulti(frame)
                 if ret and decoded_info:
                     for info in decoded_info:
                         if not info:
                             continue
-                        try:
-                            data = json.loads(info)
-                            if self.logger:
-                                self.logger.info(f"[QR] Detected QR code: {str(data)[:100]}")
-                            return data
-                        except (json.JSONDecodeError, ValueError):
-                            # 不是 JSON 格式的 QR 码，尝试直接作为字符串匹配
-                            if self.logger:
-                                self.logger.debug(f"[QR] Non-JSON QR content: {info[:50]}")
-                            continue
+                        # 返回原始字符串，由 binding_manager 解析
+                        if self.logger:
+                            self.logger.info(f"[QR] Detected QR code: {info[:120]}")
+                        return info
+
+                # 每 5 秒输出一次扫描状态
+                now = asyncio.get_event_loop().time()
+                if now - last_log_time > 5:
+                    if self.logger:
+                        self.logger.info(f"[QR] Scanning... {frame_count} frames checked")
+                    last_log_time = now
             except asyncio.CancelledError:
                 if self.logger:
                     self.logger.info("[QR] Scan cancelled during frame read")
@@ -101,7 +107,7 @@ class QRScanner:
             await asyncio.sleep(scan_interval)
 
         if self.logger:
-            self.logger.info("[QR] Scan timeout, no QR code detected")
+            self.logger.info(f"[QR] Scan timeout, {frame_count} frames checked, no QR code detected")
         return None
 
     async def scan_background(

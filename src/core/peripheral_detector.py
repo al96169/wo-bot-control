@@ -14,8 +14,8 @@ from pathlib import Path
 class PeripheralDetector:
     """外设检测器：检测机器人可用外设，返回支持的绑定认证方式"""
 
-    # 认证方式优先级排序
-    METHOD_PRIORITY = ["display", "qr_scan", "tts", "gimbal"]
+    # 认证方式优先级排序（qr_scan 已禁用，改为待定开发）
+    METHOD_PRIORITY = ["display", "tts", "gimbal"]
 
     def __init__(self, config: dict | None = None, camera_manager=None, gimbal_controller=None, logger=None):
         self.config = config or {}
@@ -97,16 +97,23 @@ class PeripheralDetector:
         return self._cache
 
     def get_available_methods(self) -> list[str]:
-        """返回可用的认证方式列表，按优先级排序"""
+        """返回可用的认证方式列表，按优先级排序
+
+        password 方式始终可用（不依赖外设，仅需配置开启）
+        qr_scan 已禁用（待定开发）
+        """
         if self._cache is None:
             self.detect_all()
 
         status = self._cache or {}
         methods = []
+        # 密码绑定始终可用（如果配置开启）
+        binding_config = self.config.get("binding", {})
+        if binding_config.get("password_enabled", False):
+            methods.append("password")
         if status.get("display"):
             methods.append("display")
-        if status.get("camera"):
-            methods.append("qr_scan")
+        # qr_scan 已禁用
         if status.get("speaker"):
             methods.append("tts")
         if status.get("gimbal"):

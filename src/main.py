@@ -504,6 +504,8 @@ class WoBotControl:
                 max_failures=binding_config.get("max_failures", 5),
                 cooldown_seconds=binding_config.get("cooldown_seconds", 300),
                 session_timeout=binding_config.get("session_timeout", 120),
+                password_enabled=binding_config.get("password_enabled", False),
+                password=binding_config.get("password", ""),
             )
             self.logger.info(f"Binding manager initialized (bindings: {len(self.binding_manager.get_bindings())})")
         else:

@@ -128,6 +128,9 @@ binding:
   max_failures: 5            # 连续验证失败上限
   cooldown_seconds: 300      # 失败上限后冷却时间（秒）
   session_timeout: 120       # 绑定会话有效期（秒）
+  # 密码绑定（兜底方案：设备无外设时使用）
+  password_enabled: true    # 是否开启密码绑定方式
+  password: "wobot123"      # 初始密码（首次启动后哈希存储到 config/.binding_password，后续通过配置界面修改）
 
 # Software Manager（软件包管理）
 software_manager:

@@ -1244,6 +1244,12 @@ class MessageHandler:
             else:
                 return {"type": "error", "data": {"code": 503, "message": "云台不可用"}}
 
+        elif method == "password":
+            # 密码绑定：检查是否开启
+            if not self.binding_manager.is_password_enabled():
+                return {"type": "error", "data": {"code": 403, "message": "密码绑定未开启"}}
+            # 无需额外操作，客户端直接输入密码
+
         return {"type": "bind_request_ack", "data": ack_data}
 
     async def _handle_bind_verify(self, data: dict) -> dict:
@@ -1282,6 +1288,44 @@ class MessageHandler:
             return {
                 "type": "bind_failed",
                 "data": {"error": result["error"], "attempts": self.binding_manager._failure_counts.get(ws_client_id, 0)},
+            }
+
+    async def _handle_bind_password(self, data: dict) -> dict:
+        """密码绑定验证：客户端输入机器人密码完成绑定"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+
+        ws_client_id = data.get("_ws_client_id", "")
+        request_token = data.get("requestToken", "")
+        password = str(data.get("password", ""))
+
+        if not request_token or not password:
+            return {"type": "error", "data": {"code": 400, "message": "Missing requestToken/password"}}
+
+        result = self.binding_manager.verify_password(request_token, password, ws_client_id)
+        if result["success"]:
+            # 绑定成功，TTS 播报
+            if hasattr(self, "tts_engine") and self.tts_engine:
+                asyncio.create_task(self.tts_engine.speak_bind_success())
+            # 更新当前连接的绑定状态
+            if hasattr(self, "ws_server") and self.ws_server:
+                self.ws_server._client_bound[ws_client_id] = True
+                self.ws_server._client_user_ids[ws_client_id] = result["binding"]["clientId"]
+                if self.logger:
+                    self.logger.info(f"[{ws_client_id}] Password binding verified, client marked as bound")
+            # 广播绑定列表更新
+            await self._broadcast_bind_list()
+            return {
+                "type": "bind_success",
+                "data": {
+                    "clientToken": result["client_token"],
+                    "clientId": result["binding"]["clientId"],
+                },
+            }
+        else:
+            return {
+                "type": "bind_failed",
+                "data": {"error": result["error"], "remaining": result.get("remaining", 0)},
             }
 
     async def _handle_bind_replay(self, data: dict) -> dict:
@@ -1356,6 +1400,29 @@ class MessageHandler:
             for b in bindings
         ]
         return {"type": "bind_list_ack", "data": {"bindings": safe_bindings}}
+
+    async def _handle_bind_password_config(self, data: dict) -> dict:
+        """获取密码绑定配置状态（需认证）"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+        config = self.binding_manager.get_password_config()
+        return {"type": "bind_password_config_ack", "data": config}
+
+    async def _handle_bind_password_update(self, data: dict) -> dict:
+        """更新密码绑定配置：修改密码 / 开关密码绑定（需认证）"""
+        if not hasattr(self, "binding_manager") or not self.binding_manager:
+            return {"type": "error", "data": {"code": 503, "message": "Binding not available"}}
+        password = str(data.get("password", ""))
+        enabled = data.get("enabled")
+        # 修改密码
+        if password:
+            result = self.binding_manager.set_password(password)
+            if not result["success"]:
+                return {"type": "bind_password_update_ack", "data": result}
+        # 开关密码绑定
+        if enabled is not None:
+            self.binding_manager.set_password_enabled(bool(enabled))
+        return {"type": "bind_password_update_ack", "data": {"success": True}}
 
     async def _handle_bind_share_create(self, data: dict) -> dict:
         """生成分享绑定码"""
@@ -1492,14 +1559,20 @@ class MessageHandler:
                         self.logger.warning(f"[{ws_id}] Failed to kick: {e}")
 
     async def _perform_gimbal_sequence(self, sequence: list[str]) -> None:
-        """执行云台随机转动序列（用于绑定认证方式4）"""
+        """执行云台随机转动序列（用于绑定认证方式4）
+
+        时序优化：
+        - 开局回中后停留 0.8s 让用户看清起始位置
+        - 每个方向：转动后停留 1.0s（足够观察），回中后停留 0.3s（短暂停顿区分组）
+        - 总时长约 0.8 + 5*(1.0+0.3) = 7.3s（原 12.5s）
+        """
         if not hasattr(self, "gimbal_controller") or not self.gimbal_controller:
             return
         gc = self.gimbal_controller
         try:
-            # 回中
+            # 开局回中
             await gc.center()
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.8)
 
             for direction in sequence:
                 # 检查任务是否被取消
@@ -1537,11 +1610,12 @@ class MessageHandler:
                     if self.logger:
                         self.logger.info(f"[Bind] Gimbal move: {direction} → tilt={target}")
 
-                await asyncio.sleep(2)
+                # 转动后停留（让用户观察方向）
+                await asyncio.sleep(1.0)
 
-                # 回中
+                # 回中（短暂停顿，区分下一组）
                 await gc.center()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
 
             if self.logger:
                 self.logger.info("[Bind] Gimbal sequence completed")

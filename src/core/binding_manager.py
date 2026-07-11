@@ -27,7 +27,7 @@ class BindingSession:
     ws_client_id: str  # WebSocket 连接 ID（服务端分配）
     user_client_id: str  # 客户端持久 ID（浏览器生成）
     client_name: str
-    method: str  # "display" | "qr_scan" | "tts" | "gimbal"
+    method: str  # "display" | "qr_scan" | "tts" | "gimbal" | "password"
     random_code: str
     created_at: float
     attempts: int = 0
@@ -59,6 +59,7 @@ class BindingManager:
         "bind_list",
         "bind_share_create",
         "bind_share_use",
+        "bind_password",
     })
 
     def __init__(
@@ -71,9 +72,12 @@ class BindingManager:
         max_failures: int = 5,
         cooldown_seconds: int = 300,
         session_timeout: int = 120,
+        password_enabled: bool = False,
+        password: str = "",
     ):
         self._config_dir = config_dir
         self._bindings_file = config_dir / "bindings.json"
+        self._password_file = config_dir / ".binding_password"
         self._device_id = device_id
         self._secret = secret
         self._logger = logger
@@ -89,7 +93,12 @@ class BindingManager:
         # 分享码: share_code -> {code, created_at, expires_at, used}
         self._share_codes: dict[str, dict] = {}
 
+        # 密码绑定
+        self._password_enabled = password_enabled
+        self._password_hash: str = ""
+
         self._load_bindings()
+        self._load_password(password)
 
     # ------------------------------------------------------------------
     # 持久化
@@ -120,6 +129,172 @@ class BindingManager:
         except Exception as e:
             if self._logger:
                 self._logger.error(f"[Bind] Failed to save bindings: {e}", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # 密码绑定
+    # ------------------------------------------------------------------
+
+    def _load_password(self, config_password: str) -> None:
+        """从 .binding_password 加载密码哈希；不存在则使用配置文件中的明文密码初始化
+
+        设计意图：密码绑定是兜底方案，用户需在 config.yaml 中手动设置初始密码。
+        首次启动时将配置密码哈希后持久化到 .binding_password，后续可通过配置界面修改。
+        """
+        if self._password_file.exists():
+            try:
+                data = json.loads(self._password_file.read_text(encoding="utf-8"))
+                self._password_hash = data.get("hash", "")
+                self._password_enabled = data.get("enabled", self._password_enabled)
+                if self._logger:
+                    self._logger.info(f"[Bind] Password loaded from {self._password_file}")
+                return
+            except Exception as e:
+                if self._logger:
+                    self._logger.warning(f"[Bind] Failed to load password file: {e}")
+
+        # 首次启动：使用配置文件中的明文密码
+        if not config_password:
+            if self._logger:
+                self._logger.warning(
+                    "[Bind] No password configured in config.yaml (binding.password). "
+                    "Password binding will not work until set via config UI."
+                )
+            self._password_hash = ""
+            self._save_password()
+            return
+
+        self._password_hash = self._hash_password(config_password)
+        self._save_password()
+        if self._logger:
+            self._logger.info(f"[Bind] Password initialized from config.yaml and saved to {self._password_file}")
+
+    def _save_password(self) -> None:
+        """保存密码哈希和开关到 .binding_password"""
+        try:
+            self._config_dir.mkdir(parents=True, exist_ok=True)
+            data = {
+                "hash": self._password_hash,
+                "enabled": self._password_enabled,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._password_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            if self._logger:
+                self._logger.error(f"[Bind] Failed to save password: {e}", exc_info=True)
+
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        """PBKDF2-HMAC-SHA256 哈希密码，返回 salt_hex:key_hex"""
+        salt = secrets.token_bytes(16)
+        key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100000)
+        return f"{salt.hex()}:{key.hex()}"
+
+    @staticmethod
+    def _verify_password_hash(password: str, stored: str) -> bool:
+        """验证密码是否匹配哈希"""
+        try:
+            salt_hex, key_hex = stored.split(":", 1)
+            salt = bytes.fromhex(salt_hex)
+            expected_key = bytes.fromhex(key_hex)
+            actual_key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100000)
+            return hmac.compare_digest(actual_key, expected_key)
+        except (ValueError, AttributeError):
+            return False
+
+    @staticmethod
+    def validate_password_strength(password: str) -> str | None:
+        """校验密码强度，返回 None 表示通过，否则返回错误描述"""
+        if len(password) < 6:
+            return "密码至少 6 位"
+        if not any(c.isalpha() for c in password):
+            return "密码必须包含字母"
+        if not any(c.isdigit() for c in password):
+            return "密码必须包含数字"
+        return None
+
+    def is_password_enabled(self) -> bool:
+        """密码绑定是否开启"""
+        return self._password_enabled
+
+    def get_password_config(self) -> dict:
+        """获取密码绑定配置状态（不返回哈希）"""
+        return {
+            "enabled": self._password_enabled,
+            "hasPassword": bool(self._password_hash),
+        }
+
+    def set_password(self, new_password: str) -> dict:
+        """设置新密码（校验强度后哈希存储）"""
+        error = self.validate_password_strength(new_password)
+        if error:
+            return {"success": False, "error": error}
+        self._password_hash = self._hash_password(new_password)
+        self._save_password()
+        if self._logger:
+            self._logger.info("[Bind] Password updated")
+        return {"success": True}
+
+    def set_password_enabled(self, enabled: bool) -> dict:
+        """开启/关闭密码绑定功能"""
+        self._password_enabled = enabled
+        self._save_password()
+        if self._logger:
+            self._logger.info(f"[Bind] Password binding {'enabled' if enabled else 'disabled'}")
+        return {"success": True}
+
+    def verify_password(self, request_token: str, password: str, ws_client_id: str) -> dict:
+        """密码绑定验证：校验密码后创建绑定"""
+        session = self.get_session(request_token)
+        if session is None:
+            return {"success": False, "error": "会话不存在或已过期"}
+
+        if session.ws_client_id != ws_client_id:
+            return {"success": False, "error": "连接不匹配"}
+
+        if session.method != "password":
+            return {"success": False, "error": "当前方式不支持密码验证"}
+
+        if session.completed:
+            return {"success": False, "error": "会话已完成"}
+
+        # 检查冷却期
+        if self._check_cooldown(ws_client_id):
+            return {"success": False, "error": "验证失败次数过多，请稍后再试"}
+
+        session.attempts += 1
+
+        # 验证密码
+        if not self._verify_password_hash(password, self._password_hash):
+            self._record_failure(ws_client_id)
+            remaining = self._max_failures - self._failure_counts.get(ws_client_id, 0)
+            if self._logger:
+                self._logger.info(
+                    f"[Bind] Password verify failed: clientId={session.user_client_id}, "
+                    f"attempt={session.attempts}, remaining={remaining}"
+                )
+            return {"success": False, "error": "密码错误", "remaining": max(0, remaining)}
+
+        # 验证成功，创建绑定
+        client_token = self._generate_client_token(session.user_client_id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        binding = {
+            "clientId": session.user_client_id,
+            "clientName": session.client_name,
+            "clientToken": client_token,
+            "boundAt": now_iso,
+            "lastSeen": now_iso,
+        }
+        self._bindings = [b for b in self._bindings if b.get("clientId") != session.user_client_id]
+        self._bindings.append(binding)
+        self._save_bindings()
+
+        session.completed = True
+        self._sessions.pop(request_token, None)
+
+        if self._logger:
+            self._logger.info(f"[Bind] Password verified: clientId={session.user_client_id}, result=success")
+        return {"success": True, "client_token": client_token, "binding": binding}
+
 
     # ------------------------------------------------------------------
     # Token 生成
@@ -284,13 +459,16 @@ class BindingManager:
         elif method == "tts":
             session.random_code = self.generate_random_code(4)
         elif method == "qr_scan":
-            # QR 扫描不需要 randomCode，机器人扫描客户端的 QR
+            # QR 扫描已禁用（待定开发），保留代码但不使用
             session.qr_expected = {
                 "deviceId": self._device_id,
                 "requestToken": request_token,
                 "clientId": session.user_client_id,
                 "clientName": session.client_name,
             }
+            session.random_code = ""
+        elif method == "password":
+            # 密码绑定：不需要 randomCode，客户端直接输入机器人密码
             session.random_code = ""
         elif method == "gimbal":
             # 生成 4 步随机方向序列（上下左右）
@@ -361,8 +539,20 @@ class BindingManager:
             self._logger.info(f"[Bind] Verified: clientId={session.user_client_id}, result=success")
         return {"success": True, "client_token": client_token, "binding": binding}
 
-    def verify_qr(self, qr_data: dict, ws_client_id: str) -> dict:
-        """QR 扫描验证（机器人扫描客户端的 QR 码后调用）"""
+    def verify_qr(self, qr_data, ws_client_id: str) -> dict:
+        """QR 扫描验证（机器人扫描客户端的 QR 码后调用）
+
+        支持两种 QR 内容格式：
+        1. 简短格式: wobot:bind|<deviceId>|<requestToken>|<clientId>
+        2. JSON 格式: {"deviceId": "...", "requestToken": "...", "clientId": "..."}
+        """
+        # 统一转换为 dict
+        if isinstance(qr_data, str):
+            qr_data = self._parse_qr_payload(qr_data)
+
+        if not isinstance(qr_data, dict):
+            return {"success": False, "error": "QR 内容格式无效"}
+
         request_token = qr_data.get("requestToken", "")
         session = self.get_session(request_token)
         if session is None:
@@ -400,6 +590,35 @@ class BindingManager:
         if self._logger:
             self._logger.info(f"[Bind] QR Verified: clientId={session.user_client_id}, result=success")
         return {"success": True, "client_token": client_token, "binding": binding}
+
+    def _parse_qr_payload(self, raw: str) -> dict:
+        """解析 QR 码内容，支持简短格式和 JSON 格式
+
+        简短格式: wobot:bind|<deviceId>|<requestToken>|<clientId>
+        JSON 格式: {"deviceId": "...", "requestToken": "...", "clientId": "..."}
+        """
+        raw = raw.strip()
+        # 尝试 JSON 解析
+        if raw.startswith("{"):
+            try:
+                import json
+                return json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # 简短格式解析
+        if raw.startswith("wobot:bind|"):
+            parts = raw.split("|")
+            if len(parts) >= 4:
+                return {
+                    "deviceId": parts[1],
+                    "requestToken": parts[2],
+                    "clientId": parts[3],
+                }
+
+        if self._logger:
+            self._logger.warning(f"[Bind] QR payload unrecognized: {raw[:80]}")
+        return {}
 
     # ------------------------------------------------------------------
     # 绑定管理
