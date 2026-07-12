@@ -108,7 +108,11 @@ class MessageHandler:
                 features.append("dance")
         if "music_player" in SERVICE_DEFINITIONS and self._is_feature_enabled("music"):
             features.append("music")
-        if hasattr(self, "voice_broadcast_controller") and self.voice_broadcast_controller and self._is_feature_enabled("voice_broadcast"):
+        if (
+            hasattr(self, "voice_broadcast_controller")
+            and self.voice_broadcast_controller
+            and self._is_feature_enabled("voice_broadcast")
+        ):
             features.append("voice_broadcast")
         status_data["features"] = features
         return {"type": "status", "data": status_data}
@@ -611,13 +615,9 @@ class MessageHandler:
                 next_since = total_lines
 
             # 新格式: ts [LEVEL] [logger_name] module: message
-            pattern_new = re.compile(
-                r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] \[([\w.]+)\] (\w+): (.+)$"
-            )
+            pattern_new = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] \[([\w.]+)\] (\w+): (.+)$")
             # 旧格式兼容: ts [LEVEL] logger_name: message
-            pattern_old = re.compile(
-                r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] (\w+): (.+)$"
-            )
+            pattern_old = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+) \[(\w+)\] (\w+): (.+)$")
             for i, raw in enumerate(recent):
                 line_no = start + i
                 raw = raw.strip()
@@ -793,7 +793,7 @@ class MessageHandler:
         mode = data.get("mode", "record")
         audio_data = data.get("_audio_data")
         audio_format = data.get("format")  # "pcm_s16le" 表示原始 PCM
-        sample_rate = data.get("rate")     # 采样率，如 48000
+        sample_rate = data.get("rate")  # 采样率，如 48000
         if isinstance(audio_data, str):
             # 如果是从 JSON 中传来的 base64，解码为 bytes（仅用于测试）
             import base64
@@ -1220,6 +1220,7 @@ class MessageHandler:
     def _sanitize_config(self, config: dict) -> dict:
         """剔除配置中的敏感字段"""
         import copy
+
         sanitized = copy.deepcopy(config)
         # 剔除顶层敏感字段
         for key in list(sanitized.keys()):
@@ -1230,10 +1231,7 @@ class MessageHandler:
             del sanitized["security"]["token"]
         # 剔除 binding 中的 secret 和 password
         if "binding" in sanitized:
-            sanitized["binding"] = {
-                k: v for k, v in sanitized["binding"].items()
-                if k not in ("secret", "password")
-            }
+            sanitized["binding"] = {k: v for k, v in sanitized["binding"].items() if k not in ("secret", "password")}
         return sanitized
 
     async def _handle_config_get(self, data: dict) -> dict:
@@ -1260,8 +1258,10 @@ class MessageHandler:
             merged = self._deep_merge_config(self.config, new_config)
 
             # 3. 持久化写入 config.yaml
-            import yaml
             from pathlib import Path
+
+            import yaml
+
             config_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(merged, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -1306,6 +1306,7 @@ class MessageHandler:
     def _deep_merge_config(self, base: dict, overlay: dict) -> dict:
         """深度合并配置：overlay 覆盖 base"""
         import copy
+
         result = copy.deepcopy(base)
         for key, val in overlay.items():
             if isinstance(val, dict) and key in result and isinstance(result[key], dict):
@@ -1325,46 +1326,52 @@ class MessageHandler:
             await self._broadcast_features_update(new_config)
 
         # motion 变更 → 调用 MotionController setter
-        if any(c.startswith("motion") for c in diff):
-            if self.motion_controller:
-                motion_cfg = new_config.get("motion", {})
-                if "drive_type" in motion_cfg:
-                    self.motion_controller.set_drive_type(motion_cfg["drive_type"])
-                    if self.logger:
-                        self.logger.info(f"[Config] Motion drive_type → {motion_cfg['drive_type']}")
-                if "max_linear_speed" in motion_cfg:
-                    self.motion_controller.max_linear_speed = motion_cfg["max_linear_speed"]
-                if "max_angular_speed" in motion_cfg:
-                    self.motion_controller.max_angular_speed = motion_cfg["max_angular_speed"]
+        if any(c.startswith("motion") for c in diff) and self.motion_controller:
+            motion_cfg = new_config.get("motion", {})
+            if "drive_type" in motion_cfg:
+                self.motion_controller.set_drive_type(motion_cfg["drive_type"])
+                if self.logger:
+                    self.logger.info(f"[Config] Motion drive_type → {motion_cfg['drive_type']}")
+            if "max_linear_speed" in motion_cfg:
+                self.motion_controller.max_linear_speed = motion_cfg["max_linear_speed"]
+            if "max_angular_speed" in motion_cfg:
+                self.motion_controller.max_angular_speed = motion_cfg["max_angular_speed"]
 
         # camera 变更 → 重启受影响的摄像头
-        if any(c.startswith("camera") for c in diff):
-            if self.camera_manager:
-                try:
-                    camera_cfg = new_config.get("camera", {})
-                    if hasattr(self.camera_manager, "apply_config"):
-                        await self.camera_manager.apply_config(camera_cfg)
-                    if self.logger:
-                        self.logger.info("[Config] Camera config applied")
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"[Config] Camera reload failed: {e}")
+        if any(c.startswith("camera") for c in diff) and self.camera_manager:
+            try:
+                camera_cfg = new_config.get("camera", {})
+                if hasattr(self.camera_manager, "apply_config"):
+                    await self.camera_manager.apply_config(camera_cfg)
+                if self.logger:
+                    self.logger.info("[Config] Camera config applied")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"[Config] Camera reload failed: {e}")
 
         # gimbal 变更 → 重新初始化云台参数
-        if any(c.startswith("gimbal") for c in diff):
-            if hasattr(self, "gimbal_controller") and self.gimbal_controller:
-                gimbal_cfg = new_config.get("gimbal", {})
-                try:
-                    gc = self.gimbal_controller
-                    for attr in ("pan_invert", "tilt_invert", "pan_min", "pan_max", "tilt_min", "tilt_max",
-                                 "pan_center", "tilt_center", "step"):
-                        if attr in gimbal_cfg:
-                            setattr(gc, attr, gimbal_cfg[attr])
-                    if self.logger:
-                        self.logger.info("[Config] Gimbal config applied")
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"[Config] Gimbal reload failed: {e}")
+        if any(c.startswith("gimbal") for c in diff) and hasattr(self, "gimbal_controller") and self.gimbal_controller:
+            gimbal_cfg = new_config.get("gimbal", {})
+            try:
+                gc = self.gimbal_controller
+                for attr in (
+                    "pan_invert",
+                    "tilt_invert",
+                    "pan_min",
+                    "pan_max",
+                    "tilt_min",
+                    "tilt_max",
+                    "pan_center",
+                    "tilt_center",
+                    "step",
+                ):
+                    if attr in gimbal_cfg:
+                        setattr(gc, attr, gimbal_cfg[attr])
+                if self.logger:
+                    self.logger.info("[Config] Gimbal config applied")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"[Config] Gimbal reload failed: {e}")
 
         # server.advertised_ip 变更 → 需要重启
         if any("advertised_ip" in c for c in diff):
@@ -1373,15 +1380,14 @@ class MessageHandler:
                 self.logger.info("[Config] advertised_ip changed, requires reboot")
 
         # power_policy 变更 → 更新省电策略阀值
-        if any(c.startswith("power_policy") for c in diff):
-            if hasattr(self, "power_policy") and self.power_policy:
-                pp_cfg = new_config.get("power_policy", {})
-                if "threshold" in pp_cfg:
-                    threshold = int(pp_cfg["threshold"])
-                    threshold = max(10, min(50, threshold))
-                    self.power_policy._threshold = threshold
-                    if self.logger:
-                        self.logger.info(f"[Config] Power policy threshold → {threshold}%")
+        if any(c.startswith("power_policy") for c in diff) and hasattr(self, "power_policy") and self.power_policy:
+            pp_cfg = new_config.get("power_policy", {})
+            if "threshold" in pp_cfg:
+                threshold = int(pp_cfg["threshold"])
+                threshold = max(10, min(50, threshold))
+                self.power_policy._threshold = threshold
+                if self.logger:
+                    self.logger.info(f"[Config] Power policy threshold → {threshold}%")
 
         # binding.methods 变更 → 热更新绑定方式开关
         if any(c.startswith("binding.methods") for c in diff):
@@ -1394,24 +1400,26 @@ class MessageHandler:
                 self.ws_server.peripheral_detector.config = new_config
 
         # binding.password 变更 → 重新哈希密码
-        if any(c == "binding.password" for c in diff):
-            if hasattr(self, "binding_manager") and self.binding_manager:
-                new_password = new_config.get("binding", {}).get("password", "")
-                if new_password:
-                    result = self.binding_manager.set_password(new_password)
-                    if result.get("success") and self.logger:
-                        self.logger.info("[Config] Binding password updated")
-                else:
-                    if self.logger:
-                        self.logger.info("[Config] Binding password unchanged (empty)")
+        if any(c == "binding.password" for c in diff) and hasattr(self, "binding_manager") and self.binding_manager:
+            new_password = new_config.get("binding", {}).get("password", "")
+            if new_password:
+                result = self.binding_manager.set_password(new_password)
+                if result.get("success") and self.logger:
+                    self.logger.info("[Config] Binding password updated")
+            else:
+                if self.logger:
+                    self.logger.info("[Config] Binding password unchanged (empty)")
 
         # binding.password_enabled 变更 → 热更新
-        if any(c == "binding.password_enabled" for c in diff):
-            if hasattr(self, "binding_manager") and self.binding_manager:
-                enabled = bool(new_config.get("binding", {}).get("password_enabled", True))
-                self.binding_manager.set_password_enabled(enabled)
-                if self.logger:
-                    self.logger.info(f"[Config] Password binding → {enabled}")
+        if (
+            any(c == "binding.password_enabled" for c in diff)
+            and hasattr(self, "binding_manager")
+            and self.binding_manager
+        ):
+            enabled = bool(new_config.get("binding", {}).get("password_enabled", True))
+            self.binding_manager.set_password_enabled(enabled)
+            if self.logger:
+                self.logger.info(f"[Config] Password binding → {enabled}")
 
         return requires_reboot
 
@@ -1422,7 +1430,9 @@ class MessageHandler:
         features_cfg = new_config.get("features", {})
         if not isinstance(features_cfg, dict):
             features_cfg = {}
-        def _enabled(k): return bool(features_cfg.get(k, True))
+
+        def _enabled(k):
+            return bool(features_cfg.get(k, True))
 
         features = ["websocket", "exec", "system"]
         if hasattr(self, "motion_controller") and self.motion_controller and _enabled("motion"):
@@ -1435,19 +1445,41 @@ class MessageHandler:
             features.append("dance")
         if "music_player" in SERVICE_DEFINITIONS and _enabled("music"):
             features.append("music")
-        if hasattr(self, "voice_broadcast_controller") and self.voice_broadcast_controller and _enabled("voice_broadcast"):
+        if (
+            hasattr(self, "voice_broadcast_controller")
+            and self.voice_broadcast_controller
+            and _enabled("voice_broadcast")
+        ):
             features.append("voice_broadcast")
 
-        await self.ws_server.broadcast_message({
-            "type": "features_update",
-            "data": {"features": features},
-        })
+        await self.ws_server.broadcast_message(
+            {
+                "type": "features_update",
+                "data": {"features": features},
+            }
+        )
 
-    _CONFIG_TOP_KEYS = frozenset({
-        "robot", "server", "motion", "camera", "gimbal", "features", "power_policy",
-        "app", "mdns", "status", "modules", "logging", "security",
-        "compatibility", "debug", "binding", "software_manager",
-    })
+    _CONFIG_TOP_KEYS = frozenset(
+        {
+            "robot",
+            "server",
+            "motion",
+            "camera",
+            "gimbal",
+            "features",
+            "power_policy",
+            "app",
+            "mdns",
+            "status",
+            "modules",
+            "logging",
+            "security",
+            "compatibility",
+            "debug",
+            "binding",
+            "software_manager",
+        }
+    )
 
     @classmethod
     def _clean_nested_blocks(cls, config: dict) -> dict:
@@ -1457,15 +1489,21 @@ class MessageHandler:
         只移除 dict 类型的值，scalar（如 features 中的 bool 标志）不受影响。
         """
         import copy
+
         cleaned = copy.deepcopy(config)
         for section_name in list(cleaned.keys()):
             section = cleaned.get(section_name)
             if isinstance(section, dict):
                 for nested_key in list(section.keys()):
-                    if nested_key in cls._CONFIG_TOP_KEYS and nested_key != section_name and isinstance(section[nested_key], dict):
+                    if (
+                        nested_key in cls._CONFIG_TOP_KEYS
+                        and nested_key != section_name
+                        and isinstance(section[nested_key], dict)
+                    ):
                         if hasattr(logging.getLogger("wobot"), "warning"):
                             logging.getLogger("wobot").warning(
-                                f"[Config] Stripped corrupted {section_name}.{nested_key} from incoming config")
+                                f"[Config] Stripped corrupted {section_name}.{nested_key} from incoming config"
+                            )
                         del section[nested_key]
         return cleaned
 
@@ -1475,16 +1513,18 @@ class MessageHandler:
             changes_summary = ", ".join(diff[:5])
             if len(diff) > 5:
                 changes_summary += f" 等 {len(diff)} 项"
-            await self.ws_server.broadcast_message({
-                "type": "service_message",
-                "data": {
-                    "subject": "配置已更新",
-                    "summary": f"机器人配置变更: {changes_summary}",
-                    "body": f"已应用 {len(diff)} 项配置变更",
-                    "severity": "info",
-                    "source": "config",
-                },
-            })
+            await self.ws_server.broadcast_message(
+                {
+                    "type": "service_message",
+                    "data": {
+                        "subject": "配置已更新",
+                        "summary": f"机器人配置变更: {changes_summary}",
+                        "body": f"已应用 {len(diff)} 项配置变更",
+                        "severity": "info",
+                        "source": "config",
+                    },
+                }
+            )
 
     # ------------------------------------------------------------------
     # 客户端绑定认证 (R00035)
@@ -1536,7 +1576,9 @@ class MessageHandler:
         elif method == "tts":
             # TTS 播报配对数字
             if hasattr(self, "tts_engine") and self.tts_engine:
-                self._track_bind_task(ws_client_id, asyncio.create_task(self.tts_engine.speak_pairing_code(session.random_code)))
+                self._track_bind_task(
+                    ws_client_id, asyncio.create_task(self.tts_engine.speak_pairing_code(session.random_code))
+                )
 
         elif method == "qr_scan":
             # QR 扫描改为手动触发（前端点击"开始扫描"按钮后发送 bind_start_scan）
@@ -1546,15 +1588,14 @@ class MessageHandler:
         elif method == "gimbal":
             # 启动云台转动
             if hasattr(self, "gimbal_controller") and self.gimbal_controller:
-                self._track_bind_task(ws_client_id, asyncio.create_task(self._perform_gimbal_sequence(session.gimbal_sequence or [])))
+                self._track_bind_task(
+                    ws_client_id, asyncio.create_task(self._perform_gimbal_sequence(session.gimbal_sequence or []))
+                )
             else:
                 return {"type": "error", "data": {"code": 503, "message": "云台不可用"}}
 
-        elif method == "password":
-            # 密码绑定：检查是否开启
-            if not self.binding_manager.is_password_enabled():
-                return {"type": "error", "data": {"code": 403, "message": "密码绑定未开启"}}
-            # 无需额外操作，客户端直接输入密码
+        elif method == "password" and not self.binding_manager.is_password_enabled():
+            return {"type": "error", "data": {"code": 403, "message": "密码绑定未开启"}}
 
         return {"type": "bind_request_ack", "data": ack_data}
 
@@ -1593,7 +1634,10 @@ class MessageHandler:
         else:
             return {
                 "type": "bind_failed",
-                "data": {"error": result["error"], "attempts": self.binding_manager._failure_counts.get(ws_client_id, 0)},
+                "data": {
+                    "error": result["error"],
+                    "attempts": self.binding_manager._failure_counts.get(ws_client_id, 0),
+                },
             }
 
     async def _handle_bind_password(self, data: dict) -> dict:
@@ -1651,12 +1695,16 @@ class MessageHandler:
 
         if method == "tts":
             if hasattr(self, "tts_engine") and self.tts_engine:
-                self._track_bind_task(ws_client_id, asyncio.create_task(self.tts_engine.speak_pairing_code(session.random_code)))
+                self._track_bind_task(
+                    ws_client_id, asyncio.create_task(self.tts_engine.speak_pairing_code(session.random_code))
+                )
             else:
                 return {"type": "error", "data": {"code": 503, "message": "TTS 不可用"}}
         elif method == "gimbal":
             if hasattr(self, "gimbal_controller") and self.gimbal_controller:
-                self._track_bind_task(ws_client_id, asyncio.create_task(self._perform_gimbal_sequence(session.gimbal_sequence or [])))
+                self._track_bind_task(
+                    ws_client_id, asyncio.create_task(self._perform_gimbal_sequence(session.gimbal_sequence or []))
+                )
             else:
                 return {"type": "error", "data": {"code": 503, "message": "云台不可用"}}
         elif method == "display":
@@ -1803,10 +1851,7 @@ class MessageHandler:
             current_user_id = self.ws_server._client_user_ids.get(ws_client_id, "")
         # 获取所有要移除的 client_id（排除当前请求者）
         all_bindings = self.binding_manager.get_bindings()
-        removed_client_ids = [
-            b.get("clientId", "") for b in all_bindings
-            if b.get("clientId", "") != current_user_id
-        ]
+        removed_client_ids = [b.get("clientId", "") for b in all_bindings if b.get("clientId", "") != current_user_id]
         # 逐个移除（保留当前请求者的绑定）
         count = 0
         for cid in removed_client_ids:
@@ -1835,10 +1880,12 @@ class MessageHandler:
             }
             for b in bindings
         ]
-        await self.ws_server.broadcast_message({
-            "type": "bind_list_update",
-            "data": {"bindings": safe_bindings},
-        })
+        await self.ws_server.broadcast_message(
+            {
+                "type": "bind_list_update",
+                "data": {"bindings": safe_bindings},
+            }
+        )
 
     async def _kick_client_by_user_id(self, user_client_id: str, reason: str, exclude_ws_id: str = "") -> None:
         """通过 user_client_id 踢下线对应的 WebSocket 客户端"""
@@ -1846,17 +1893,22 @@ class MessageHandler:
             return
         # 查找对应的 ws_client_id
         to_kick = [
-            ws_id for ws_id, uid in self.ws_server._client_user_ids.items()
+            ws_id
+            for ws_id, uid in self.ws_server._client_user_ids.items()
             if uid == user_client_id and ws_id != exclude_ws_id
         ]
         for ws_id in to_kick:
             ws = self.ws_server._ws_clients.get(ws_id)
             if ws:
                 try:
-                    await ws.send(json.dumps({
-                        "type": "force_disconnect",
-                        "data": {"reason": reason},
-                    }))
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "force_disconnect",
+                                "data": {"reason": reason},
+                            }
+                        )
+                    )
                     await ws.close()
                     if self.logger:
                         self.logger.info(f"[{ws_id}] Kicked: {reason} (user_client_id={user_client_id})")
@@ -1970,7 +2022,9 @@ class MessageHandler:
             self.binding_manager.cleanup_session(request_token)
 
         if self.logger:
-            self.logger.info(f"[Bind] Cancelled by client: ws={ws_client_id}, token={request_token[:16] if request_token else 'N/A'}...")
+            self.logger.info(
+                f"[Bind] Cancelled by client: ws={ws_client_id}, token={request_token[:16] if request_token else 'N/A'}..."
+            )
 
         return {"type": "bind_cancel_ack", "data": {}}
 
@@ -1985,10 +2039,13 @@ class MessageHandler:
             qr_data = await self.qr_scanner.scan_once(timeout=self.binding_manager._session_timeout)
             if qr_data is None:
                 # 超时或取消
-                await self._send_to_client(ws_client_id, {
-                    "type": "bind_failed",
-                    "data": {"error": "QR 扫描超时或已取消", "attempts": 0},
-                })
+                await self._send_to_client(
+                    ws_client_id,
+                    {
+                        "type": "bind_failed",
+                        "data": {"error": "QR 扫描超时或已取消", "attempts": 0},
+                    },
+                )
                 return
 
             # 验证 QR 数据
@@ -2003,18 +2060,24 @@ class MessageHandler:
                     self.ws_server._client_user_ids[ws_client_id] = result["binding"]["clientId"]
                     if self.logger:
                         self.logger.info(f"[{ws_client_id}] QR binding verified, client marked as bound")
-                await self._send_to_client(ws_client_id, {
-                    "type": "bind_success",
-                    "data": {
-                        "clientToken": result["client_token"],
-                        "clientId": result["binding"]["clientId"],
+                await self._send_to_client(
+                    ws_client_id,
+                    {
+                        "type": "bind_success",
+                        "data": {
+                            "clientToken": result["client_token"],
+                            "clientId": result["binding"]["clientId"],
+                        },
                     },
-                })
+                )
             else:
-                await self._send_to_client(ws_client_id, {
-                    "type": "bind_failed",
-                    "data": {"error": result["error"], "attempts": 0},
-                })
+                await self._send_to_client(
+                    ws_client_id,
+                    {
+                        "type": "bind_failed",
+                        "data": {"error": result["error"], "attempts": 0},
+                    },
+                )
         except asyncio.CancelledError:
             if self.logger:
                 self.logger.info(f"[Bind] QR scan cancelled for {ws_client_id}")

@@ -102,7 +102,7 @@ class FindDeviceController(ExtensionModule):
         """获取当前状态"""
         import time
 
-        remaining = 0
+        remaining: float = 0
         if self._active and self._started_at:
             elapsed = time.monotonic() - self._started_at
             remaining = max(0, FIND_DURATION - elapsed)
@@ -178,6 +178,8 @@ class FindDeviceController(ExtensionModule):
 
             def _set_all_lamps():
                 # 亚博 Rosmaster 有 4 个 RGB LED（编号 1-4），统一设置颜色
+                if self._bot is None:
+                    return
                 for led_id in range(1, 5):
                     self._bot.set_colorful_lamps(led_id, r, g, b)
 

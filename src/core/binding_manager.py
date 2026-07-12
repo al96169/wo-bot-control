@@ -9,11 +9,10 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import random
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,25 +43,27 @@ class BindingManager:
     """绑定管理器：管理绑定会话、持久化绑定关系、安全控制"""
 
     # 不需要认证即可访问的消息类型
-    AUTH_ALLOWED_TYPES = frozenset({
-        "ping",
-        "subscribe",
-        "unsubscribe",
-        "connected",
-        "bind_request",
-        "bind_start",
-        "bind_verify",
-        "bind_replay",
-        "bind_start_scan",
-        "bind_cancel",
-        "bind_methods",
-        "bind_list",
-        "bind_share_create",
-        "bind_share_use",
-        "bind_password",
-        "config_get",
-        "config_set",
-    })
+    AUTH_ALLOWED_TYPES = frozenset(
+        {
+            "ping",
+            "subscribe",
+            "unsubscribe",
+            "connected",
+            "bind_request",
+            "bind_start",
+            "bind_verify",
+            "bind_replay",
+            "bind_start_scan",
+            "bind_cancel",
+            "bind_methods",
+            "bind_list",
+            "bind_share_create",
+            "bind_share_use",
+            "bind_password",
+            "config_get",
+            "config_set",
+        }
+    )
 
     def __init__(
         self,
@@ -91,8 +92,12 @@ class BindingManager:
 
         # 绑定方式配置：{ "display": True, "tts": True, ... }
         self._methods: dict[str, bool] = methods or {
-            "display": True, "tts": True, "qr_scan": False,
-            "gimbal": True, "password": True, "share_code": True,
+            "display": True,
+            "tts": True,
+            "qr_scan": False,
+            "gimbal": True,
+            "password": True,
+            "share_code": True,
         }
 
         self._bindings: list[dict] = []
@@ -323,7 +328,6 @@ class BindingManager:
             self._logger.info(f"[Bind] Password verified: clientId={session.user_client_id}, result=success")
         return {"success": True, "client_token": client_token, "binding": binding}
 
-
     # ------------------------------------------------------------------
     # Token 生成
     # ------------------------------------------------------------------
@@ -459,7 +463,9 @@ class BindingManager:
         )
         self._sessions[request_token] = session
         if self._logger:
-            self._logger.info(f"[Bind] Session created: ws={ws_client_id}, client={user_client_id}, token={request_token[:16]}...")
+            self._logger.info(
+                f"[Bind] Session created: ws={ws_client_id}, client={user_client_id}, token={request_token[:16]}..."
+            )
         return session
 
     def get_session(self, request_token: str) -> BindingSession | None:
@@ -507,13 +513,11 @@ class BindingManager:
 
         if self._logger:
             self._logger.info(
-                f"[Bind] Method: {method}, requestToken={request_token[:16]}..., "
-                f"randomCode={session.random_code}"
+                f"[Bind] Method: {method}, requestToken={request_token[:16]}..., randomCode={session.random_code}"
             )
             if method == "gimbal":
                 self._logger.info(
-                    f"[Bind] Gimbal sequence={session.gimbal_sequence}, "
-                    f"correctCode={session.random_code}"
+                    f"[Bind] Gimbal sequence={session.gimbal_sequence}, correctCode={session.random_code}"
                 )
         return session
 
@@ -630,6 +634,7 @@ class BindingManager:
         if raw.startswith("{"):
             try:
                 import json
+
                 return json.loads(raw)
             except (json.JSONDecodeError, ValueError):
                 pass

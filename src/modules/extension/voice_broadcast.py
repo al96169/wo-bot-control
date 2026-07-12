@@ -29,7 +29,7 @@ class VoiceBroadcastController(ExtensionModule):
         self._phone_beep_played: bool = False
         self._current_task: asyncio.Task | None = None
         # 电话模式顺序播放队列
-        self._phone_queue: asyncio.Queue[tuple[bytes, float]] = asyncio.Queue()
+        self._phone_queue: asyncio.Queue[tuple[bytes, float, str | None, int | None]] = asyncio.Queue()
         self._phone_playback_task: asyncio.Task | None = None
 
     # ---------- 生命周期 ----------
@@ -67,7 +67,9 @@ class VoiceBroadcastController(ExtensionModule):
 
     # ---------- 核心播放逻辑 ----------
 
-    async def play_audio(self, audio_data: bytes, mode: str, audio_format: str | None = None, sample_rate: int | None = None) -> dict:
+    async def play_audio(
+        self, audio_data: bytes, mode: str, audio_format: str | None = None, sample_rate: int | None = None
+    ) -> dict:
         """播放客户端发来的音频
 
         Args:
@@ -203,9 +205,7 @@ class VoiceBroadcastController(ExtensionModule):
                         aplay_proc.stdin.write(audio_data)
                         await aplay_proc.stdin.drain()
                         if self.logger and first_chunk:
-                            self.logger.info(
-                                f"Phone raw PCM mode: writing {len(audio_data)}B directly to aplay"
-                            )
+                            self.logger.info(f"Phone raw PCM mode: writing {len(audio_data)}B directly to aplay")
                             first_chunk = False
                     else:
                         # WebM 模式：ffmpeg 解码 → 增量写入

@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-import shlex
 import tempfile
 from pathlib import Path
 
@@ -53,10 +52,14 @@ class TTSEngine:
             # espeak 生成 WAV 文件
             proc = await asyncio.create_subprocess_exec(
                 "espeak",
-                "-v", lang,
-                "-s", str(speed),
-                "-a", "200",  # 振幅（默认 100，提高到 200 更响亮）
-                "-w", tmp_path,
+                "-v",
+                lang,
+                "-s",
+                str(speed),
+                "-a",
+                "200",  # 振幅（默认 100，提高到 200 更响亮）
+                "-w",
+                tmp_path,
                 text,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
@@ -72,7 +75,8 @@ class TTSEngine:
             proc = await asyncio.create_subprocess_exec(
                 "aplay",
                 "-q",
-                "-D", self._alsa_device,
+                "-D",
+                self._alsa_device,
                 tmp_path,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,

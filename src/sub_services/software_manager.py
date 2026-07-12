@@ -256,9 +256,7 @@ class SoftwareManager:
         if stype == "apt":
             apt_pkg = source.get("package", package)
             self._emit_progress(package, "install", 5, "start", "开始安装...")
-            success, output = await self._run_apt_command(
-                ["apt-get", "install", "-y", apt_pkg], package, "install"
-            )
+            success, output = await self._run_apt_command(["apt-get", "install", "-y", apt_pkg], package, "install")
             # apt exit code 非 0 时验证目标包实际状态（Jetson nvidia-l4t 依赖问题不影响目标包）
             if not success:
                 actually_installed = await self._verify_dpkg_installed(apt_pkg)
@@ -276,8 +274,11 @@ class SoftwareManager:
             installed_after = await self._get_installed_packages()
             new_version = installed_after.get(install_name, "")
         return _install_ack(
-            package, "installed" if success else "failed",
-            output if not success else "", old_version, new_version,
+            package,
+            "installed" if success else "failed",
+            output if not success else "",
+            old_version,
+            new_version,
         )
 
     async def cmd_uninstall(self, params: dict) -> dict:
@@ -293,7 +294,9 @@ class SoftwareManager:
         source = pkg.get("source", {})
         stype = source.get("type", "apt")
         if stype == "systemd":
-            return _uninstall_ack(package, "protected", "systemd service packages cannot be removed via software manager")
+            return _uninstall_ack(
+                package, "protected", "systemd service packages cannot be removed via software manager"
+            )
         # 记录卸载前版本
         install_name = self._pkg_install_name(pkg)
         installed_before = await self._get_installed_packages()
@@ -301,9 +304,7 @@ class SoftwareManager:
         apt_pkg = source.get("package", package)
         logger.info(f"Uninstalling: {package}")
         self._emit_progress(package, "uninstall", 5, "start", "开始卸载...")
-        success, output = await self._run_apt_command(
-            ["apt-get", "remove", "-y", apt_pkg], package, "uninstall"
-        )
+        success, output = await self._run_apt_command(["apt-get", "remove", "-y", apt_pkg], package, "uninstall")
         # apt exit code 非 0 时验证目标包是否已卸载（不在 ii 状态）
         if not success:
             still_installed = await self._verify_dpkg_installed(apt_pkg)
@@ -362,8 +363,11 @@ class SoftwareManager:
             apt_name = apt_pkg if stype == "apt" else self._pkg_install_name(pkg)
             new_version = installed_after.get(apt_name, "")
         return _upgrade_ack(
-            package, "upgraded" if success else "failed", requires_reconnect,
-            current_ver, new_version,
+            package,
+            "upgraded" if success else "failed",
+            requires_reconnect,
+            current_ver,
+            new_version,
         )
 
     async def _compare_versions(self, installed: str, latest: str) -> bool:
@@ -573,7 +577,10 @@ class SoftwareManager:
                             pct = min(50, int(downloaded / total * 50))
                             if pct >= last_pct + 5 or pct == 50:
                                 self._emit_progress(
-                                    display_name, action, pct, "download",
+                                    display_name,
+                                    action,
+                                    pct,
+                                    "download",
                                     f"downloaded {downloaded}/{total} bytes",
                                 )
                                 last_pct = pct
@@ -603,7 +610,9 @@ class SoftwareManager:
         dpkg_env["DEBIAN_FRONTEND"] = "noninteractive"
         try:
             proc = await asyncio.create_subprocess_exec(
-                "dpkg", "-i", deb_path,
+                "dpkg",
+                "-i",
+                deb_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=dpkg_env,
@@ -689,7 +698,9 @@ def _uninstall_ack(package: str, status: str, message: str = "", old_version: st
     }
 
 
-def _upgrade_ack(package: str, status: str, requires_reconnect: bool, old_version: str = "", new_version: str = "") -> dict:
+def _upgrade_ack(
+    package: str, status: str, requires_reconnect: bool, old_version: str = "", new_version: str = ""
+) -> dict:
     return {
         "type": "software_upgrade_ack",
         "data": {

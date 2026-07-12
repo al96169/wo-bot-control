@@ -14,13 +14,13 @@ from pathlib import Path
 
 import yaml
 
+from core.binding_manager import BindingManager
 from core.http_api import HttpAPIServer
 from core.mdns_service import MDNSService
 from core.message_handler import MessageHandler
+from core.peripheral_detector import PeripheralDetector
 from core.service_manager import ServiceManager
 from core.websocket_server import WebSocketServer
-from core.binding_manager import BindingManager
-from core.peripheral_detector import PeripheralDetector
 
 # WebRTC 可选导入（兼容 Python 3.6）
 try:
@@ -54,8 +54,8 @@ except ImportError as e:
     GIMBAL_AVAILABLE = False
     print(f"Warning: Gimbal not available: {e}")
 from utils.logger import setup_logger
-from utils.tts import TTSEngine
 from utils.qr_scanner import QRScanner
+from utils.tts import TTSEngine
 
 
 class WoBotControl:
@@ -167,7 +167,9 @@ class WoBotControl:
             try:
                 result = subprocess.run(
                     ["ioreg", "-d2", "-c", "IOPlatformExpertDevice"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 )
                 match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', result.stdout)
                 if match:

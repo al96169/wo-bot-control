@@ -340,6 +340,7 @@ class WebSocketServer:
         features_cfg = self.config.get("features", {})
         if not isinstance(features_cfg, dict):
             features_cfg = {}
+
         def _feat_enabled(key: str) -> bool:
             return bool(features_cfg.get(key, True))
 
@@ -380,7 +381,7 @@ class WebSocketServer:
 
             # 绑定未通过：发送 auth_required，告知客户端可用的认证方式
             if binding_enabled and not self._client_bound.get(client_id):
-                methods = []
+                methods: list[str] = []
                 if self.peripheral_detector:
                     methods = self.peripheral_detector.get_available_methods()
                 await websocket.send(

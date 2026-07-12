@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 
@@ -80,6 +81,8 @@ class QRScanner:
                 frame_count += 1
 
                 # OpenCV QRCodeDetector
+                if self._detector is None:
+                    continue
                 ret, decoded_info, points, _ = self._detector.detectAndDecodeMulti(frame)
                 if ret and decoded_info:
                     for info in decoded_info:
@@ -112,7 +115,7 @@ class QRScanner:
 
     async def scan_background(
         self,
-        on_found: callable,
+        on_found: Callable[[str], Any],
         timeout: float = 120.0,
     ) -> None:
         """后台扫描 QR 码，找到后调用回调

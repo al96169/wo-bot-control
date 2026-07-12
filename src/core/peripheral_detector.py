@@ -52,10 +52,7 @@ class PeripheralDetector:
             if cameras:
                 return True
         try:
-            for i in range(10):
-                if os.path.exists(f"/dev/video{i}"):
-                    return True
-            return False
+            return any(os.path.exists(f"/dev/video{i}") for i in range(10))
         except Exception:
             return False
 
@@ -80,9 +77,7 @@ class PeripheralDetector:
         gimbal_config = self.config.get("gimbal", {})
         if not gimbal_config.get("enabled", False):
             return False
-        if self.gimbal_controller:
-            return True
-        return False
+        return bool(self.gimbal_controller)
 
     def detect_all(self) -> dict[str, bool]:
         """检测所有外设，返回状态字典"""
