@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from types import ModuleType
 from typing import Any
 
 
@@ -19,7 +20,8 @@ class QRScanner:
         self.logger = logger or logging.getLogger(__name__)
         self._task: asyncio.Task | None = None
         self._running = False
-        self._detector = None
+        self._cv2: ModuleType | None = None
+        self._detector: Any = None
         try:
             import cv2
 
