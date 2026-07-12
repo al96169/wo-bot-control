@@ -356,8 +356,9 @@ class WoBotControl:
         self.logger.info("System collector initialized")
 
         # 省电策略引擎
-        self.power_policy = PowerPolicy()
-        self.logger.info("Power policy initialized")
+        pp_cfg = self.config.get("power_policy", {})
+        self.power_policy = PowerPolicy(threshold=int(pp_cfg.get("threshold", 30)))
+        self.logger.info(f"Power policy initialized (threshold={self.power_policy.threshold}%)")
 
         # 云台控制（先初始化，因为运动控制需要共享其 Rosmaster Bot 串口实例）
         gimbal_config = self.config.get("gimbal", {})
@@ -506,6 +507,7 @@ class WoBotControl:
                 session_timeout=binding_config.get("session_timeout", 120),
                 password_enabled=binding_config.get("password_enabled", False),
                 password=binding_config.get("password", ""),
+                methods=binding_config.get("methods"),
             )
             self.logger.info(f"Binding manager initialized (bindings: {len(self.binding_manager.get_bindings())})")
         else:

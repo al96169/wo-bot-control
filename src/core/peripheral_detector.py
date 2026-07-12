@@ -99,23 +99,44 @@ class PeripheralDetector:
     def get_available_methods(self) -> list[str]:
         """返回可用的认证方式列表，按优先级排序
 
-        password 方式始终可用（不依赖外设，仅需配置开启）
-        qr_scan 已禁用（待定开发）
+        返回的列表受两层限制：
+        1. 外设硬件检测（display/tts/gimbal 需要对应硬件）
+        2. 配置开关（config.yaml binding.methods）
         """
         if self._cache is None:
             self.detect_all()
 
         status = self._cache or {}
-        methods = []
-        # 密码绑定始终可用（如果配置开启）
         binding_config = self.config.get("binding", {})
-        if binding_config.get("password_enabled", False):
-            methods.append("password")
-        if status.get("display"):
+        methods_config = binding_config.get("methods", {})
+
+        def _config_enabled(method: str) -> bool:
+            return bool(methods_config.get(method, True))
+
+        methods = []
+
+        # display: 需要显示器 + 配置开关
+        if status.get("display") and _config_enabled("display"):
             methods.append("display")
-        # qr_scan 已禁用
-        if status.get("speaker"):
+
+        # tts: 需要音频输出 + 配置开关
+        if status.get("speaker") and _config_enabled("tts"):
             methods.append("tts")
-        if status.get("gimbal"):
+
+        # qr_scan: 需要摄像头（暂时禁用），受配置开关控制
+        if status.get("camera") and _config_enabled("qr_scan"):
+            methods.append("qr_scan")
+
+        # gimbal: 需要云台 + 配置开关
+        if status.get("gimbal") and _config_enabled("gimbal"):
             methods.append("gimbal")
+
+        # password: 需要 password_enabled + 配置开关
+        if binding_config.get("password_enabled", False) and _config_enabled("password"):
+            methods.append("password")
+
+        # share_code: 无硬件依赖，仅受配置开关控制
+        if _config_enabled("share_code"):
+            methods.append("share_code")
+
         return methods

@@ -370,6 +370,9 @@ class GimbalController:
         self.pan_invert = self.config.get("pan_invert", False)
         self.tilt_invert = self.config.get("tilt_invert", False)
 
+        # 步进角度（每次 move 移动的度数）
+        self.step = self.config.get("step", 1.0)
+
         # 限位回调: async fn(axis: str, limit: float, direction: str)
         self.on_limit: Callable[..., Any] | None = None
 
@@ -432,11 +435,12 @@ class GimbalController:
             elif new == self.tilt_max and old < self.tilt_max:
                 await self.on_limit("tilt", self.tilt_max, "max")
 
-    async def move_pan(self, delta: float, step: float = 1.0) -> dict:
+    async def move_pan(self, delta: float, step: float | None = None) -> dict:
         """增量移动水平角度，返回 {changed, pan, tilt, limit?}"""
+        s = step if step is not None else self.step
         if abs(delta) < 0.01:
             return {"changed": False, "pan": self.pan_angle, "tilt": self.tilt_angle}
-        new_angle = self.pan_angle + delta * step
+        new_angle = self.pan_angle + delta * s
         old = self.pan_angle
         clamped = max(self.pan_min, min(self.pan_max, new_angle))
         if abs(clamped - old) < 0.01:
@@ -456,11 +460,12 @@ class GimbalController:
                 await self.on_limit("pan", self.pan_max, "max")
         return result
 
-    async def move_tilt(self, delta: float, step: float = 1.0) -> dict:
+    async def move_tilt(self, delta: float, step: float | None = None) -> dict:
         """增量移动俯仰角度，返回 {changed, pan, tilt, limit?}"""
+        s = step if step is not None else self.step
         if abs(delta) < 0.01:
             return {"changed": False, "pan": self.pan_angle, "tilt": self.tilt_angle}
-        new_angle = self.tilt_angle + delta * step
+        new_angle = self.tilt_angle + delta * s
         old = self.tilt_angle
         clamped = max(self.tilt_min, min(self.tilt_max, new_angle))
         if abs(clamped - old) < 0.01:
@@ -480,11 +485,12 @@ class GimbalController:
                 await self.on_limit("tilt", self.tilt_max, "max")
         return result
 
-    async def move_pan_tilt(self, pan_delta: float, tilt_delta: float, step: float = 1.0) -> dict:
+    async def move_pan_tilt(self, pan_delta: float, tilt_delta: float, step: float | None = None) -> dict:
         """同时增量移动两轴 — 单次串口写入，避免两次 run_in_executor 延迟叠加"""
+        s = step if step is not None else self.step
         # 计算新角度并限位
-        pan_new = self.pan_angle + pan_delta * step
-        tilt_new = self.tilt_angle + tilt_delta * step
+        pan_new = self.pan_angle + pan_delta * s
+        tilt_new = self.tilt_angle + tilt_delta * s
         pan_clamped = max(self.pan_min, min(self.pan_max, pan_new))
         tilt_clamped = max(self.tilt_min, min(self.tilt_max, tilt_new))
 
@@ -510,10 +516,11 @@ class GimbalController:
             result["limit"] = True
         return result
 
-    def move_pan_tilt_sync(self, pan_delta: float, tilt_delta: float, step: float = 1.0) -> bool:
+    def move_pan_tilt_sync(self, pan_delta: float, tilt_delta: float, step: float | None = None) -> bool:
         """同步版双轴增量移动 — 用于 executor 线程内直接调用"""
-        pan_new = self.pan_angle + pan_delta * step
-        tilt_new = self.tilt_angle + tilt_delta * step
+        s = step if step is not None else self.step
+        pan_new = self.pan_angle + pan_delta * s
+        tilt_new = self.tilt_angle + tilt_delta * s
         pan_clamped = max(self.pan_min, min(self.pan_max, pan_new))
         tilt_clamped = max(self.tilt_min, min(self.tilt_max, tilt_new))
 

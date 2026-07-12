@@ -88,7 +88,9 @@ gimbal:
   tilt_invert: false            # 反转俯仰方向 (摇杆向上→舵机逆时针)
   step: 3.0                     # 增量模式每步移动角度
 
-# Modules
+# Power Policy
+power_policy:
+  threshold: 30  # 省电阀值（电量百分比），范围 10-50
 modules:
   auto_load: true
   module_dir: "src/modules/extension"
@@ -131,6 +133,14 @@ binding:
   # 密码绑定（兜底方案：设备无外设时使用）
   password_enabled: true    # 是否开启密码绑定方式
   password: "wobot123"      # 初始密码（首次启动后哈希存储到 config/.binding_password，后续通过配置界面修改）
+  # 支持的绑定方式开关（关闭后客户端绑定界面将不再显示该方式）
+  methods:
+    display: true           # 屏幕显示验证码
+    tts: true               # 语音播报验证码
+    qr_scan: false          # 二维码扫描（待定开发，默认关闭）
+    gimbal: true            # 云台动作验证
+    password: true          # 密码绑定
+    share_code: true        # 分享码绑定
 
 # Software Manager（软件包管理）
 software_manager:

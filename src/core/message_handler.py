@@ -47,6 +47,15 @@ class MessageHandler:
         # 绑定认证异步任务跟踪（ws_client_id -> [task, ...]）
         self._bind_tasks: dict[str, list[asyncio.Task]] = {}
 
+    def _is_feature_enabled(self, feature: str) -> bool:
+        features_cfg = self.config.get("features", {})
+        if not isinstance(features_cfg, dict):
+            return True
+        return bool(features_cfg.get(feature, True))
+
+    def _feature_disabled_response(self, feature: str) -> dict:
+        return {"type": "error", "data": {"code": 403, "message": f"功能 '{feature}' 已被管理员禁用"}}
+
     async def handle(self, msg_type: str, msg_data: dict) -> dict | None:
         """处理消息"""
         handler = getattr(self, f"_handle_{msg_type}", None)
@@ -81,28 +90,33 @@ class MessageHandler:
             await self.power_policy.evaluate(battery_level)
             status_data["power_policy"] = self.power_policy.get_status()
         # 附带 features，确保客户端始终能获取最新功能列表
-        features = ["websocket", "exec", "motion", "system", "camera"]
+        # 基础功能（不可禁用）
+        features = ["websocket", "exec", "system"]
+        # 可配置功能：控制器存在 + config.features 未显式关闭
+        if hasattr(self, "motion_controller") and self.motion_controller and self._is_feature_enabled("motion"):
+            features.append("motion")
+        if hasattr(self, "camera_manager") and self.camera_manager and self._is_feature_enabled("camera"):
+            features.append("camera")
         if hasattr(self, "gimbal_controller") and self.gimbal_controller:
             features.append("gimbal")
-        if hasattr(self, "dance_controller") and self.dance_controller:
-            # 通过 service_manager 检查 dance 服务是否实际在运行
+        if hasattr(self, "dance_controller") and self.dance_controller and self._is_feature_enabled("dance"):
             if self.service_manager:
                 svc = self.service_manager.get_service_status("dance")
                 if svc and svc.get("status") == "running":
                     features.append("dance")
             else:
                 features.append("dance")
-        # 检查音乐播放服务是否配置
-        if "music_player" in SERVICE_DEFINITIONS:
+        if "music_player" in SERVICE_DEFINITIONS and self._is_feature_enabled("music"):
             features.append("music")
-        # 检查喊话服务
-        if hasattr(self, "voice_broadcast_controller") and self.voice_broadcast_controller:
+        if hasattr(self, "voice_broadcast_controller") and self.voice_broadcast_controller and self._is_feature_enabled("voice_broadcast"):
             features.append("voice_broadcast")
         status_data["features"] = features
         return {"type": "status", "data": status_data}
 
     async def _handle_motion(self, data: dict) -> dict:
         """处理运动控制（支持双轴兼容 + 三轴麦轮协议）"""
+        if not self._is_feature_enabled("motion"):
+            return self._feature_disabled_response("motion")
         if not self.motion_controller:
             return {"type": "error", "data": {"code": 503, "message": "Motion controller not available"}}
 
@@ -127,12 +141,16 @@ class MessageHandler:
 
     async def _handle_motion_stop(self, data: dict) -> dict:
         """处理停止运动"""
+        if not self._is_feature_enabled("motion"):
+            return self._feature_disabled_response("motion")
         if self.motion_controller:
             await self.motion_controller.stop()
         return {"type": "motion_ack", "data": {"linear": 0, "angular": 0}}
 
     async def _handle_gimbal(self, data: dict) -> dict | None:
         """处理云台控制"""
+        if not self._is_feature_enabled("gimbal"):
+            return self._feature_disabled_response("gimbal")
         if not hasattr(self, "gimbal_controller") or not self.gimbal_controller:
             return {"type": "error", "data": {"code": 503, "message": "Gimbal not available"}}
 
@@ -147,7 +165,7 @@ class MessageHandler:
                 return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
             elif action == "move":
                 # 增量控制 (兼容旧版，每帧一发): {action: "move", pan_delta: -1.0, tilt_delta: 0.5}
-                step = float(data.get("step", 1.0))
+                step = float(data.get("step") or self.gimbal_controller.step)
                 pan_delta = float(data.get("pan_delta", 0) or 0)
                 tilt_delta = float(data.get("tilt_delta", 0) or 0)
 
@@ -216,7 +234,7 @@ class MessageHandler:
     def _gimbal_thread_fn(self):
         """云台移动线程：全同步执行，小步高频，舵机来不及完成单步→视觉平滑"""
         gc = self.gimbal_controller
-        step_per_tick = 1.5  # 满速约 75°/s (1.5° × 50Hz)
+        step_per_tick = getattr(gc, "step", 1.5)  # 从配置读取步进角度，默认 1.5
 
         try:
             while self._gimbal_running.is_set():
@@ -251,6 +269,8 @@ class MessageHandler:
 
     async def _handle_motion_config(self, data: dict) -> dict:
         """处理运动配置"""
+        if not self._is_feature_enabled("motion"):
+            return self._feature_disabled_response("motion")
         if self.motion_controller:
             drive_type = data.get("drive_type")
             max_linear = data.get("max_linear_speed")
@@ -268,6 +288,10 @@ class MessageHandler:
     async def _handle_dance(self, data: dict) -> dict:
         """处理舞蹈控制命令"""
         command = data.get("command", "status")
+
+        # 功能开关检查（只读查询放行）
+        if command not in ("status", "list") and not self._is_feature_enabled("dance"):
+            return self._feature_disabled_response("dance")
 
         # 省电模式下跳舞不可用——但允许只读查询（status/list）通过，避免轮询持续弹 403
         if (
@@ -290,7 +314,9 @@ class MessageHandler:
         return await self.dance_controller.handle_command(command, data)
 
     async def _handle_camera(self, data: dict) -> dict:
-        """处理摄像头控制"""
+        """处理摄像头控制命令"""
+        if not self._is_feature_enabled("camera"):
+            return self._feature_disabled_response("camera")
         if not self.camera_manager:
             return {"type": "error", "data": {"code": 503, "message": "Camera not available"}}
 
@@ -759,6 +785,8 @@ class MessageHandler:
 
     async def _handle_voice_broadcast(self, data: dict) -> dict:
         """处理客户端喊话音频消息（由 WebSocket 二进制帧解析后调用）"""
+        if not self._is_feature_enabled("voice_broadcast"):
+            return self._feature_disabled_response("voice_broadcast")
         if not hasattr(self, "voice_broadcast_controller") or not self.voice_broadcast_controller:
             return {"type": "error", "data": {"code": 503, "message": "Voice broadcast not available"}}
 
@@ -1079,7 +1107,9 @@ class MessageHandler:
         return {"type": msg_type, "data": {"status": "stopped", "active_source": "none"}}
 
     async def _forward_music_command(self, cmd: str, data: dict, resp_type: str = "music_action") -> dict:
-        """转发命令到音乐子进程，若服务不可用则返回友好响应（不触发前端 Toast）"""
+        """转发命令到音乐子进程，若功能被禁用或服务不可用则返回友好响应"""
+        if not self._is_feature_enabled("music"):
+            return {"type": "error", "data": {"code": 403, "message": "功能 'music' 已被管理员禁用"}}
         if not self._is_music_service_running():
             return self._music_unavailable_response(resp_type)
         result = await self.service_manager.send_subprocess_command("music_player", cmd, data)
@@ -1179,6 +1209,282 @@ class MessageHandler:
             return {"type": "wifi_disconnect_result", "data": {"status": "disconnected"}}
         except Exception as e:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
+
+    # ------------------------------------------------------------------
+    # 机器人详细配置 (R00033)
+    # ------------------------------------------------------------------
+
+    # 敏感配置字段：config_get 返回时剔除
+    _CONFIG_SENSITIVE_KEYS = {"secret", "token", "password", "client_token"}
+
+    def _sanitize_config(self, config: dict) -> dict:
+        """剔除配置中的敏感字段"""
+        import copy
+        sanitized = copy.deepcopy(config)
+        # 剔除顶层敏感字段
+        for key in list(sanitized.keys()):
+            if key in self._CONFIG_SENSITIVE_KEYS:
+                del sanitized[key]
+        # 剔除 security.token
+        if "security" in sanitized and "token" in sanitized["security"]:
+            del sanitized["security"]["token"]
+        # 剔除 binding 中的 secret 和 password
+        if "binding" in sanitized:
+            sanitized["binding"] = {
+                k: v for k, v in sanitized["binding"].items()
+                if k not in ("secret", "password")
+            }
+        return sanitized
+
+    async def _handle_config_get(self, data: dict) -> dict:
+        """获取当前完整配置（已剔除敏感字段）"""
+        sanitized = self._sanitize_config(self.config)
+        return {"type": "config_get_ack", "data": sanitized}
+
+    async def _handle_config_set(self, data: dict) -> dict:
+        """提交配置修改：校验、持久化、热重载"""
+        new_config = data.get("config", {})
+        if not new_config:
+            return {"type": "error", "data": {"code": 400, "message": "Missing config data"}}
+
+        # 清理 new_config 中可能循环污染的子模块嵌套
+        new_config = self._clean_nested_blocks(new_config)
+
+        try:
+            # 1. 对比差异
+            diff = self._compute_config_diff(self.config, new_config)
+            if not diff:
+                return {"type": "config_set_ack", "data": {"success": True, "changes": [], "requires_reboot": False}}
+
+            # 2. 合并配置（深度合并，保留未修改的字段）
+            merged = self._deep_merge_config(self.config, new_config)
+
+            # 3. 持久化写入 config.yaml
+            import yaml
+            from pathlib import Path
+            config_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.dump(merged, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+            if self.logger:
+                self.logger.info(f"[Config] Written to {config_path}")
+
+            # 4. 热重载受影响的模块
+            requires_reboot = await self._apply_config_changes(diff, merged)
+
+            # 5. 更新内存中的配置
+            self.config = merged
+
+            # 6. 广播配置变更通知
+            await self._broadcast_config_change(diff)
+
+            return {
+                "type": "config_set_ack",
+                "data": {
+                    "success": True,
+                    "changes": diff,
+                    "requires_reboot": requires_reboot,
+                    "reboot_reason": "advertised_ip 变更需要重启服务" if requires_reboot else "",
+                },
+            }
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[Config] config_set failed: {e}", exc_info=True)
+            return {"type": "error", "data": {"code": 500, "message": f"配置应用失败: {e}"}}
+
+    def _compute_config_diff(self, old: dict, new: dict, prefix: str = "") -> list[str]:
+        """计算新旧配置差异，返回变更路径列表"""
+        changes = []
+        for key, new_val in new.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            old_val = old.get(key)
+            if isinstance(new_val, dict) and isinstance(old_val, dict):
+                changes.extend(self._compute_config_diff(old_val, new_val, full_key))
+            elif new_val != old_val:
+                changes.append(full_key)
+        return changes
+
+    def _deep_merge_config(self, base: dict, overlay: dict) -> dict:
+        """深度合并配置：overlay 覆盖 base"""
+        import copy
+        result = copy.deepcopy(base)
+        for key, val in overlay.items():
+            if isinstance(val, dict) and key in result and isinstance(result[key], dict):
+                result[key] = self._deep_merge_config(result[key], val)
+            else:
+                result[key] = copy.deepcopy(val)
+        return result
+
+    async def _apply_config_changes(self, diff: list[str], new_config: dict) -> bool:
+        """根据差异热重载受影响的模块，返回是否需要重启"""
+        requires_reboot = False
+
+        # features 变更 → 广播新的 features 列表并重置功能门控
+        if any(c.startswith("features") for c in diff):
+            if self.logger:
+                self.logger.info("[Config] Features changed, broadcasting updated features")
+            await self._broadcast_features_update(new_config)
+
+        # motion 变更 → 调用 MotionController setter
+        if any(c.startswith("motion") for c in diff):
+            if self.motion_controller:
+                motion_cfg = new_config.get("motion", {})
+                if "drive_type" in motion_cfg:
+                    self.motion_controller.set_drive_type(motion_cfg["drive_type"])
+                    if self.logger:
+                        self.logger.info(f"[Config] Motion drive_type → {motion_cfg['drive_type']}")
+                if "max_linear_speed" in motion_cfg:
+                    self.motion_controller.max_linear_speed = motion_cfg["max_linear_speed"]
+                if "max_angular_speed" in motion_cfg:
+                    self.motion_controller.max_angular_speed = motion_cfg["max_angular_speed"]
+
+        # camera 变更 → 重启受影响的摄像头
+        if any(c.startswith("camera") for c in diff):
+            if self.camera_manager:
+                try:
+                    camera_cfg = new_config.get("camera", {})
+                    if hasattr(self.camera_manager, "apply_config"):
+                        await self.camera_manager.apply_config(camera_cfg)
+                    if self.logger:
+                        self.logger.info("[Config] Camera config applied")
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"[Config] Camera reload failed: {e}")
+
+        # gimbal 变更 → 重新初始化云台参数
+        if any(c.startswith("gimbal") for c in diff):
+            if hasattr(self, "gimbal_controller") and self.gimbal_controller:
+                gimbal_cfg = new_config.get("gimbal", {})
+                try:
+                    gc = self.gimbal_controller
+                    for attr in ("pan_invert", "tilt_invert", "pan_min", "pan_max", "tilt_min", "tilt_max",
+                                 "pan_center", "tilt_center", "step"):
+                        if attr in gimbal_cfg:
+                            setattr(gc, attr, gimbal_cfg[attr])
+                    if self.logger:
+                        self.logger.info("[Config] Gimbal config applied")
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"[Config] Gimbal reload failed: {e}")
+
+        # server.advertised_ip 变更 → 需要重启
+        if any("advertised_ip" in c for c in diff):
+            requires_reboot = True
+            if self.logger:
+                self.logger.info("[Config] advertised_ip changed, requires reboot")
+
+        # power_policy 变更 → 更新省电策略阀值
+        if any(c.startswith("power_policy") for c in diff):
+            if hasattr(self, "power_policy") and self.power_policy:
+                pp_cfg = new_config.get("power_policy", {})
+                if "threshold" in pp_cfg:
+                    threshold = int(pp_cfg["threshold"])
+                    threshold = max(10, min(50, threshold))
+                    self.power_policy._threshold = threshold
+                    if self.logger:
+                        self.logger.info(f"[Config] Power policy threshold → {threshold}%")
+
+        # binding.methods 变更 → 热更新绑定方式开关
+        if any(c.startswith("binding.methods") for c in diff):
+            if hasattr(self, "binding_manager") and self.binding_manager:
+                methods = new_config.get("binding", {}).get("methods", {})
+                if methods:
+                    self.binding_manager.set_methods(methods)
+            # 同时更新外设检测器的 config，使 get_available_methods 使用新配置
+            if hasattr(self.ws_server, "peripheral_detector") and self.ws_server.peripheral_detector:
+                self.ws_server.peripheral_detector.config = new_config
+
+        # binding.password 变更 → 重新哈希密码
+        if any(c == "binding.password" for c in diff):
+            if hasattr(self, "binding_manager") and self.binding_manager:
+                new_password = new_config.get("binding", {}).get("password", "")
+                if new_password:
+                    result = self.binding_manager.set_password(new_password)
+                    if result.get("success") and self.logger:
+                        self.logger.info("[Config] Binding password updated")
+                else:
+                    if self.logger:
+                        self.logger.info("[Config] Binding password unchanged (empty)")
+
+        # binding.password_enabled 变更 → 热更新
+        if any(c == "binding.password_enabled" for c in diff):
+            if hasattr(self, "binding_manager") and self.binding_manager:
+                enabled = bool(new_config.get("binding", {}).get("password_enabled", True))
+                self.binding_manager.set_password_enabled(enabled)
+                if self.logger:
+                    self.logger.info(f"[Config] Password binding → {enabled}")
+
+        return requires_reboot
+
+    async def _broadcast_features_update(self, new_config: dict) -> None:
+        """当 features 配置变更时，广播新的 features 列表给所有客户端"""
+        if not hasattr(self, "ws_server") or not self.ws_server:
+            return
+        features_cfg = new_config.get("features", {})
+        if not isinstance(features_cfg, dict):
+            features_cfg = {}
+        def _enabled(k): return bool(features_cfg.get(k, True))
+
+        features = ["websocket", "exec", "system"]
+        if hasattr(self, "motion_controller") and self.motion_controller and _enabled("motion"):
+            features.append("motion")
+        if hasattr(self, "camera_manager") and self.camera_manager and _enabled("camera"):
+            features.append("camera")
+        if hasattr(self, "gimbal_controller") and self.gimbal_controller and _enabled("gimbal"):
+            features.append("gimbal")
+        if hasattr(self, "dance_controller") and self.dance_controller and _enabled("dance"):
+            features.append("dance")
+        if "music_player" in SERVICE_DEFINITIONS and _enabled("music"):
+            features.append("music")
+        if hasattr(self, "voice_broadcast_controller") and self.voice_broadcast_controller and _enabled("voice_broadcast"):
+            features.append("voice_broadcast")
+
+        await self.ws_server.broadcast_message({
+            "type": "features_update",
+            "data": {"features": features},
+        })
+
+    _CONFIG_TOP_KEYS = frozenset({
+        "robot", "server", "motion", "camera", "gimbal", "features", "power_policy",
+        "app", "mdns", "status", "modules", "logging", "security",
+        "compatibility", "debug", "binding", "software_manager",
+    })
+
+    @classmethod
+    def _clean_nested_blocks(cls, config: dict) -> dict:
+        """移除配置子块中错误嵌套的其他顶级块（防止 config_set 循环污染）
+
+        例如 gimbal 下面不应该出现 robot 配置块。
+        只移除 dict 类型的值，scalar（如 features 中的 bool 标志）不受影响。
+        """
+        import copy
+        cleaned = copy.deepcopy(config)
+        for section_name in list(cleaned.keys()):
+            section = cleaned.get(section_name)
+            if isinstance(section, dict):
+                for nested_key in list(section.keys()):
+                    if nested_key in cls._CONFIG_TOP_KEYS and nested_key != section_name and isinstance(section[nested_key], dict):
+                        if hasattr(logging.getLogger("wobot"), "warning"):
+                            logging.getLogger("wobot").warning(
+                                f"[Config] Stripped corrupted {section_name}.{nested_key} from incoming config")
+                        del section[nested_key]
+        return cleaned
+
+    async def _broadcast_config_change(self, diff: list[str]) -> None:
+        """广播配置变更通知给所有客户端"""
+        if hasattr(self, "ws_server") and self.ws_server:
+            changes_summary = ", ".join(diff[:5])
+            if len(diff) > 5:
+                changes_summary += f" 等 {len(diff)} 项"
+            await self.ws_server.broadcast_message({
+                "type": "service_message",
+                "data": {
+                    "subject": "配置已更新",
+                    "summary": f"机器人配置变更: {changes_summary}",
+                    "body": f"已应用 {len(diff)} 项配置变更",
+                    "severity": "info",
+                    "source": "config",
+                },
+            })
 
     # ------------------------------------------------------------------
     # 客户端绑定认证 (R00035)

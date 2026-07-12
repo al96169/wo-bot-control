@@ -60,6 +60,8 @@ class BindingManager:
         "bind_share_create",
         "bind_share_use",
         "bind_password",
+        "config_get",
+        "config_set",
     })
 
     def __init__(
@@ -74,6 +76,7 @@ class BindingManager:
         session_timeout: int = 120,
         password_enabled: bool = False,
         password: str = "",
+        methods: dict[str, bool] | None = None,
     ):
         self._config_dir = config_dir
         self._bindings_file = config_dir / "bindings.json"
@@ -85,6 +88,12 @@ class BindingManager:
         self._max_failures = max_failures
         self._cooldown_seconds = cooldown_seconds
         self._session_timeout = session_timeout
+
+        # 绑定方式配置：{ "display": True, "tts": True, ... }
+        self._methods: dict[str, bool] = methods or {
+            "display": True, "tts": True, "qr_scan": False,
+            "gimbal": True, "password": True, "share_code": True,
+        }
 
         self._bindings: list[dict] = []
         self._sessions: dict[str, BindingSession] = {}  # request_token -> session
@@ -99,6 +108,25 @@ class BindingManager:
 
         self._load_bindings()
         self._load_password(password)
+
+    # ------------------------------------------------------------------
+    # 绑定方式管理
+    # ------------------------------------------------------------------
+
+    def is_method_enabled(self, method: str) -> bool:
+        """检查指定绑定方式是否启用（结合配置开关 + 外设检测）"""
+        return bool(self._methods.get(method, True))
+
+    def set_methods(self, methods: dict[str, bool]) -> None:
+        """热更新绑定方式开关"""
+        self._methods = methods
+        if self._logger:
+            enabled = [k for k, v in methods.items() if v]
+            self._logger.info(f"[Bind] Methods updated: {enabled}")
+
+    def get_methods(self) -> dict[str, bool]:
+        """获取当前方式开关配置"""
+        return dict(self._methods)
 
     # ------------------------------------------------------------------
     # 持久化

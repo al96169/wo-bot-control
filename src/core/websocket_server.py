@@ -337,23 +337,30 @@ class WebSocketServer:
             )
 
         # 构建 features 列表
-        features = ["websocket", "exec", "motion", "system", "camera"]
+        features_cfg = self.config.get("features", {})
+        if not isinstance(features_cfg, dict):
+            features_cfg = {}
+        def _feat_enabled(key: str) -> bool:
+            return bool(features_cfg.get(key, True))
+
+        features = ["websocket", "exec", "system"]
+        if _feat_enabled("motion"):
+            features.append("motion")
+        if _feat_enabled("camera"):
+            features.append("camera")
         if self.webrtc_service:
             features.append("webrtc")
         else:
-            features.append("websocket-fallback")  # 标记 WebSocket 可处理业务消息
-        if getattr(self, "gimbal_controller", None):
+            features.append("websocket-fallback")
+        if getattr(self, "gimbal_controller", None) and _feat_enabled("gimbal"):
             features.append("gimbal")
-        # 检查舞蹈控制器
         dance_ctrl = getattr(self.message_handler, "dance_controller", None)
-        if dance_ctrl:
+        if dance_ctrl and _feat_enabled("dance"):
             features.append("dance")
-        # 检查音乐播放服务是否配置
-        if "music_player" in SERVICE_DEFINITIONS:
+        if "music_player" in SERVICE_DEFINITIONS and _feat_enabled("music"):
             features.append("music")
-        # 检查喊话服务（检查 message_handler 上的控制器）
         voice_ctrl = getattr(self.message_handler, "voice_broadcast_controller", None)
-        if voice_ctrl:
+        if voice_ctrl and _feat_enabled("voice_broadcast"):
             features.append("voice_broadcast")
 
         try:
