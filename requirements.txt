@@ -6,3 +6,4 @@ numpy>=1.24
 aiortc>=1.6
 av>=11.0
 zeroconf>=0.132
+aiohttp>=3.8

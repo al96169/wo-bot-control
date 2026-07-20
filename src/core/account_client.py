@@ -91,11 +91,11 @@ class AccountClient:
             "timestamp": timestamp,
         }
         # 包含 clientTokenHash（如果存在绑定关系）
-        bindings = self.binding_manager.get_bindings() if self.binding_manager else {}
+        bindings = self.binding_manager.get_bindings() if self.binding_manager else []
         if bindings:
             # 取出第一个绑定 client 的 token hash
-            first_client_id = next(iter(bindings))
-            client_token = bindings[first_client_id].get("token", "")
+            first_binding = bindings[0]
+            client_token = first_binding.get("token", "")
             if client_token:
                 payload["clientTokenHash"] = hashlib.sha256(client_token.encode()).hexdigest()
 
@@ -173,8 +173,12 @@ class AccountClient:
             {"payload": {...}, "proof": "hex..."} 或 None（失败时）
         """
         # 检查绑定关系是否匹配
-        bindings = self.binding_manager.get_bindings() if self.binding_manager else {}
-        client_binding = bindings.get(client_id)
+        bindings = self.binding_manager.get_bindings() if self.binding_manager else []
+        client_binding = None
+        for b in bindings:
+            if b.get("clientId") == client_id:
+                client_binding = b
+                break
         if not client_binding:
             self.logger.warning(f"[Account] No binding found for client {client_id}")
             return None
@@ -246,7 +250,7 @@ class AccountClient:
             return None
 
         # 读取 ROBOT_SECRET
-        config_dir = Path(__file__).parent.parent / "config"
+        config_dir = Path(__file__).parent.parent.parent / "config"
         secret = account_cfg.get("secret", "") or config.get("binding", {}).get("secret", "")
         if not secret:
             secret_file = config_dir / ".binding_secret"

@@ -147,3 +147,9 @@ software_manager:
   market_endpoint: "http://192.168.1.75:9099"  # wo-bot-market 市场服务器地址（开发电脑）
   manifest_cache_ttl: 300                   # 白名单缓存时长（秒）
   operation_timeout: 120                    # 安装/卸载/升级超时（秒）
+
+# Account Server（帐号服务器，R00040）
+# 设备注册、心跳、OAuth2 绑定证明签发
+account:
+  enabled: false                              # 是否启用帐号服务器集成（部署公共服务后设为 true）
+  server_url: "https://account.example.com"   # 帐号服务器地址（部署时替换）（必须HTTPS）

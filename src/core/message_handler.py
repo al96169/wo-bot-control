@@ -1530,6 +1530,60 @@ class MessageHandler:
     # 客户端绑定认证 (R00035)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # 帐号绑定证明 (R00041: Web端通过帐号服务器远程绑定设备)
+    # ------------------------------------------------------------------
+
+    async def _handle_binding_proof_request(self, data: dict) -> dict:
+        """处理来自前端的绑定证明请求（OAuth2 绑定流程步骤4A）
+
+        前端发送:
+            { type: "binding_proof_request", accountId: "logto_user_xxx", clientId: "persistent_client_id" }
+
+        机器人生成 HMAC-SHA256 证明 → 前端用于调用 POST /api/devices/bind
+        """
+        account_id = data.get("accountId", "")
+        client_id = data.get("clientId", "")
+
+        if not account_id or not client_id:
+            return {"type": "error", "data": {"code": 400, "message": "Missing accountId or clientId"}}
+
+        # 检查功能是否启用
+        if not self._is_feature_enabled("binding"):
+            return self._feature_disabled_response("binding")
+
+        if not hasattr(self, "account_client") or not self.account_client:
+            return {
+                "type": "binding_proof_response",
+                "data": {"success": False, "error": "account_client_not_available"},
+            }
+
+        try:
+            result = await self.account_client.generate_binding_proof(account_id, client_id)
+            if result is None:
+                return {
+                    "type": "binding_proof_response",
+                    "data": {"success": False, "error": "no_binding_for_client"},
+                }
+            return {
+                "type": "binding_proof_response",
+                "data": {
+                    "success": True,
+                    "payload": result["payload"],
+                    "proof": result["proof"],
+                },
+            }
+        except Exception as e:
+            self.logger.error(f"[BindingProof] Error: {e}", exc_info=True)
+            return {
+                "type": "binding_proof_response",
+                "data": {"success": False, "error": str(e)[:200]},
+            }
+
+    # ------------------------------------------------------------------
+    # 本地绑定方法
+    # ------------------------------------------------------------------
+
     async def _handle_bind_request(self, data: dict) -> dict:
         """处理绑定请求：创建会话并启动验证方式"""
         if not hasattr(self, "binding_manager") or not self.binding_manager:

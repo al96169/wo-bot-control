@@ -14,6 +14,7 @@ from pathlib import Path
 
 import yaml
 
+from core.account_client import AccountClient
 from core.binding_manager import BindingManager
 from core.http_api import HttpAPIServer
 from core.mdns_service import MDNSService
@@ -85,6 +86,7 @@ class WoBotControl:
 
         # 绑定认证模块
         self.binding_manager = None
+        self.account_client = None
         self.peripheral_detector = None
         self.tts_engine = None
         self.qr_scanner = None
@@ -230,6 +232,10 @@ class WoBotControl:
         if self.qr_scanner:
             self.message_handler.qr_scanner = self.qr_scanner
 
+        # 注入帐号客户端到消息处理器（处理 binding_proof_request）
+        if self.account_client:
+            self.message_handler.account_client = self.account_client
+
         # 初始化服务进程管理器（负责守护所有子服务）
         self.service_manager = ServiceManager(
             config=self.config,
@@ -334,6 +340,10 @@ class WoBotControl:
 
         # 启动 WebSocket 服务器（内部每秒自动广播状态给订阅客户端）
         await self.ws_server.start()
+
+        # 启动账号服务器客户端（设备注册 + 心跳）
+        if self.account_client:
+            await self.account_client.start()
 
         # 启动 HTTP API 服务器（提供 MJPEG 流、截图等）
         http_port = self.config.get("server", {}).get("http_port", 8000)
@@ -512,6 +522,18 @@ class WoBotControl:
                 methods=binding_config.get("methods"),
             )
             self.logger.info(f"Binding manager initialized (bindings: {len(self.binding_manager.get_bindings())})")
+
+            # 初始化帐号服务器客户端（依赖 binding_manager）
+            self.account_client = AccountClient.from_config(
+                config=self.config,
+                binding_manager=self.binding_manager,
+                device_id=self.config.get("robot", {}).get("id", device_id),
+                logger=self.logger,
+            )
+            if self.account_client:
+                self.logger.info("Account client initialized")
+            else:
+                self.logger.info("Account client disabled (account.enabled=false or not configured)")
         else:
             self.logger.info("Binding disabled in config")
 
@@ -530,6 +552,10 @@ class WoBotControl:
 
         if self.ws_server:
             await self.ws_server.stop()
+
+        # 停止帐号服务器客户端（取消心跳）
+        if self.account_client:
+            await self.account_client.stop()
 
         if self.http_server:
             await self.http_server.stop()
