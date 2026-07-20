@@ -661,6 +661,31 @@ class BindingManager:
         """获取所有绑定列表"""
         return self._bindings.copy()
 
+    def create_binding(self, user_client_id: str, client_name: str) -> str | None:
+        """直接创建绑定（用于帐号验证后自动绑定），返回 clientToken 或 None"""
+        if not user_client_id:
+            return None
+        if not self.can_add_binding():
+            if self._logger:
+                self._logger.warning(f"[Bind] Cannot add binding: max reached")
+            return None
+        client_token = self._generate_client_token(user_client_id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        binding = {
+            "clientId": user_client_id,
+            "clientName": client_name or "帐号绑定设备",
+            "clientToken": client_token,
+            "boundAt": now_iso,
+            "lastSeen": now_iso,
+        }
+        # 替换同 clientId 的旧绑定
+        self._bindings = [b for b in self._bindings if b.get("clientId") != user_client_id]
+        self._bindings.append(binding)
+        self._save_bindings()
+        if self._logger:
+            self._logger.info(f"[Bind] Auto-created binding: {user_client_id}")
+        return client_token
+
     def remove_binding(self, user_client_id: str) -> bool:
         """移除指定客户端的绑定"""
         before = len(self._bindings)

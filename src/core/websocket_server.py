@@ -42,6 +42,7 @@ class WebSocketServer:
         service_manager=None,
         config: dict | None = None,
         logger=None,
+        account_client=None,
     ):
         self.host = host
         self.port = port
@@ -52,6 +53,7 @@ class WebSocketServer:
         self.service_manager = service_manager
         self.config = config or {}
         self.logger = logger
+        self.account_client = account_client
         self._server: websockets.Server | None = None
         self._clients: set[ServerConnection] = set()
         self._ws_clients: dict[str, ServerConnection] = {}  # client_id -> WebSocket 连接
@@ -273,9 +275,10 @@ class WebSocketServer:
         user_client_id = ""
         client_token = ""
         share_code = ""
+        account_token = ""
 
         if binding_enabled and self.binding_manager:
-            # 从 URL query 提取 clientId 和 clientToken
+            # 从 URL query 提取 clientId、clientToken、shareCode、accountToken
             try:
                 from urllib.parse import parse_qs
 
@@ -292,6 +295,7 @@ class WebSocketServer:
                     user_client_id = qs.get("clientId", [""])[0]
                     client_token = qs.get("clientToken", [""])[0]
                     share_code = qs.get("shareCode", [""])[0]
+                    account_token = qs.get("accountToken", [""])[0]
             except Exception:
                 pass
 
@@ -322,6 +326,21 @@ class WebSocketServer:
             else:
                 if self.logger:
                     self.logger.info(f"[{client_id}] No clientId/clientToken, binding required")
+
+            # 帐号 JWT 兜底：本地绑定失败但有 accountToken 时，验证帐号归属
+            if not is_bound and account_token and self.account_client:
+                user_id = await self.account_client.verify_account_token(account_token)
+                if user_id and user_client_id:
+                    # 自动创建本地绑定，后续连接走快速路径
+                    new_token = self.binding_manager.create_binding(user_client_id, "")
+                    if new_token:
+                        is_bound = True
+                        client_token = new_token
+                        if self.logger:
+                            self.logger.info(
+                                f"[{client_id}] Auto-bound via account token: "
+                                f"user={user_id}, client={user_client_id}"
+                            )
 
         self._client_bound[client_id] = is_bound if binding_enabled else True
         self._client_user_ids[client_id] = user_client_id

@@ -42,10 +42,12 @@ class AccountClient:
         binding_manager: BindingManager,
         device_id: str,
         robot_name: str = "",
+        jwt_secret: str = "",
         logger: logging.Logger | None = None,
     ):
         self.server_url = server_url.rstrip("/")
         self.robot_secret = robot_secret
+        self.jwt_secret = jwt_secret
         self.binding_manager = binding_manager
         self.device_id = device_id
         self.robot_name = robot_name
@@ -110,6 +112,7 @@ class AccountClient:
                     "X-Robot-Id": self.device_id,
                     "X-Timestamp": str(timestamp),
                     "X-Signature": signature,
+                    "User-Agent": "wo-bot-control/1.0",
                 },
             ) as resp:
                 if resp.status in (200, 201):
@@ -150,6 +153,7 @@ class AccountClient:
                     "X-Robot-Id": self.device_id,
                     "X-Timestamp": str(timestamp),
                     "X-Signature": signature,
+                    "User-Agent": "wo-bot-control/1.0",
                 },
             ) as resp:
                 if resp.status not in (200, 204):
@@ -224,6 +228,77 @@ class AccountClient:
             hashlib.sha256,
         ).hexdigest()
 
+    async def verify_account_token(self, account_token: str) -> str | None:
+        """验证帐号 JWT 并查询设备归属，返回 userId（如果匹配）
+
+        1. 用 JWT_SECRET 验证 JWT 签名
+        2. 调用 Device API 查询此 robotId 的归属用户
+        3. 若 JWT 中的 userId 与归属用户匹配，返回 userId
+        """
+        try:
+            import jwt as pyjwt
+        except ImportError:
+            self.logger.error("[Account] PyJWT not installed, cannot verify account token")
+            return None
+
+        # 1. 验证 JWT 签名（不验证 issuer/audience，仅验证签名和过期）
+        try:
+            # 先解码获取 alg（防止 alg=none 攻击）
+            unverified_header = pyjwt.get_unverified_header(account_token)
+            if unverified_header.get("alg") == "none":
+                self.logger.warning("[Account] JWT uses alg=none, rejected")
+                return None
+
+            payload = pyjwt.decode(
+                account_token,
+                self.jwt_secret,
+                algorithms=["HS256"],
+                options={"verify_aud": False},
+            )
+            user_id = payload.get("sub")
+            if not user_id:
+                self.logger.warning("[Account] JWT missing sub claim")
+                return None
+        except pyjwt.ExpiredSignatureError:
+            self.logger.info("[Account] JWT expired")
+            return None
+        except pyjwt.InvalidTokenError as e:
+            self.logger.warning(f"[Account] JWT invalid: {e}")
+            return None
+
+        # 2. 查询设备归属
+        assert self._session is not None
+        try:
+            timestamp = int(time.time() * 1000)
+            signature = self._sign(self.device_id, timestamp)
+            async with self._session.get(
+                f"{self.server_url}/api/devices/{self.device_id}/owner",
+                headers={
+                    "X-Robot-Id": self.device_id,
+                    "X-Timestamp": str(timestamp),
+                    "X-Signature": signature,
+                    "User-Agent": "wo-bot-control/1.0",
+                },
+            ) as resp:
+                if resp.status != 200:
+                    self.logger.warning(f"[Account] Owner query failed: {resp.status}")
+                    return None
+                data = await resp.json()
+                owner_user_id = data.get("data", {}).get("userId")
+                if not owner_user_id:
+                    self.logger.info("[Account] Device has no owner")
+                    return None
+                if owner_user_id != user_id:
+                    self.logger.warning(
+                        f"[Account] JWT user {user_id} != device owner {owner_user_id}"
+                    )
+                    return None
+                self.logger.info(f"[Account] Account token verified for user {user_id}")
+                return user_id
+        except aiohttp.ClientError as e:
+            self.logger.error(f"[Account] Owner query error: {e}")
+            return None
+
     @classmethod
     def from_config(
         cls,
@@ -263,11 +338,19 @@ class AccountClient:
 
         robot_name = config.get("robot", {}).get("name", "")
 
+        # 读取 JWT_SECRET（用于验证帐号 JWT）
+        jwt_secret = account_cfg.get("jwt_secret", "")
+        if not jwt_secret:
+            jwt_file = config_dir / ".jwt_secret"
+            if jwt_file.exists():
+                jwt_secret = jwt_file.read_text(encoding="utf-8").strip()
+
         return cls(
             server_url=server_url,
             robot_secret=secret,
             binding_manager=binding_manager,
             device_id=device_id,
             robot_name=robot_name,
+            jwt_secret=jwt_secret,
             logger=logger,
         )

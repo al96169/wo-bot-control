@@ -315,6 +315,7 @@ class WoBotControl:
             service_manager=self.service_manager,
             config=self.config,
             logger=self.logger,
+            account_client=self.account_client,
         )
 
         # 注入绑定管理器和外设检测器到 WebSocket 服务器
