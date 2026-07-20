@@ -153,3 +153,10 @@ software_manager:
 account:
   enabled: false                              # 是否启用帐号服务器集成（部署公共服务后设为 true）
   server_url: "https://account.example.com"   # 帐号服务器地址（部署时替换）（必须HTTPS）
+
+# Signal Server（信令服务器，R00036）
+# 跨网络远程控制：WebRTC 信令中继
+signal:
+  enabled: false                              # 是否启用信令服务器（部署后设为 true）
+  server_url: "wss://signal.example.com/ws"   # 信令服务器地址（部署时替换）
+  # ROBOT_SECRET 从 config/.binding_secret 读取（与 account 共用）

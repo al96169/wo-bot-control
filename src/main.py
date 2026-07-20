@@ -21,6 +21,7 @@ from core.mdns_service import MDNSService
 from core.message_handler import MessageHandler
 from core.peripheral_detector import PeripheralDetector
 from core.service_manager import ServiceManager
+from core.signal_client import SignalClient
 from core.websocket_server import WebSocketServer
 
 # WebRTC 可选导入（兼容 Python 3.6）
@@ -87,6 +88,7 @@ class WoBotControl:
         # 绑定认证模块
         self.binding_manager = None
         self.account_client = None
+        self.signal_client = None
         self.peripheral_detector = None
         self.tts_engine = None
         self.qr_scanner = None
@@ -346,6 +348,10 @@ class WoBotControl:
         if self.account_client:
             await self.account_client.start()
 
+        # 启动信令服务器客户端（跨网络远程控制）
+        if self.signal_client:
+            asyncio.create_task(self.signal_client.start())
+
         # 启动 HTTP API 服务器（提供 MJPEG 流、截图等）
         http_port = self.config.get("server", {}).get("http_port", 8000)
         self.http_server = HttpAPIServer(
@@ -535,6 +541,18 @@ class WoBotControl:
                 self.logger.info("Account client initialized")
             else:
                 self.logger.info("Account client disabled (account.enabled=false or not configured)")
+
+            # 初始化信令服务器客户端（依赖 webrtc_service）
+            self.signal_client = SignalClient.from_config(
+                config=self.config,
+                webrtc_service=self.webrtc_service,
+                device_id=self.config.get("robot", {}).get("id", device_id),
+                logger=self.logger,
+            )
+            if self.signal_client:
+                self.logger.info("Signal client initialized")
+            else:
+                self.logger.info("Signal client disabled (signal.enabled=false or not configured)")
         else:
             self.logger.info("Binding disabled in config")
 
@@ -557,6 +575,10 @@ class WoBotControl:
         # 停止帐号服务器客户端（取消心跳）
         if self.account_client:
             await self.account_client.stop()
+
+        # 停止信令服务器客户端
+        if self.signal_client:
+            await self.signal_client.stop()
 
         if self.http_server:
             await self.http_server.stop()
