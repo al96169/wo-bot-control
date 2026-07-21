@@ -63,9 +63,11 @@ def _resolve_server_ip(config: dict) -> str:
 class CameraVideoTrack(VideoStreamTrack):
     """从 CameraManager 读取帧并转换为 WebRTC 视频轨
 
-    Jetson Nano VP8 软编码压力大时会落后于实时时钟，导致延迟递增。
-    这里用 wall-clock 时间做帧丢弃：如果编码落后超过 1 帧间隔，
-    丢弃中间帧只保留最新一帧，保持低延迟。
+    aiortc 的 next_timestamp() 内置 30fps pacing（VIDEO_PTIME=1/30），
+    每次 recv() 调用会自动 sleep 到下一帧时刻。
+    摄像头以 10fps 采样时，30fps pacing 会自然产生重复帧，不影响播放流畅度。
+    不再使用自实现的丢帧逻辑——那会与 aiortc 内部时钟冲突，
+    导致 RTP 时间戳超前于真实时间，浏览器无限等待"未来帧" → 画面冻结。
     """
 
     kind = "video"
@@ -78,26 +80,10 @@ class CameraVideoTrack(VideoStreamTrack):
         self.logger = logger
         self.client_id = client_id
         self._frame_count = 0
-        self._dropped_count = 0
-        self._last_sent_time = 0.0  # wall-clock time of last encoded frame
 
     async def recv(self):
-        frame_interval = 1.0 / self.fps
-        now = time.time()
-
-        # 丢弃落后帧：如果距上次编码已超过 2 倍帧间隔，只保留最新帧
-        if self._last_sent_time > 0 and now - self._last_sent_time > frame_interval * 2:
-            # 跳过落后帧的时间戳，只保留最后一个
-            skip_count = int((now - self._last_sent_time) / frame_interval) - 1
-            for _ in range(skip_count):
-                await self.next_timestamp()
-            self._dropped_count += skip_count - 1 if skip_count > 1 else 0
-            # 取最新帧
-            pts, time_base = await self.next_timestamp()
-        else:
-            pts, time_base = await self.next_timestamp()
-
-        self._last_sent_time = now
+        # aiortc 内置 30fps pacing：next_timestamp() 会 sleep 到下一帧时刻
+        pts, time_base = await self.next_timestamp()
 
         frame = self.camera_manager.get_frame(self.camera_id)
         if frame is None:
@@ -115,11 +101,10 @@ class CameraVideoTrack(VideoStreamTrack):
                     f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
                     f"first frame shape={frame.shape}, mean=({frame.mean():.0f})"
                 )
-            elif self._frame_count % 30 == 0 and self.logger:
-                dropped_info = f", dropped={self._dropped_count}" if self._dropped_count else ""
+            elif self._frame_count % 300 == 0 and self.logger:
                 self.logger.debug(
                     f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
-                    f"frame #{self._frame_count} shape={frame.shape}, ok{dropped_info}"
+                    f"frame #{self._frame_count} shape={frame.shape}, ok"
                 )
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -222,8 +207,7 @@ class WebRTCService:
             import copy as _copy
 
             from aiortc import rtp as _rtp
-            from aiortc.codecs import MEDIA_CODECS
-            from aiortc.rtcpeerconnection import HEADER_EXTENSIONS
+            from aiortc.rtcpeerconnection import HEADER_EXTENSIONS, MEDIA_CODECS
 
             dynamic_pt = _rtp.DYNAMIC_PAYLOAD_TYPES.start
             for t in pc._RTCPeerConnection__transceivers:

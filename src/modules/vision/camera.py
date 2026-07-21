@@ -613,7 +613,9 @@ class CameraStream:
 
         while self.running and self.cap:
             try:
-                ret, frame = self.cap.read()
+                # cap.read() 是阻塞 I/O，放到线程池避免冻结 event loop
+                loop = asyncio.get_event_loop()
+                ret, frame = await loop.run_in_executor(None, self.cap.read)
                 if ret and frame is not None and frame.size > 0:
                     if is_yuyv and len(frame.shape) == 2 and frame.shape[1] == w * 2:
                         frame = yuyv_to_bgr(frame, w, h)
