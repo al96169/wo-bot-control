@@ -4,6 +4,7 @@ HTTP API 服务器
 """
 
 import asyncio
+import os
 
 try:
     import cv2
@@ -15,7 +16,7 @@ except ImportError:
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 
 
@@ -48,6 +49,8 @@ class HttpAPIServer:
         self.app.get("/api/camera/{camera_id}/stream")(self.get_stream)
         self.app.post("/api/software/install")(self.install_software)
         self.app.get("/api/modules")(self.get_modules)
+        # R00034: 媒体文件下载
+        self.app.get("/api/media/{file_name}")(self.download_media)
         # Health check
         self.app.get("/api/health")(lambda: {"status": "ok"})
 
@@ -100,6 +103,19 @@ class HttpAPIServer:
             result = await self.message_handler._handle_module_list({})
             return JSONResponse(result.get("data", {}))
         return JSONResponse({"modules": []})
+
+    async def download_media(self, file_name: str):
+        """GET /api/media/{file_name} - 下载媒体文件（R00034）"""
+        media_mgr = getattr(self.message_handler, "media_manager", None)
+        if not media_mgr:
+            raise HTTPException(status_code=503, detail="Media manager not available")
+        file_path = media_mgr.get_media_path(file_name)
+        if not file_path or not os.path.isfile(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        # 根据扩展名设置 Content-Type
+        ext = os.path.splitext(file_name)[1].lower()
+        media_type = "video/mp4" if ext == ".mp4" else "image/jpeg"
+        return FileResponse(file_path, media_type=media_type, filename=file_name)
 
     async def start(self):
         config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")

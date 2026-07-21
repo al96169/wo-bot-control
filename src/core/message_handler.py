@@ -114,6 +114,9 @@ class MessageHandler:
             and self._is_feature_enabled("voice_broadcast")
         ):
             features.append("voice_broadcast")
+        # R00034: 拍照/录像功能（MediaManager 存在 + feature 未禁用）
+        if self._get_media_manager() and self._is_feature_enabled("camera_capture"):
+            features.append("camera_capture")
         status_data["features"] = features
         return {"type": "status", "data": status_data}
 
@@ -351,6 +354,106 @@ class MessageHandler:
             status = await self.camera_manager.get_status()
             return {"type": "camera_status", "data": status}
         return {"type": "camera_status", "data": {"cameras": []}}
+
+    # ===== R00034: 拍照 / 录像 / 图库管理 =====
+
+    def _get_media_manager(self):
+        """获取 MediaManager 实例"""
+        return getattr(self, "media_manager", None)
+
+    async def _handle_camera_capture(self, data: dict) -> dict:
+        """拍照：camera_capture 消息处理"""
+        if not self._is_feature_enabled("camera_capture"):
+            return self._feature_disabled_response("camera_capture")
+        mm = self._get_media_manager()
+        if not mm:
+            return {"type": "error", "data": {"code": 503, "message": "Media manager not available"}}
+        camera_ids = data.get("camera_ids")
+        result = await mm.capture(camera_ids)
+        return {"type": "camera_capture_result", "data": result}
+
+    async def _handle_camera_record_start(self, data: dict) -> dict:
+        """开始录像：camera_record_start 消息处理"""
+        if not self._is_feature_enabled("camera_capture"):
+            return self._feature_disabled_response("camera_capture")
+        mm = self._get_media_manager()
+        if not mm:
+            return {"type": "error", "data": {"code": 503, "message": "Media manager not available"}}
+        camera_id = int(data.get("camera_id", 0))
+        quality = data.get("quality", "medium")
+        resolution = data.get("resolution", "720p")
+        segment_duration_s = int(data.get("segment_duration_s", 300))
+        result = await mm.start_recording(camera_id, quality, resolution, segment_duration_s)
+        return {"type": "camera_record_result", "data": result}
+
+    async def _handle_camera_record_stop(self, data: dict) -> dict:
+        """停止录像：camera_record_stop 消息处理"""
+        if not self._is_feature_enabled("camera_capture"):
+            return self._feature_disabled_response("camera_capture")
+        mm = self._get_media_manager()
+        if not mm:
+            return {"type": "error", "data": {"code": 503, "message": "Media manager not available"}}
+        result = await mm.stop_recording()
+        return {"type": "camera_record_result", "data": result}
+
+    async def _handle_camera_media_list(self, data: dict) -> dict:
+        """图库列表：camera_media_list 消息处理"""
+        mm = self._get_media_manager()
+        if not mm:
+            return {"type": "error", "data": {"code": 503, "message": "Media manager not available"}}
+        media_type = data.get("type", "all")
+        camera_id = data.get("camera_id")
+        page = int(data.get("page", 1))
+        page_size = int(data.get("page_size", 20))
+        result = await mm.list_media(media_type, camera_id, page, page_size)
+        return {"type": "camera_media_list_result", "data": result}
+
+    async def _handle_camera_media_delete(self, data: dict) -> dict:
+        """删除媒体文件：camera_media_delete 消息处理"""
+        mm = self._get_media_manager()
+        if not mm:
+            return {"type": "error", "data": {"code": 503, "message": "Media manager not available"}}
+        file_names = data.get("file_names", [])
+        result = await mm.delete_media(file_names)
+        return {"type": "camera_media_delete_result", "data": result}
+
+    async def _handle_camera_media_download(self, data: dict) -> dict:
+        """请求下载文件：camera_media_download 消息处理
+        小文件通过 WebSocket 二进制帧返回，大文件提示客户端通过 HTTP API 下载
+        """
+        mm = self._get_media_manager()
+        if not mm:
+            return {"type": "error", "data": {"code": 503, "message": "Media manager not available"}}
+        file_name = data.get("file_name", "")
+        media_path = mm.get_media_path(file_name)
+        if not media_path:
+            return {"type": "error", "data": {"code": 404, "message": "File not found"}}
+        file_size = os.path.getsize(media_path)
+        # 小文件（<10MB）通过 WebSocket 二进制帧传输
+        if file_size < 10 * 1024 * 1024:
+            import base64
+            with open(media_path, "rb") as f:
+                file_data = f.read()
+            thumbnail = mm.get_thumbnail(file_name)
+            return {
+                "type": "camera_media_download_data",
+                "data": {
+                    "file_name": file_name,
+                    "size_bytes": file_size,
+                    "file_base64": base64.b64encode(file_data).decode("ascii"),
+                    "thumbnail_base64": thumbnail,
+                },
+            }
+        # 大文件提示通过 HTTP API 下载
+        return {
+            "type": "camera_media_download_data",
+            "data": {
+                "file_name": file_name,
+                "size_bytes": file_size,
+                "download_url": f"/api/media/{file_name}",
+                "message": "File too large for WebSocket, use HTTP API",
+            },
+        }
 
     async def _handle_system(self, data: dict) -> dict:
         """处理系统操作"""

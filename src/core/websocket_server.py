@@ -382,6 +382,10 @@ class WebSocketServer:
         voice_ctrl = getattr(self.message_handler, "voice_broadcast_controller", None)
         if voice_ctrl and _feat_enabled("voice_broadcast"):
             features.append("voice_broadcast")
+        # R00034: 拍照/录像功能
+        media_mgr = getattr(self.message_handler, "media_manager", None)
+        if media_mgr and _feat_enabled("camera_capture"):
+            features.append("camera_capture")
 
         try:
             # 发送握手消息（设备发现兼容）

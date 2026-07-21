@@ -4,6 +4,7 @@ wo-bot-control 主入口
 """
 
 import asyncio
+import os
 import platform
 import re
 import signal
@@ -83,6 +84,7 @@ class WoBotControl:
         self.dance_controller = None
         self.voice_broadcast_controller = None
         self.find_device_controller = None
+        self.media_manager = None
         self.power_policy = None
 
         # 绑定认证模块
@@ -287,6 +289,25 @@ class WoBotControl:
             self.service_manager.register_in_process_service("voice_broadcast", self.voice_broadcast_controller)
         if self.find_device_controller:
             self.find_device_controller._service_manager = self.service_manager
+        # R00034: 注入 MediaManager 到 message_handler 并注册到 service_manager
+        if self.media_manager:
+            self.message_handler.media_manager = self.media_manager
+            self.service_manager.register_in_process_service("media_manager", self.media_manager)
+            # 设置录制状态推送回调
+            async def _on_recording_status(status_data):
+                if self.ws_server:
+                    await self.ws_server.broadcast_message({
+                        "type": "camera_record_status",
+                        "data": status_data,
+                    })
+            async def _on_recording_ui_state(ui_state):
+                if self.ws_server:
+                    await self.ws_server.broadcast_message({
+                        "type": "camera_recording_ui_state",
+                        "data": ui_state,
+                    })
+            self.media_manager.recording_status_callback = _on_recording_status
+            self.media_manager.recording_ui_state_callback = _on_recording_ui_state
 
         # 启动所有子服务
         await self.service_manager.start_all()
@@ -473,6 +494,28 @@ class WoBotControl:
             self.find_device_controller = None
             self.logger.warning(f"Find device controller init failed: {e}")
 
+        # ---- 媒体管理器（拍照/录像/图库，R00034）----
+        try:
+            from modules.vision.media_manager import MediaManager
+
+            media_config = self.config.get("media", {})
+            storage_dir = media_config.get(
+                "storage_dir",
+                os.path.expanduser("~/wo-bot-data/media"),
+            )
+            robot_name = self.config.get("robot", {}).get("name", "wo-bot")
+            self.media_manager = MediaManager(
+                storage_dir=storage_dir,
+                robot_name=robot_name,
+                camera_manager=self.camera_manager,
+                logger=self.logger,
+            )
+            await self.media_manager.start()
+            self.logger.info(f"Media manager initialized (storage: {storage_dir})")
+        except Exception as e:
+            self.media_manager = None
+            self.logger.warning(f"Media manager init failed: {e}")
+
         # ---- 绑定认证模块 ----
         binding_config = self.config.get("binding", {})
         if binding_config.get("enabled", False):
@@ -604,6 +647,10 @@ class WoBotControl:
 
         if self.find_device_controller:
             await self.find_device_controller.stop()
+
+        # R00034: 停止媒体管理器（含录制循环清理）
+        if self.media_manager:
+            await self.media_manager.stop()
 
         self.logger.info("wo-bot-control stopped")
 
