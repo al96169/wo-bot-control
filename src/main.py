@@ -305,6 +305,10 @@ class WoBotControl:
             self.webrtc_service = None
             self.logger.warning("WebRTC service disabled (aiortc not available)")
 
+        # 注入 WebRTC 服务到 signal_client（延迟注入，因 WebRTC 在 _init_modules 之后初始化）
+        if self.signal_client and self.webrtc_service:
+            self.signal_client.set_webrtc_service(self.webrtc_service)
+
         # 启动 WebSocket 信令服务器
         server_config = self.config.get("server", {})
         self.ws_server = WebSocketServer(

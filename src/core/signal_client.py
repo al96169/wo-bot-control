@@ -45,6 +45,11 @@ class SignalClient:
         self._reconnect_count = 0
         self._current_client_id = None  # Track the client being served
 
+    def set_webrtc_service(self, webrtc_service):
+        """延迟注入 WebRTC 服务（在 main.py 中 WebRTC 初始化后调用）"""
+        self.webrtc_service = webrtc_service
+        self.logger.info("[Signal] WebRTC service injected")
+
     @classmethod
     def from_config(
         cls,
@@ -209,14 +214,20 @@ class SignalClient:
             return
 
         client_id = msg.get("clientId", "signal-client")
-        sdp_offer = msg.get("sdp", "")
+        sdp_data = msg.get("sdp", "")
+
+        # 浏览器发送的 SDP 可能是对象 {type, sdp} 或纯字符串
+        if isinstance(sdp_data, dict):
+            sdp_offer = sdp_data.get("sdp", "")
+        else:
+            sdp_offer = sdp_data
 
         if not sdp_offer:
             self.logger.warning("[Signal] Call message missing SDP")
             return
 
         self._current_client_id = client_id
-        self.logger.info(f"[Signal] Call from client={client_id}")
+        self.logger.info(f"[Signal] Call from client={client_id}, SDP length={len(sdp_offer)}")
 
         try:
             # Create send callback for ICE candidates
