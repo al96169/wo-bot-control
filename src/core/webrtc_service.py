@@ -636,6 +636,23 @@ class WebRTCService:
 
             dc.send(json.dumps(data) if isinstance(data, dict) else data)
 
+    async def broadcast_message(self, data):
+        """向所有 DataChannel 客户端广播消息"""
+        import json
+
+        payload = json.dumps(data) if isinstance(data, dict) else data
+        dead = []
+        for client_id, dc in list(self._data_channels.items()):
+            try:
+                if dc and dc.readyState == "open":
+                    dc.send(payload)
+                else:
+                    dead.append(client_id)
+            except Exception:
+                dead.append(client_id)
+        for cid in dead:
+            self._data_channels.pop(cid, None)
+
     def get_connection_count(self) -> int:
         return len(self._connections)
 
