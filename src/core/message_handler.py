@@ -396,6 +396,28 @@ class MessageHandler:
         result = await mm.stop_recording()
         return {"type": "camera_record_result", "data": result}
 
+    async def _handle_camera_record_query(self, data: dict) -> dict:
+        """查询当前录制状态：camera_record_query"""
+        mm = self._get_media_manager()
+        if not mm:
+            return {"type": "camera_record_status", "data": {"is_recording": False}}
+        is_recording = getattr(mm, "_recording", False)
+        camera_id = getattr(mm, "_recording_camera_id", None)
+        start_time = getattr(mm, "_recording_start_time", None)
+        elapsed_s = int(time.time() - start_time) if (is_recording and start_time) else 0
+        total_bytes = getattr(mm, "_total_recorded_bytes", 0)
+        segment_count = len(getattr(mm, "_segment_files", []))
+        return {
+            "type": "camera_record_status",
+            "data": {
+                "is_recording": is_recording,
+                "camera_id": camera_id,
+                "elapsed_s": elapsed_s,
+                "file_size_bytes": total_bytes,
+                "segment_count": segment_count,
+            },
+        }
+
     async def _handle_camera_media_list(self, data: dict) -> dict:
         """图库列表：camera_media_list 消息处理"""
         mm = self._get_media_manager()
