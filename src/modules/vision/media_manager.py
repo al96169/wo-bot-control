@@ -540,6 +540,7 @@ class MediaManager:
 
         return {
             "success": True,
+            "is_recording": True,
             "camera_id": camera_id,
             "message": "Recording started",
         }
@@ -845,6 +846,7 @@ class MediaManager:
             last_segment = self._segment_files[-1]
             result: Dict[str, Any] = {
                 "success": True,
+                "is_recording": False,
                 "file_name": last_segment["file_name"],
                 "file_path": last_segment["file_path"],
                 "duration_s": total_duration,
@@ -857,6 +859,7 @@ class MediaManager:
         else:
             result = {
                 "success": True,
+                "is_recording": False,
                 "file_name": "",
                 "file_path": "",
                 "duration_s": total_duration,
