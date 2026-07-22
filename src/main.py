@@ -308,6 +308,14 @@ class WoBotControl:
                     await self.webrtc_service.broadcast_message(msg)
             self.media_manager.recording_status_callback = _on_recording_status
             self.media_manager.recording_ui_state_callback = _on_recording_ui_state
+            # 客户端在线检查：WebSocket 或 DataChannel 有任一连接则算在线
+            def _check_client_online():
+                ws_online = bool(self.ws_server and self.ws_server._ws_clients)
+                dc_online = bool(
+                    self.webrtc_service and self.webrtc_service._data_channels
+                )
+                return ws_online or dc_online
+            self.media_manager.client_online_check = _check_client_online
 
         # 启动所有子服务
         await self.service_manager.start_all()

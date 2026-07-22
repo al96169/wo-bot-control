@@ -47,11 +47,16 @@ THUMBNAIL_WIDTH = 320
 THUMBNAIL_HEIGHT = 240
 
 # 录制参数
-MAX_RECORDING_DURATION_S = 30 * 60       # 最大录制时长 30 分钟
+MAX_RECORDING_DURATION_S = 10 * 60      # 最大录制时长 10 分钟（10 段 × 1 分钟）
 MIN_DISK_SPACE_BYTES = 500 * 1024 * 1024  # 最小剩余空间 500 MB
 STATUS_PUSH_INTERVAL_S = 5               # 状态推送间隔 5 秒
 JPEG_QUALITY = 85                        # 拍照 JPEG 质量
 THUMBNAIL_JPEG_QUALITY = 80              # 缩略图 JPEG 质量
+
+# 循环录制参数
+DEFAULT_SEGMENT_DURATION_S = 60          # 默认单段时长 1 分钟
+MAX_SEGMENTS = 10                        # 最大保留段数（兜底防溢出）
+CLIENT_CHECK_INTERVAL_S = 5              # 客户端在线检查间隔
 
 
 # ===== 模块级工具函数 =====
@@ -229,6 +234,9 @@ class MediaManager:
         # 签名: async def callback(message: dict) -> None  或  def callback(message: dict) -> None
         self.recording_status_callback: Optional[Callable] = None
         self.recording_ui_state_callback: Optional[Callable] = None
+        # 客户端在线检查回调：返回 True 表示至少有一个客户端在线
+        # 签名: def callback() -> bool
+        self.client_online_check: Optional[Callable[[], bool]] = None
 
     # ----------------------------------------------------------------
     # 生命周期
@@ -408,18 +416,19 @@ class MediaManager:
         camera_id: int,
         quality: str = "medium",
         resolution: str = "720p",
-        segment_duration_s: int = 300,
+        segment_duration_s: int = DEFAULT_SEGMENT_DURATION_S,
     ) -> Dict[str, Any]:
-        """开始录像（仅主摄）
+        """开始循环录像（仅主摄）
 
-        使用 cv2.VideoWriter 录制 H.264 MP4 视频，录制循环在后台 asyncio task 中运行。
-        支持分段录制、定时状态推送、最大时长限制和磁盘空间检查。
+        使用 cv2.VideoWriter 录制 MP4 视频，循环录制在后台 asyncio task 中运行。
+        每段 1 分钟，最多保留 10 段（超出自动删除最旧段）。
+        前端在线则继续录制，前端掉线则自动停止录制。
 
         Args:
             camera_id: 摄像头 ID（仅主摄）
             quality: 画质 high/medium/low
             resolution: 分辨率 480p/720p/1080p
-            segment_duration_s: 单段时长（秒），默认 300（5 分钟）
+            segment_duration_s: 单段时长（秒），默认 60（1 分钟）
 
         Returns:
             成功: {"success": True, "camera_id": ..., "message": ...}
@@ -536,19 +545,38 @@ class MediaManager:
         }
 
     async def _recording_loop(self) -> None:
-        """录制循环 —— 在后台 asyncio task 中运行
+        """循环录制 —— 在后台 asyncio task 中运行
 
         每帧从 camera_manager.get_frame() 获取帧并写入 VideoWriter。
-        定时（每 5 秒）推送录制状态，分段录制时自动切新文件。
+        定时（每 5 秒）推送录制状态。
+        每段满 1 分钟后自动切新文件，超过 10 段时删除最旧段。
+        每 5 秒检查客户端在线状态，掉线则自动停止。
         """
         width, height = RESOLUTION_MAP.get(self._recording_resolution, (1280, 720))
         frame_interval = 1.0 / self._recording_fps
         last_status_push = time.time()
+        last_client_check = time.time()
 
         try:
             while self._recording and self.running and self._current_writer is not None:
-                # 检查最大录制时长（30 分钟）
-                elapsed = time.time() - self._recording_start_time
+                # 检查客户端在线状态（每 5 秒）
+                now = time.time()
+                if now - last_client_check >= CLIENT_CHECK_INTERVAL_S:
+                    last_client_check = now
+                    if self.client_online_check is not None:
+                        try:
+                            online = self.client_online_check()
+                        except Exception:
+                            online = True  # 检查失败时不停止
+                        if not online:
+                            if self.logger:
+                                self.logger.info(
+                                    "Recording auto-stopped: client offline"
+                                )
+                            break
+
+                # 检查最大录制时长（兜底：10 分钟）
+                elapsed = now - self._recording_start_time
                 if elapsed >= MAX_RECORDING_DURATION_S:
                     if self.logger:
                         self.logger.info(
@@ -568,7 +596,7 @@ class MediaManager:
                     break
 
                 # 检查分段时长
-                segment_elapsed = time.time() - self._recording_segment_start
+                segment_elapsed = now - self._recording_segment_start
                 if segment_elapsed >= self._segment_duration_s:
                     await self._rotate_segment()
                     last_status_push = time.time()
@@ -658,6 +686,53 @@ class MediaManager:
         else:
             if self.logger:
                 self.logger.info("Rotated to new segment: %s" % temp_name)
+
+        # 循环录制兜底：超过 MAX_SEGMENTS 段时删除最旧段
+        await self._cleanup_old_segments()
+
+    async def _cleanup_old_segments(self) -> None:
+        """循环录制兜底：超过 MAX_SEGMENTS 段时删除最旧段文件
+
+        扫描 videos_dir 中的 .mp4 文件，按修改时间排序，
+        删除超出 MAX_SEGMENTS 数量的最旧文件。
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            files = await loop.run_in_executor(None, self._scan_video_files)
+            if len(files) <= MAX_SEGMENTS:
+                return
+            # 按修改时间排序，删除最旧的
+            files.sort(key=lambda f: f[1])  # f[1] = mtime
+            to_delete = files[: len(files) - MAX_SEGMENTS]
+            for file_path, _mtime in to_delete:
+                try:
+                    await loop.run_in_executor(None, os.remove, file_path)
+                    if self.logger:
+                        self.logger.info(
+                            "Cleaned up old segment: %s"
+                            % os.path.basename(file_path)
+                        )
+                except OSError as e:
+                    if self.logger:
+                        self.logger.warning("Failed to delete old segment: %s" % e)
+        except Exception as e:
+            if self.logger:
+                self.logger.error("Cleanup old segments error: %s" % e)
+
+    def _scan_video_files(self) -> List[tuple]:
+        """扫描 videos_dir 中的 .mp4 文件，返回 [(path, mtime), ...]"""
+        result = []
+        if not os.path.isdir(self.videos_dir):
+            return result
+        for name in os.listdir(self.videos_dir):
+            if name.endswith(".mp4"):
+                full_path = os.path.join(self.videos_dir, name)
+                try:
+                    mtime = os.path.getmtime(full_path)
+                    result.append((full_path, mtime))
+                except OSError:
+                    pass
+        return result
 
     async def _finalize_segment_file(self, duration_s: int) -> None:
         """完成分段文件：重命名加上时长并记录元数据
