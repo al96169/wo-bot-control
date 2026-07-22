@@ -575,6 +575,15 @@ class MediaManager:
                                 )
                             break
 
+                # 检查最大段数（单次录制最多 10 段）
+                if len(self._segment_files) >= MAX_SEGMENTS:
+                    if self.logger:
+                        self.logger.info(
+                            "Recording auto-stopped: max segments (%d) reached"
+                            % MAX_SEGMENTS
+                        )
+                    break
+
                 # 检查最大录制时长（兜底：10 分钟）
                 elapsed = now - self._recording_start_time
                 if elapsed >= MAX_RECORDING_DURATION_S:
@@ -686,53 +695,6 @@ class MediaManager:
         else:
             if self.logger:
                 self.logger.info("Rotated to new segment: %s" % temp_name)
-
-        # 循环录制兜底：超过 MAX_SEGMENTS 段时删除最旧段
-        await self._cleanup_old_segments()
-
-    async def _cleanup_old_segments(self) -> None:
-        """循环录制兜底：超过 MAX_SEGMENTS 段时删除最旧段文件
-
-        扫描 videos_dir 中的 .mp4 文件，按修改时间排序，
-        删除超出 MAX_SEGMENTS 数量的最旧文件。
-        """
-        try:
-            loop = asyncio.get_event_loop()
-            files = await loop.run_in_executor(None, self._scan_video_files)
-            if len(files) <= MAX_SEGMENTS:
-                return
-            # 按修改时间排序，删除最旧的
-            files.sort(key=lambda f: f[1])  # f[1] = mtime
-            to_delete = files[: len(files) - MAX_SEGMENTS]
-            for file_path, _mtime in to_delete:
-                try:
-                    await loop.run_in_executor(None, os.remove, file_path)
-                    if self.logger:
-                        self.logger.info(
-                            "Cleaned up old segment: %s"
-                            % os.path.basename(file_path)
-                        )
-                except OSError as e:
-                    if self.logger:
-                        self.logger.warning("Failed to delete old segment: %s" % e)
-        except Exception as e:
-            if self.logger:
-                self.logger.error("Cleanup old segments error: %s" % e)
-
-    def _scan_video_files(self) -> List[tuple]:
-        """扫描 videos_dir 中的 .mp4 文件，返回 [(path, mtime), ...]"""
-        result = []
-        if not os.path.isdir(self.videos_dir):
-            return result
-        for name in os.listdir(self.videos_dir):
-            if name.endswith(".mp4"):
-                full_path = os.path.join(self.videos_dir, name)
-                try:
-                    mtime = os.path.getmtime(full_path)
-                    result.append((full_path, mtime))
-                except OSError:
-                    pass
-        return result
 
     async def _finalize_segment_file(self, duration_s: int) -> None:
         """完成分段文件：重命名加上时长并记录元数据
