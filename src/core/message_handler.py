@@ -441,7 +441,7 @@ class MessageHandler:
 
     async def _handle_camera_media_download(self, data: dict) -> dict:
         """请求下载文件：camera_media_download 消息处理
-        小文件通过 WebSocket 二进制帧返回，大文件提示客户端通过 HTTP API 下载
+        统一通过 base64 传输（不依赖 HTTP API，兼容直连和信令模式）
         """
         mm = self._get_media_manager()
         if not mm:
@@ -451,29 +451,27 @@ class MessageHandler:
         if not media_path:
             return {"type": "error", "data": {"code": 404, "message": "File not found"}}
         file_size = os.path.getsize(media_path)
-        # 小文件（<10MB）通过 WebSocket 二进制帧传输
-        if file_size < 10 * 1024 * 1024:
-            import base64
-            with open(media_path, "rb") as f:
-                file_data = f.read()
-            thumbnail = mm.get_thumbnail(file_name)
+        # 统一通过 base64 传输（限制 50MB 避免内存溢出）
+        if file_size > 50 * 1024 * 1024:
             return {
                 "type": "camera_media_download_data",
                 "data": {
                     "file_name": file_name,
                     "size_bytes": file_size,
-                    "file_base64": base64.b64encode(file_data).decode("ascii"),
-                    "thumbnail_base64": thumbnail,
+                    "error": "File too large (>50MB), please delete and re-record",
                 },
             }
-        # 大文件提示通过 HTTP API 下载
+        import base64
+        with open(media_path, "rb") as f:
+            file_data = f.read()
+        thumbnail = mm.get_thumbnail(file_name)
         return {
             "type": "camera_media_download_data",
             "data": {
                 "file_name": file_name,
                 "size_bytes": file_size,
-                "download_url": f"/api/media/{file_name}",
-                "message": "File too large for WebSocket, use HTTP API",
+                "file_base64": base64.b64encode(file_data).decode("ascii"),
+                "thumbnail_base64": thumbnail,
             },
         }
 
