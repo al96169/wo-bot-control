@@ -441,7 +441,8 @@ class MessageHandler:
 
     async def _handle_camera_media_download(self, data: dict) -> dict:
         """请求下载文件：camera_media_download 消息处理
-        统一通过 base64 传输（不依赖 HTTP API，兼容直连和信令模式）
+        分块传输：将文件分成 64KB 的块，通过 DC 逐块发送。
+        前端收到所有块后组装成 blob。
         """
         mm = self._get_media_manager()
         if not mm:
@@ -451,27 +452,88 @@ class MessageHandler:
         if not media_path:
             return {"type": "error", "data": {"code": 404, "message": "File not found"}}
         file_size = os.path.getsize(media_path)
-        # 统一通过 base64 传输（限制 50MB 避免内存溢出）
-        if file_size > 50 * 1024 * 1024:
+        thumbnail = mm.get_thumbnail(file_name)
+
+        # 限制 100MB
+        if file_size > 100 * 1024 * 1024:
             return {
                 "type": "camera_media_download_data",
                 "data": {
                     "file_name": file_name,
                     "size_bytes": file_size,
-                    "error": "File too large (>50MB), please delete and re-record",
+                    "error": "File too large (>100MB)",
                 },
             }
+
         import base64
-        with open(media_path, "rb") as f:
-            file_data = f.read()
-        thumbnail = mm.get_thumbnail(file_name)
+
+        CHUNK_SIZE = 48 * 1024  # 48KB raw → ~64KB base64（DC 消息安全大小）
+        total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+
+        # 如果有 DC 上下文（通过 WebRTC DataChannel），分块发送
+        dc_client_id = getattr(self, "_dc_client_id", None)
+        webrtc_svc = getattr(self, "_webrtc_service", None)
+        if dc_client_id and webrtc_svc:
+            # 发送开始消息
+            await webrtc_svc.send_message(dc_client_id, {
+                "type": "camera_media_download_start",
+                "data": {
+                    "file_name": file_name,
+                    "size_bytes": file_size,
+                    "total_chunks": total_chunks,
+                    "thumbnail_base64": thumbnail,
+                },
+            })
+            # 逐块读取并发送
+            with open(media_path, "rb") as f:
+                chunk_index = 0
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    chunk_b64 = base64.b64encode(chunk).decode("ascii")
+                    await webrtc_svc.send_message(dc_client_id, {
+                        "type": "camera_media_download_chunk",
+                        "data": {
+                            "file_name": file_name,
+                            "chunk_index": chunk_index,
+                            "total_chunks": total_chunks,
+                            "data": chunk_b64,
+                        },
+                    })
+                    chunk_index += 1
+            # 发送完成消息
+            await webrtc_svc.send_message(dc_client_id, {
+                "type": "camera_media_download_end",
+                "data": {
+                    "file_name": file_name,
+                    "size_bytes": file_size,
+                    "total_chunks": total_chunks,
+                },
+            })
+            # 返回 None（不通过 send_message 再发一次）
+            return {"type": "camera_media_download_done", "data": {"file_name": file_name}}
+
+        # 无 DC 上下文（通过 WebSocket），回退到单次 base64（小文件）
+        if file_size <= 2 * 1024 * 1024:
+            with open(media_path, "rb") as f:
+                file_data = f.read()
+            return {
+                "type": "camera_media_download_data",
+                "data": {
+                    "file_name": file_name,
+                    "size_bytes": file_size,
+                    "file_base64": base64.b64encode(file_data).decode("ascii"),
+                    "thumbnail_base64": thumbnail,
+                },
+            }
+        # 大文件无法通过 WS 分块，返回错误
         return {
             "type": "camera_media_download_data",
             "data": {
                 "file_name": file_name,
                 "size_bytes": file_size,
-                "file_base64": base64.b64encode(file_data).decode("ascii"),
-                "thumbnail_base64": thumbnail,
+                "error": "File too large for WebSocket transfer, use DataChannel",
             },
         }
 

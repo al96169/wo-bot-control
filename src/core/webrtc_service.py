@@ -539,7 +539,13 @@ class WebRTCService:
         if self.message_handler:
             msg_type = data.get("type", "raw")
             msg_data = data.get("data", {})
+            # 设置当前 DC 上下文，供 message_handler 分块发送
+            self.message_handler._dc_client_id = client_id
+            self.message_handler._webrtc_service = self
             result = await self.message_handler.handle(msg_type, msg_data)
+            # 清理上下文
+            self.message_handler._dc_client_id = None
+            self.message_handler._webrtc_service = None
             # 将响应通过 DataChannel 发回客户端
             if result and isinstance(result, dict):
                 await self.send_message(client_id, result)
