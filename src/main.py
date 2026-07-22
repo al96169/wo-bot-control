@@ -294,18 +294,13 @@ class WoBotControl:
             self.message_handler.media_manager = self.media_manager
             self.service_manager.register_in_process_service("media_manager", self.media_manager)
             # 设置录制状态推送回调（仅通过 DataChannel 广播，避免 WS+DC 双通道冲突）
+            # status_data / ui_state 已是完整消息 {type, data}，直接传给 broadcast_message
             async def _on_recording_status(status_data):
                 if self.webrtc_service:
-                    await self.webrtc_service.broadcast_message({
-                        "type": "camera_record_status",
-                        "data": status_data,
-                    })
+                    await self.webrtc_service.broadcast_message(status_data)
             async def _on_recording_ui_state(ui_state):
                 if self.webrtc_service:
-                    await self.webrtc_service.broadcast_message({
-                        "type": "camera_recording_ui_state",
-                        "data": ui_state,
-                    })
+                    await self.webrtc_service.broadcast_message(ui_state)
             self.media_manager.recording_status_callback = _on_recording_status
             self.media_manager.recording_ui_state_callback = _on_recording_ui_state
             # 客户端在线检查：WebSocket 或 DataChannel 有任一连接则算在线
