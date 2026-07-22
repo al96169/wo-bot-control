@@ -214,6 +214,7 @@ class MediaManager:
 
         # 录制状态
         self._recording = False
+        self._finalizing = False
         self._recording_task: Optional[asyncio.Task] = None
         self._recording_camera_id: Optional[int] = None
         self._recording_start_time: float = 0.0
@@ -467,6 +468,7 @@ class MediaManager:
         self._recording_segment_start = time.time()
         self._segment_files = []
         self._total_recorded_bytes = 0
+        self._finalizing = False
         self._started_stream_for_recording = False
 
         # 确保摄像头流已启动
@@ -772,10 +774,11 @@ class MediaManager:
     async def _finalize_recording(self) -> None:
         """完成录制：关闭 VideoWriter，完成文件，停止流，推送 UI 状态
 
-        此方法可安全重复调用（通过 _recording 标志去重）。
+        此方法可安全重复调用（通过 _finalizing 标志去重）。
         """
-        if not self._recording:
+        if self._finalizing:
             return
+        self._finalizing = True
 
         # 关闭 VideoWriter
         if self._current_writer is not None:
@@ -827,11 +830,20 @@ class MediaManager:
 
         total_duration = int(time.time() - self._recording_start_time)
 
-        # 取消录制任务
+        # 先标记为停止，让录制循环自然退出（避免 cancel 与 write 并发）
+        self._recording = False
+
+        # 等待录制任务自行结束（循环检测到 _recording=False 后退出，finally 会 finalize）
         if self._recording_task is not None and not self._recording_task.done():
-            self._recording_task.cancel()
             try:
-                await self._recording_task
+                await asyncio.wait_for(self._recording_task, timeout=10)
+            except asyncio.TimeoutError:
+                # 超时则强制取消
+                self._recording_task.cancel()
+                try:
+                    await self._recording_task
+                except asyncio.CancelledError:
+                    pass
             except asyncio.CancelledError:
                 pass
         self._recording_task = None
