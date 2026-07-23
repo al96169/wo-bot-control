@@ -433,8 +433,9 @@ class CameraStream:
 
         # 冷启动：打开设备
         try:
-            # 硬编码低分辨率+低帧率以适配 Jetson Nano VP8 编码
-            w, h, fps = 320, 240, 10
+            w = self.resolution.get("width", 640)
+            h = self.resolution.get("height", 480)
+            fps = self.fps if self.fps > 0 else 30
             cam_type = self.camera_info.get("type", "usb")
             device = self.camera_info.get("device", f"/dev/video{self.camera_info.get('index', 0)}")
 

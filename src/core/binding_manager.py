@@ -62,6 +62,8 @@ class BindingManager:
             "bind_password",
             "config_get",
             "config_set",
+            "webrtc_offer",
+            "webrtc_ice_candidate",
         }
     )
 

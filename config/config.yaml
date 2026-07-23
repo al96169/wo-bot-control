@@ -63,10 +63,12 @@ camera:
   enabled: true
   default_camera: 0
   resolution:
-    width: 640
-    height: 480
+    width: 1280
+    height: 960
   fps: 30
   stream_type: "mjpeg"  # mjpeg, webrtc
+  capture_quality: "high"  # 拍照画质: high | medium | low
+  record_quality: "high"    # 录像画质: high | medium | low
 
 # Gimbal
 gimbal:

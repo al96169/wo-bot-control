@@ -368,8 +368,10 @@ class MessageHandler:
         mm = self._get_media_manager()
         if not mm:
             return {"type": "error", "data": {"code": 503, "message": "Media manager not available"}}
-        camera_ids = data.get("camera_ids")
-        result = await mm.capture(camera_ids)
+        # 拍照画质从机器人自身配置读取（前端通过 config_set 同步），不从消息中取
+        camera_cfg = self.config.get("camera", {})
+        quality = camera_cfg.get("capture_quality", "high")
+        result = await mm.capture(quality, data.get("camera_ids"))
         return {"type": "camera_capture_result", "data": result}
 
     async def _handle_camera_record_start(self, data: dict) -> dict:
@@ -380,7 +382,9 @@ class MessageHandler:
         if not mm:
             return {"type": "error", "data": {"code": 503, "message": "Media manager not available"}}
         camera_id = int(data.get("camera_id", 0))
-        quality = data.get("quality", "medium")
+        # 录像画质从机器人自身配置读取（前端通过 config_set 同步），不从消息中取
+        camera_cfg = self.config.get("camera", {})
+        quality = camera_cfg.get("record_quality", "high")
         resolution = data.get("resolution", "720p")
         segment_duration_s = int(data.get("segment_duration_s", 300))
         result = await mm.start_recording(camera_id, quality, resolution, segment_duration_s)
@@ -535,6 +539,38 @@ class MessageHandler:
                 "size_bytes": file_size,
                 "error": "File too large for WebSocket transfer, use DataChannel",
             },
+        }
+
+    async def _handle_camera_stream_quality(self, data: dict) -> dict:
+        """切换摄像头直播画质"""
+        mode = data.get("mode", "high")
+        if mode not in ("auto", "high", "medium", "low"):
+            return {"type": "error", "data": {"code": 400, "message": f"Invalid quality mode: {mode}"}}
+
+        # 如果是自动模式且没有活跃的 WebRTC 连接，降级为 medium
+        webrtc_svc = getattr(self, "_webrtc_service", None)
+        dc_client_id = getattr(self, "_dc_client_id", None)
+
+        if webrtc_svc and dc_client_id:
+            result = webrtc_svc.set_client_quality(dc_client_id, mode)
+            if result:
+                # 提取第一个 track 的信息作为响应
+                first_track = next(iter(result.get("tracks", {}).values()), None)
+                res_info = first_track.get("resolution", {}) if first_track else {}
+                return {
+                    "type": "camera_stream_quality_ack",
+                    "data": {
+                        "mode": mode,
+                        "resolution": res_info,
+                    },
+                }
+
+        # 无活跃 WebRTC 连接（通过 WS 路径）
+        if mode == "auto":
+            mode = "medium"  # 自动模式无连接时默认中画质
+        return {
+            "type": "camera_stream_quality_ack",
+            "data": {"mode": mode, "resolution": {}},
         }
 
     async def _handle_system(self, data: dict) -> dict:

@@ -68,7 +68,10 @@ class TTSEngine:
             if proc.returncode != 0:
                 if self.logger:
                     self.logger.error(f"[TTS] espeak failed: {stderr.decode().strip()}")
-                Path(tmp_path).unlink(missing_ok=True)
+                try:
+                    Path(tmp_path).unlink()
+                except FileNotFoundError:
+                    pass
                 return False
 
             # aplay 播放

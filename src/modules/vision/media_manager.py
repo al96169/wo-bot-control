@@ -35,6 +35,13 @@ QUALITY_FPS_MAP: Dict[str, int] = {
     "low": 15,
 }
 
+# 画质 → JPEG 压缩质量映射
+QUALITY_JPEG_MAP: Dict[str, int] = {
+    "high": 95,
+    "medium": 75,
+    "low": 60,
+}
+
 # 分辨率 → (width, height) 映射
 RESOLUTION_MAP: Dict[str, tuple] = {
     "480p": (640, 480),
@@ -267,7 +274,7 @@ class MediaManager:
     # ----------------------------------------------------------------
 
     async def capture(
-        self, camera_ids: Optional[List[int]] = None
+        self, quality: str = "high", camera_ids: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         """拍照 —— 对指定摄像头（或全部）各拍一张照片
 
@@ -275,6 +282,7 @@ class MediaManager:
         并生成 320x240 缩略图 base64 一并返回。
 
         Args:
+            quality: 画质等级 "high" | "medium" | "low"，控制 JPEG 压缩质量
             camera_ids: 摄像头 ID 列表，None 表示全部已注册摄像头
 
         Returns:
@@ -283,6 +291,9 @@ class MediaManager:
         """
         if not self.camera_manager:
             return {"success": False, "error": "Camera manager not available"}
+
+        # 确定 JPEG 压缩质量
+        jpeg_quality = QUALITY_JPEG_MAP.get(quality, JPEG_QUALITY)
 
         # 确定目标摄像头列表
         if camera_ids is None:
@@ -318,7 +329,7 @@ class MediaManager:
         try:
             for cam_id in target_ids:
                 try:
-                    photo_info = await self._capture_single(cam_id, ts_str)
+                    photo_info = await self._capture_single(cam_id, ts_str, jpeg_quality)
                     if photo_info:
                         photos.append(photo_info)
                 except Exception as e:
@@ -341,13 +352,14 @@ class MediaManager:
         }
 
     async def _capture_single(
-        self, camera_id: int, ts_str: str
+        self, camera_id: int, ts_str: str, jpeg_quality: int = JPEG_QUALITY
     ) -> Optional[Dict[str, Any]]:
         """对单个摄像头拍照
 
         Args:
             camera_id: 摄像头 ID
             ts_str: 时间戳字符串 (YYYYMMDD_HHmmss)
+            jpeg_quality: JPEG 压缩质量 (0-100)
 
         Returns:
             照片信息字典，失败返回 None
@@ -361,11 +373,11 @@ class MediaManager:
 
         loop = asyncio.get_event_loop()
 
-        # 编码为 JPEG (quality=85)
+        # 编码为 JPEG
         success, encoded = await loop.run_in_executor(
             None,
             lambda: cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
             ),
         )
         if not success:

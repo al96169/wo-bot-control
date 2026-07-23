@@ -7,10 +7,14 @@ WebRTC 服务管理
 - 连接生命周期管理
 """
 
+from __future__ import annotations
+
 import asyncio
+import json
 import logging
 import socket
 import time
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -68,11 +72,21 @@ class CameraVideoTrack(VideoStreamTrack):
     摄像头以 10fps 采样时，30fps pacing 会自然产生重复帧，不影响播放流畅度。
     不再使用自实现的丢帧逻辑——那会与 aiortc 内部时钟冲突，
     导致 RTP 时间戳超前于真实时间，浏览器无限等待"未来帧" → 画面冻结。
+
+    支持动态画质切换：通过 set_quality() 调整输出分辨率，无需断开连接。
     """
 
     kind = "video"
 
-    def __init__(self, camera_manager, camera_id=0, fps=30, logger=None, client_id=""):
+    # 画质 → (width, height) 映射（直播流专用）
+    QUALITY_RESOLUTION_MAP = {
+        "high": None,       # 使用配置页的原生分辨率
+        "medium": (640, 480),
+        "low": (480, 360),
+    }
+
+    def __init__(self, camera_manager, camera_id=0, fps=30,
+                 native_resolution=None, logger=None, client_id=""):
         super().__init__()
         self.camera_manager = camera_manager
         self.camera_id = camera_id
@@ -80,6 +94,43 @@ class CameraVideoTrack(VideoStreamTrack):
         self.logger = logger
         self.client_id = client_id
         self._frame_count = 0
+        # 画质控制
+        self._quality_mode = "high"
+        self._native_width = native_resolution.get("width", 640) if native_resolution else 640
+        self._native_height = native_resolution.get("height", 480) if native_resolution else 480
+        self._target_width = self._native_width
+        self._target_height = self._native_height
+        self._resize_needed = False
+
+    def get_quality_info(self) -> dict:
+        return {
+            "mode": self._quality_mode,
+            "resolution": {"width": self._target_width, "height": self._target_height},
+            "native_resolution": {"width": self._native_width, "height": self._native_height},
+        }
+
+    def set_quality(self, mode: str) -> dict:
+        """动态切换画质，返回新的画质信息"""
+        if mode not in ("auto", "high", "medium", "low"):
+            mode = "high"
+        self._quality_mode = mode
+        res = self.QUALITY_RESOLUTION_MAP.get(mode)
+        if res is None:
+            self._target_width = self._native_width
+            self._target_height = self._native_height
+        else:
+            self._target_width, self._target_height = res
+        self._resize_needed = (
+            self._target_width != self._native_width
+            or self._target_height != self._native_height
+        )
+        info = self.get_quality_info()
+        if self.logger:
+            self.logger.info(
+                f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
+                f"quality={mode} target={self._target_width}x{self._target_height}"
+            )
+        return info
 
     async def recv(self):
         # aiortc 内置 30fps pacing：next_timestamp() 会 sleep 到下一帧时刻
@@ -87,7 +138,7 @@ class CameraVideoTrack(VideoStreamTrack):
 
         frame = self.camera_manager.get_frame(self.camera_id)
         if frame is None:
-            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            frame = np.zeros((self._target_height, self._target_width, 3), dtype=np.uint8)
             self._frame_count += 1
             if self._frame_count == 1 and self.logger:
                 self.logger.warning(
@@ -106,6 +157,12 @@ class CameraVideoTrack(VideoStreamTrack):
                     f"[{self.client_id}] CameraVideoTrack(cam={self.camera_id}): "
                     f"frame #{self._frame_count} shape={frame.shape}, ok"
                 )
+
+        # 动态分辨率缩放
+        if self._resize_needed and (
+            frame.shape[1] != self._target_width or frame.shape[0] != self._target_height
+        ):
+            frame = cv2.resize(frame, (self._target_width, self._target_height))
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         video_frame = VideoFrame.from_ndarray(frame_rgb, format="rgb24")
@@ -129,9 +186,178 @@ class WebRTCService:
         self._video_tracks: dict[str, dict[int, CameraVideoTrack]] = {}
         self._cleaning_up: set[str] = set()
 
+        # 画质管理
+        self._stream_quality_mode: dict[str, str] = {}   # client_id → auto/high/medium/low
+        self._auto_negotiators: dict[str, asyncio.Task] = {}  # client_id → auto-negotiation task
+
         # 服务端对外公告 IP（用于 SDP ICE candidate 中替换 .local）
         self._server_ip = _resolve_server_ip(self.config)
         self.logger.info(f"WebRTC server IP resolved: {self._server_ip}")
+
+    # ---------- 画质管理 ----------
+
+    def set_client_quality(self, client_id: str, mode: str) -> Optional[dict]:
+        """设置指定客户端的画质模式，返回画质信息（含所有 track）"""
+        tracks = self._video_tracks.get(client_id, {})
+        if not tracks:
+            return None
+        self._stream_quality_mode[client_id] = mode
+        result = {"mode": mode, "tracks": {}}
+        for cam_id, track in tracks.items():
+            info = track.set_quality(mode)
+            result["tracks"][cam_id] = info
+        # 自动模式启动协商引擎，手动模式停止
+        if mode == "auto":
+            self._start_auto_negotiation(client_id)
+        else:
+            self._stop_auto_negotiation(client_id)
+        return result
+
+    def get_client_quality(self, client_id: str) -> str:
+        return self._stream_quality_mode.get(client_id, "high")
+
+    def record_rtt(self, client_id: str, rtt_ms: float):
+        """记录客户端 RTT（由 ping/pong 回调）"""
+        setattr(self, f"_last_rtt_{client_id}", rtt_ms)
+
+    def _start_auto_negotiation(self, client_id: str):
+        """启动自动画质协商后台任务"""
+        if client_id in self._auto_negotiators:
+            return
+        self._auto_negotiators[client_id] = asyncio.ensure_future(
+            self._auto_negotiate_loop(client_id)
+        )
+        self.logger.info(f"[{client_id}] Auto quality negotiation started")
+
+    def _stop_auto_negotiation(self, client_id: str):
+        task = self._auto_negotiators.pop(client_id, None)
+        if task and not task.done():
+            task.cancel()
+            self.logger.info(f"[{client_id}] Auto quality negotiation stopped")
+
+    async def _auto_negotiate_loop(self, client_id: str):
+        """自动协商循环：每 3 秒评估连接质量，调整画质"""
+        # 降级/升级防抖计数器
+        degrade_streak = 0   # 连续满足降级条件的次数
+        upgrade_streak = 0   # 连续满足升级条件的次数
+        current_level = "high"  # 当前生效档位
+        DEGRADE_THRESHOLD = 1   # 连续 1 次即降级（≈3秒）
+        UPGRADE_THRESHOLD = 2   # 连续 2 次即升级（≈6秒）
+
+        try:
+            while True:
+                await asyncio.sleep(3)
+                if self._stream_quality_mode.get(client_id) != "auto":
+                    break  # 用户手动切走了
+
+                # 获取连接质量（优先用 ICE stats，回退到 DC RTT）
+                quality_level = await self._eval_connection_quality(client_id)
+                if quality_level is None:
+                    continue
+
+                # 当前档位等值映射
+                levels = ["low", "medium", "high"]
+                cur_idx = levels.index(current_level) if current_level in levels else 2
+                target_idx = levels.index(quality_level) if quality_level in levels else 2
+
+                if target_idx < cur_idx:
+                    # 需要降级
+                    degrade_streak += 1
+                    upgrade_streak = 0
+                    if degrade_streak >= DEGRADE_THRESHOLD:
+                        if current_level != quality_level:
+                            self.logger.info(
+                                f"[{client_id}] Auto degrade: {current_level} → {quality_level}"
+                            )
+                            current_level = quality_level
+                            self._apply_quality_to_tracks(client_id, current_level)
+                            await self._notify_quality_changed(client_id, current_level)
+                            degrade_streak = 0
+                elif target_idx > cur_idx:
+                    # 需要升级
+                    upgrade_streak += 1
+                    degrade_streak = 0
+                    if upgrade_streak >= UPGRADE_THRESHOLD:
+                        if current_level != quality_level:
+                            self.logger.info(
+                                f"[{client_id}] Auto upgrade: {current_level} → {quality_level}"
+                            )
+                            current_level = quality_level
+                            self._apply_quality_to_tracks(client_id, current_level)
+                            await self._notify_quality_changed(client_id, current_level)
+                            upgrade_streak = 0
+                else:
+                    degrade_streak = 0
+                    upgrade_streak = 0
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self.logger.error(f"[{client_id}] Auto-negotiation error: {e}", exc_info=True)
+
+    async def _eval_connection_quality(self, client_id: str) -> Optional[str]:
+        """评估连接质量，返回 high/medium/low 档位"""
+        pc = self._connections.get(client_id)
+        if not pc:
+            return None
+
+        # 通过 DC ping 评估 RTT
+        dc = self._data_channels.get(client_id)
+        rtt_ms = None
+        if dc and dc.readyState == "open":
+            try:
+                t0 = time.time()
+                # 发送 ping，等待 pong（pong 由 message_handler 处理）
+                dc.send('{"type":"ping","data":{"ts":%.6f}}' % t0)
+                # RTT 近似：用上次心跳的 RTT（如果有的话）
+                rtt_ms = getattr(self, f"_last_rtt_{client_id}", None)
+            except Exception:
+                pass
+
+        # 根据 RTT 判断
+        if rtt_ms is not None:
+            if rtt_ms < 50:
+                return "high"
+            elif rtt_ms < 150:
+                return "medium"
+            else:
+                return "low"
+
+        # 无 RTT 数据：DC 直连（局域网）→ 高画质，信令中继 → 中画质
+        if dc and dc.readyState == "open":
+            return "high"
+        return "medium"
+
+    def _apply_quality_to_tracks(self, client_id: str, level: str):
+        """将画质应用到所有 video track（不发送通知）"""
+        tracks = self._video_tracks.get(client_id, {})
+        for track in tracks.values():
+            track.set_quality(level)
+
+    async def _notify_quality_changed(self, client_id: str, mode: str):
+        """通知前端自动协商触发的画质变更"""
+        tracks = self._video_tracks.get(client_id, {})
+        info = None
+        for track in tracks.values():
+            info = track.get_quality_info()
+            break
+        if info:
+            msg = {
+                "type": "camera_stream_quality_changed",
+                "data": {
+                    "mode": mode,
+                    "resolution": info["resolution"],
+                    "reason": "auto",
+                },
+            }
+            dc = self._data_channels.get(client_id)
+            if dc and dc.readyState == "open":
+                dc.send(json.dumps(msg))
+            # 也通过 message_handler 发送（兼容 WS 路径）
+            if self.message_handler:
+                try:
+                    await self.message_handler.handle("camera_stream_quality_changed", msg["data"])
+                except Exception:
+                    pass
 
     # ---------- ICE candidate 发送 ----------
 
@@ -270,6 +496,9 @@ class WebRTCService:
         client_count = len(self._connections)
         track_fps = 5 if client_count > 1 else 10
 
+        # 从 camera_manager 获取原生分辨率，传给 CameraVideoTrack 用于画质缩放
+        native_res = self.camera_manager.resolution
+
         for i, cam_id in enumerate(cam_ids):
             if i >= len(video_transceivers):
                 self.logger.warning(
@@ -289,6 +518,7 @@ class WebRTCService:
                     self.camera_manager,
                     camera_id=cam_id,
                     fps=track_fps,
+                    native_resolution=native_res,
                     logger=self.logger,
                     client_id=client_id,
                 )
@@ -616,6 +846,10 @@ class WebRTCService:
                     await self.camera_manager.stop_stream(cam_id)
                 except Exception:
                     pass
+
+            # 停止画质自动协商
+            self._stop_auto_negotiation(client_id)
+            self._stream_quality_mode.pop(client_id, None)
 
             # 仅当没有其他活跃连接时才清除全局候选队列
             if len(self._connections) == 0:
