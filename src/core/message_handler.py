@@ -46,6 +46,25 @@ class MessageHandler:
         self._gimbal_task: asyncio.Task | None = None
         # 绑定认证异步任务跟踪（ws_client_id -> [task, ...]）
         self._bind_tasks: dict[str, list[asyncio.Task]] = {}
+        # 定期软件更新检查任务
+        self._update_check_task: asyncio.Task | None = None
+
+    def start_periodic_tasks(self) -> None:
+        """启动定期任务（由 main.py 在系统就绪后调用）"""
+        if self._update_check_task is None or self._update_check_task.done():
+            self._update_check_task = asyncio.create_task(self._periodic_update_check())
+
+    async def _periodic_update_check(self, interval: int = 1800) -> None:
+        """定期检查软件更新（默认每 30 分钟），广播给所有在线客户端"""
+        # 首次启动等待 10 秒（等子服务就绪）
+        await asyncio.sleep(10)
+        while True:
+            try:
+                await self._check_and_push_updates()
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug(f"[PeriodicUpdate] check failed: {e}")
+            await asyncio.sleep(interval)
 
     def _is_feature_enabled(self, feature: str) -> bool:
         features_cfg = self.config.get("features", {})
@@ -1897,8 +1916,8 @@ class MessageHandler:
                 self.ws_server._client_user_ids[ws_client_id] = result["binding"]["clientId"]
                 if self.logger:
                     self.logger.info(f"[{ws_client_id}] Binding verified, client marked as bound")
-            # 广播通知所有已绑定客户端：绑定列表已更新
-            await self._broadcast_bind_list()
+            # 广播通知所有已绑定客户端：绑定列表已更新 + 推送软件更新
+            await self._on_client_bound(ws_client_id)
             return {
                 "type": "bind_success",
                 "data": {
@@ -1938,8 +1957,8 @@ class MessageHandler:
                 self.ws_server._client_user_ids[ws_client_id] = result["binding"]["clientId"]
                 if self.logger:
                     self.logger.info(f"[{ws_client_id}] Password binding verified, client marked as bound")
-            # 广播绑定列表更新
-            await self._broadcast_bind_list()
+            # 广播绑定列表更新 + 推送软件更新
+            await self._on_client_bound(ws_client_id)
             return {
                 "type": "bind_success",
                 "data": {
@@ -2087,8 +2106,8 @@ class MessageHandler:
             # 语音播报绑定成功
             if hasattr(self, "tts_engine") and self.tts_engine:
                 asyncio.create_task(self.tts_engine.speak_bind_success())
-            # 广播绑定列表更新
-            await self._broadcast_bind_list()
+            # 广播绑定列表更新 + 推送软件更新
+            await self._on_client_bound(ws_client_id)
             return {
                 "type": "bind_success",
                 "data": {
@@ -2161,6 +2180,40 @@ class MessageHandler:
                 "data": {"bindings": safe_bindings},
             }
         )
+
+    async def _check_and_push_updates(self, ws_client_id: str = "") -> None:
+        """检测软件更新并主动推送给客户端
+
+        客户端绑定时触发：检查 software_manager 子服务是否有可更新软件，
+        如有则推送给指定客户端（无 ws_client_id 时广播给所有在线客户端）。
+        """
+        if not self.service_manager:
+            return
+        try:
+            result = await self.service_manager.send_subprocess_command(
+                "software_manager", "check_updates", {}
+            )
+            if result and result.get("type") == "software_updates_available":
+                updates = result.get("data", {}).get("updates", [])
+                if updates:
+                    msg = {
+                        "type": "software_updates_available",
+                        "data": {"updates": updates},
+                    }
+                    if ws_client_id:
+                        # 只推送给刚绑定的客户端
+                        await self._send_to_client(ws_client_id, msg)
+                    else:
+                        await self.ws_server.broadcast_message(msg)
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"[SoftwareUpdate] check_updates failed: {e}")
+
+    async def _on_client_bound(self, ws_client_id: str) -> None:
+        """客户端绑定成功后的统一回调：广播绑定列表 + 推送软件更新"""
+        await self._broadcast_bind_list()
+        # 异步检查软件更新，不阻塞绑定响应
+        asyncio.create_task(self._check_and_push_updates(ws_client_id))
 
     async def _kick_client_by_user_id(self, user_client_id: str, reason: str, exclude_ws_id: str = "") -> None:
         """通过 user_client_id 踢下线对应的 WebSocket 客户端"""
@@ -2335,6 +2388,8 @@ class MessageHandler:
                     self.ws_server._client_user_ids[ws_client_id] = result["binding"]["clientId"]
                     if self.logger:
                         self.logger.info(f"[{ws_client_id}] QR binding verified, client marked as bound")
+                # 广播绑定列表更新 + 推送软件更新（异步不阻塞）
+                asyncio.create_task(self._on_client_bound(ws_client_id))
                 await self._send_to_client(
                     ws_client_id,
                     {

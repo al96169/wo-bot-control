@@ -393,6 +393,10 @@ class WoBotControl:
         )
         await self.http_server.start()
 
+        # 启动定期任务（软件更新检查等）
+        if self.message_handler:
+            self.message_handler.start_periodic_tasks()
+
         # 阻塞保持服务器运行
         await self.ws_server.serve_forever()
 
