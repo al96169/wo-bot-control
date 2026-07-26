@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 
 logger = logging.getLogger("software_manager")
@@ -326,9 +327,19 @@ class SoftwareManager:
         source = pkg.get("source", {})
         stype = source.get("type", "apt")
         logger.info(f"Upgrading: {package} (source={stype})")
+        current_ver = ""
         if stype == "systemd":
-            return _upgrade_ack(package, "failed", requires_reconnect)
-        if stype == "apt":
+            # systemd 类型改为 url 方式升级（下载 .deb → dpkg -i → updater.sh 重启）
+            # 兼容旧 manifest 仍标记为 systemd 的情况
+            download_url = source.get("url", "")
+            checksum = source.get("checksum", "")
+            if not download_url:
+                return _upgrade_ack(package, "failed", requires_reconnect)
+            url_source = {"type": "url", "url": download_url, "checksum": checksum}
+            installed_map = await self._get_installed_packages()
+            current_ver = installed_map.get(package, pkg.get("min_version", "1.0.0"))
+            success, output = await self._url_install(url_source, package, "upgrade")
+        elif stype == "apt":
             apt_pkg = source.get("package", package)
             # 升级前检查 apt 源是否有更高版本可用
             installed_map = await self._get_installed_packages()
@@ -356,12 +367,26 @@ class SoftwareManager:
             success, output = await self._url_install(source, package, "upgrade")
         else:
             return _upgrade_ack(package, "failed", requires_reconnect)
-        # 查询升级后版本
+
+        # 查询升级后版本（自升级跳过：software_manager 即将被杀死）
         new_version = ""
-        if success:
+        is_self_upgrade = (package == "wobot-control")
+        if success and not is_self_upgrade:
             installed_after = await self._get_installed_packages()
-            apt_name = apt_pkg if stype == "apt" else self._pkg_install_name(pkg)
+            if stype == "apt":
+                apt_name = apt_pkg
+            else:
+                apt_name = self._pkg_install_name(pkg)
             new_version = installed_after.get(apt_name, "")
+        elif success and is_self_upgrade:
+            new_version = pkg.get("latest_version", "")
+
+        # critical 包（如 wobot-control）升级成功后触发 updater.sh 重启服务
+        # 自升级例外：detached dpkg 脚本已包含 health check + 重启逻辑
+        if success and requires_reconnect and not is_self_upgrade:
+            logger.info(f"Critical package {package} upgraded, triggering updater.sh for restart")
+            _trigger_updater(package, pkg.get("latest_version", ""))
+
         return _upgrade_ack(
             package,
             "upgraded" if success else "failed",
@@ -531,7 +556,8 @@ class SoftwareManager:
         return success, "\n".join(output_lines[-20:]) if output_lines else ""
 
     async def _url_install(self, source: dict, display_name: str, action: str) -> tuple[bool, str]:
-        """url 源安装：下载 .deb → 校验 sha256 → dpkg -i → 清理临时文件"""
+        """url 源安装：下载 .deb → 校验 sha256 → dpkg -i → 清理临时文件
+        自升级时不清理 .deb：detached 脚本需要该文件"""
         url = source.get("url", "")
         checksum = source.get("checksum", "")
         if not url:
@@ -554,7 +580,9 @@ class SoftwareManager:
             self._emit_progress(display_name, action, 55, "verify", "checksum verified")
 
         success, output = await self._dpkg_install(deb_path, display_name, action)
-        self._cleanup_file(deb_path)
+        # 自升级不清理 .deb：detached 脚本需要它来执行 dpkg -i
+        if display_name != "wobot-control":
+            self._cleanup_file(deb_path)
         return success, output
 
     async def _download_file(self, url: str, dest: str, display_name: str, action: str) -> None:
@@ -605,59 +633,228 @@ class SoftwareManager:
             return False, f"checksum verification failed: {e}"
 
     async def _dpkg_install(self, deb_path: str, display_name: str, action: str) -> tuple[bool, str]:
-        """执行 dpkg -i，逐行读取输出并推送 60-100% 进度"""
-        dpkg_env = os.environ.copy()
-        dpkg_env["DEBIAN_FRONTEND"] = "noninteractive"
+        """执行 dpkg -i 安装/升级（detached 模式）
+
+        使用 systemd-run --scope 将 dpkg 运行在独立的 cgroup 中。
+        这解决了升级 wobot-control 自身时的「自杀」问题：
+        dpkg 的 prerm 执行 systemctl stop wobot-control → systemd 杀死 wobot-control
+        cgroup 内所有进程（包括本 process）→ dpkg 未完成即被终止。
+
+        通过 systemd-run --scope 创建的临时 scope 有独立的 cgroup，
+        不受 wobot-control 服务启停的影响。
+
+        对于 wobot-control 自升级：启动 detached 脚本后立即返回 True。
+        software_manager 本进程将被 prerm 的 systemctl stop 杀死，
+        因此无法轮询结果。detached 脚本会在 dpkg 完成后自动重启服务。
+        """
+        suffix = display_name.replace("/", "_").replace(" ", "_")
+        status_file = f"/tmp/wobot-dpkg-{suffix}.status"
+        log_file = f"/tmp/wobot-dpkg-{suffix}.log"
+        is_self_upgrade = (display_name == "wobot-control")
+
+        # 清理残留
+        for f in (status_file, log_file):
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except OSError:
+                pass
+
+        # 构建独立安装脚本
+        # 自升级时附加 updater.sh 风格的 health check + 回滚逻辑
+        if is_self_upgrade:
+            script_content = f'''#!/bin/bash
+set -o pipefail
+export DEBIAN_FRONTEND=noninteractive
+LOG="{log_file}"
+STATUS="{status_file}"
+INSTALL_DIR="/opt/wobot"
+BACKUP_DIR="$INSTALL_DIR/.backup"
+HEALTH_URL="http://127.0.0.1:8000/api/health"
+
+log() {{ echo "[dpkg-detached $(date '+%H:%M:%S')] $*" | tee -a "$LOG"; }}
+
+log "=== Self-upgrade started ==="
+
+# Phase 0: 抢占式杀掉旧进程，避免旧 prerm 中的 systemctl stop 阻塞
+# 当前安装的旧版本 prerm 不一定是非阻塞的，所以必须先杀进程
+log "Pre-killing old wobot-control processes..."
+pkill -f "sub_services.software_manager" 2>/dev/null || true
+pkill -f "src/main.py" 2>/dev/null || true
+sleep 2
+pkill -9 -f "sub_services.software_manager" 2>/dev/null || true
+pkill -9 -f "src/main.py" 2>/dev/null || true
+# 确保 systemd 知道服务已死
+systemctl stop --no-block wobot-control 2>/dev/null || true
+sleep 1
+log "Old processes cleaned, starting dpkg..."
+
+# Phase 1: dpkg 安装
+log "Running dpkg -i ..."
+dpkg -i --force-depends "{deb_path}" >> "$LOG" 2>&1
+DPKG_RC=$?
+if [ $DPKG_RC -ne 0 ] && grep -q "Unpacking" "$LOG" 2>/dev/null; then
+    log "Unpacking succeeded, running dpkg --configure ..."
+    dpkg --configure --force-depends -a >> "$LOG" 2>&1
+    DPKG_RC=$?
+fi
+echo $DPKG_RC > "$STATUS"
+
+if [ $DPKG_RC -ne 0 ]; then
+    log "=== dpkg FAILED (rc=$DPKG_RC) ==="
+    # 尝试回滚：重新安装旧版本（备用的 1.0.2 .deb）
+    if [ -f "/tmp/wobot-control_1.0.2_arm64.deb" ]; then
+        log "Rolling back to 1.0.2 ..."
+        dpkg -i --force-depends "/tmp/wobot-control_1.0.2_arm64.deb" >> "$LOG" 2>&1
+    fi
+    systemctl start wobot-control 2>/dev/null || true
+    exit 1
+fi
+
+# Phase 2: 重启服务 + 健康检查
+log "Starting wobot-control ..."
+systemctl start wobot-control 2>/dev/null || true
+
+log "Health check (timeout 20s)..."
+for i in $(seq 1 20); do
+    if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
+        log "Health check PASSED after ${{i}}s"
+        log "=== Self-upgrade SUCCESS ==="
+        rm -rf "$BACKUP_DIR" 2>/dev/null || true
+        exit 0
+    fi
+    sleep 1
+done
+
+# Phase 3: 健康检查失败 → 回滚
+log "=== Health check FAILED, rolling back ==="
+systemctl stop wobot-control 2>/dev/null || true
+if [ -f "/tmp/wobot-control_1.0.2_arm64.deb" ]; then
+    dpkg -i --force-depends "/tmp/wobot-control_1.0.2_arm64.deb" >> "$LOG" 2>&1
+fi
+systemctl start wobot-control 2>/dev/null || true
+log "=== Rollback complete ==="
+'''
+        else:
+            script_content = f'''#!/bin/bash
+set -o pipefail
+export DEBIAN_FRONTEND=noninteractive
+dpkg -i --force-depends "{deb_path}" > "{log_file}" 2>&1
+DPKG_RC=$?
+if [ $DPKG_RC -ne 0 ] && grep -q "Unpacking" "{log_file}" 2>/dev/null; then
+    dpkg --configure --force-depends -a >> "{log_file}" 2>&1
+    DPKG_RC=$?
+fi
+echo $DPKG_RC > "{status_file}"
+'''
+
+        script_path = f"/tmp/wobot-dpkg-{suffix}.sh"
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "dpkg",
-                "-i",
-                deb_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                env=dpkg_env,
+            with open(script_path, "w") as f:
+                f.write(script_content)
+            os.chmod(script_path, 0o755)
+        except OSError as e:
+            return False, f"failed to write install script: {e}"
+
+        # 通过 systemd-run --scope 在独立 cgroup 中运行，失败时回退到 setsid
+        launched = False
+        try:
+            subprocess.Popen(
+                ["systemd-run", "--scope", "--quiet", "--unit=wobot-dpkg-upgrade",
+                 "bash", script_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-        except Exception as e:
-            return False, str(e)
+            launched = True
+        except (FileNotFoundError, OSError):
+            pass
 
-        stdout = proc.stdout
-        if stdout is None:
-            proc.kill()
-            await proc.wait()
-            return False, "no stdout pipe"
+        if not launched:
+            try:
+                subprocess.Popen(
+                    ["setsid", "bash", script_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                launched = True
+            except (FileNotFoundError, OSError):
+                pass
 
-        async def _consume() -> list[str]:
-            output_lines: list[str] = []
-            idx = 0
-            while True:
-                line = await stdout.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if not text:
+        if not launched:
+            subprocess.Popen(
+                ["bash", script_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+        # 自升级：立即返回成功，本进程即将被 prerm 杀死
+        if is_self_upgrade:
+            logger.info("Self-upgrade detached script launched, returning optimistic success")
+            self._emit_progress(display_name, action, 100, "done",
+                              "self-upgrade initiated, service will restart...")
+            return True, "self-upgrade detached"
+
+        # 非自升级：轮询状态文件
+        self._emit_progress(display_name, action, 60, "install", "dpkg detached, monitoring...")
+        deadline = time.time() + _OPERATION_TIMEOUT
+        last_log_size = 0
+        while time.time() < deadline:
+            if os.path.exists(status_file):
+                try:
+                    with open(status_file) as f:
+                        rc_str = f.read().strip()
+                except OSError:
+                    await asyncio.sleep(0.3)
                     continue
-                output_lines.append(text)
-                progress = min(100, 60 + idx * 5)
-                self._emit_progress(display_name, action, progress, "install", text)
-                idx += 1
-            await proc.wait()
-            return output_lines
 
-        try:
-            output_lines = await asyncio.wait_for(_consume(), timeout=_OPERATION_TIMEOUT)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            self._emit_progress(display_name, action, 0, "failed", "operation timeout")
-            return False, "operation timeout"
-        except Exception as e:
-            proc.kill()
-            await proc.wait()
-            return False, str(e)
+                try:
+                    rc = int(rc_str)
+                except ValueError:
+                    rc = -1
 
-        success = proc.returncode == 0
-        self._emit_progress(display_name, action, 100 if success else 0, "done" if success else "failed")
-        return success, "\n".join(output_lines[-20:]) if output_lines else ""
+                output = ""
+                if os.path.exists(log_file):
+                    try:
+                        with open(log_file) as f:
+                            output = f.read()
+                    except OSError:
+                        pass
+
+                success = (rc == 0)
+                self._emit_progress(
+                    display_name, action,
+                    100 if success else 0,
+                    "done" if success else "failed",
+                )
+                self._cleanup_file(script_path)
+                self._cleanup_file(status_file)
+                self._cleanup_file(log_file)
+                return success, output[-2000:] if output else ""
+
+            if os.path.exists(log_file):
+                try:
+                    current_size = os.path.getsize(log_file)
+                    if current_size > last_log_size + 50:
+                        last_log_size = current_size
+                        progress = min(90, 60 + current_size // 300)
+                        with open(log_file) as lf:
+                            lines = lf.readlines()
+                        last_line = lines[-1].strip() if lines else ""
+                        if last_line:
+                            self._emit_progress(
+                                display_name, action, progress, "install",
+                                last_line[-100:],
+                            )
+                except OSError:
+                    pass
+
+            await asyncio.sleep(0.5)
+
+        self._emit_progress(display_name, action, 0, "failed", "dpkg operation timeout")
+        self._cleanup_file(script_path)
+        return False, "dpkg detached operation timeout"
 
     @staticmethod
     def _cleanup_file(path: str) -> None:
@@ -711,6 +908,34 @@ def _upgrade_ack(
             "new_version": new_version,
         },
     }
+
+
+def _trigger_updater(package: str, version: str) -> None:
+    """触发 updater.sh 独立脚本，执行服务重启 + 健康检查 + 回滚"""
+    updater_path = "/opt/wobot/scripts/updater.sh"
+    if not os.path.exists(updater_path):
+        logger.warning(f"updater.sh not found at {updater_path}, falling back to systemctl restart")
+        try:
+            subprocess.Popen(
+                ["systemctl", "restart", "wobot-control"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to restart wobot-control: {e}")
+        return
+
+    try:
+        subprocess.Popen(
+            ["nohup", "bash", updater_path, package, version],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        logger.info(f"updater.sh triggered for {package} v{version}")
+    except Exception as e:
+        logger.error(f"Failed to trigger updater.sh: {e}")
 
 
 def _permission_denied_ack(cmd: str, params: dict) -> dict:
