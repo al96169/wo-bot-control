@@ -64,6 +64,7 @@ mkdir -p src/modules/my_module
 # src/modules/my_module/my_module.py
 from modules.extension.base import ExtensionModule
 
+
 class MyModule(ExtensionModule):
     def __init__(self, config=None, logger=None):
         super().__init__("my_module", config, logger)
@@ -129,6 +130,7 @@ async def _handle_my_command(self, data: dict) -> dict:
 import pytest
 from modules.motion.controller import MotionController
 
+
 @pytest.mark.asyncio
 async def test_motion_stop():
     controller = MotionController()
@@ -155,7 +157,9 @@ logging:
 ### 使用 Python 调试器
 
 ```python
-import pdb; pdb.set_trace()
+import pdb
+
+pdb.set_trace()
 ```
 
 ## 代码风格
