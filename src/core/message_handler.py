@@ -48,6 +48,10 @@ class MessageHandler:
         self._bind_tasks: dict[str, list[asyncio.Task]] = {}
         # 定期软件更新检查任务
         self._update_check_task: asyncio.Task | None = None
+        # 系统操作防重入保护
+        self._rebooting = False
+        self._shutting_down = False
+        self._restarting_service = False
 
     def start_periodic_tasks(self) -> None:
         """启动定期任务（由 main.py 在系统就绪后调用）"""
@@ -498,15 +502,18 @@ class MessageHandler:
         webrtc_svc = getattr(self, "_webrtc_service", None)
         if dc_client_id and webrtc_svc:
             # 发送开始消息
-            await webrtc_svc.send_message(dc_client_id, {
-                "type": "camera_media_download_start",
-                "data": {
-                    "file_name": file_name,
-                    "size_bytes": file_size,
-                    "total_chunks": total_chunks,
-                    "thumbnail_base64": thumbnail,
+            await webrtc_svc.send_message(
+                dc_client_id,
+                {
+                    "type": "camera_media_download_start",
+                    "data": {
+                        "file_name": file_name,
+                        "size_bytes": file_size,
+                        "total_chunks": total_chunks,
+                        "thumbnail_base64": thumbnail,
+                    },
                 },
-            })
+            )
             # 逐块读取并发送
             with open(media_path, "rb") as f:
                 chunk_index = 0
@@ -515,25 +522,31 @@ class MessageHandler:
                     if not chunk:
                         break
                     chunk_b64 = base64.b64encode(chunk).decode("ascii")
-                    await webrtc_svc.send_message(dc_client_id, {
-                        "type": "camera_media_download_chunk",
-                        "data": {
-                            "file_name": file_name,
-                            "chunk_index": chunk_index,
-                            "total_chunks": total_chunks,
-                            "data": chunk_b64,
+                    await webrtc_svc.send_message(
+                        dc_client_id,
+                        {
+                            "type": "camera_media_download_chunk",
+                            "data": {
+                                "file_name": file_name,
+                                "chunk_index": chunk_index,
+                                "total_chunks": total_chunks,
+                                "data": chunk_b64,
+                            },
                         },
-                    })
+                    )
                     chunk_index += 1
             # 发送完成消息
-            await webrtc_svc.send_message(dc_client_id, {
-                "type": "camera_media_download_end",
-                "data": {
-                    "file_name": file_name,
-                    "size_bytes": file_size,
-                    "total_chunks": total_chunks,
+            await webrtc_svc.send_message(
+                dc_client_id,
+                {
+                    "type": "camera_media_download_end",
+                    "data": {
+                        "file_name": file_name,
+                        "size_bytes": file_size,
+                        "total_chunks": total_chunks,
+                    },
                 },
-            })
+            )
             # 返回 None（不通过 send_message 再发一次）
             return {"type": "camera_media_download_done", "data": {"file_name": file_name}}
 
@@ -597,24 +610,43 @@ class MessageHandler:
         action = data.get("action")
 
         if action == "reboot":
+            if self._rebooting:
+                return {"type": "error", "data": {"code": 429, "message": "Reboot already in progress"}}
+            self._rebooting = True
             self.logger.warning("System reboot requested")
-            asyncio.create_task(self._delayed_reboot())
+            asyncio.create_task(self._delayed_system_command(["sudo", "reboot"], "Reboot", "_rebooting"))
             return {"type": "system_ack", "data": {"action": "reboot", "status": "pending"}}
         elif action == "shutdown":
+            if self._shutting_down:
+                return {"type": "error", "data": {"code": 429, "message": "Shutdown already in progress"}}
+            self._shutting_down = True
             self.logger.warning("System shutdown requested")
-            asyncio.create_task(self._delayed_shutdown())
+            asyncio.create_task(
+                self._delayed_system_command(["sudo", "systemctl", "poweroff"], "Shutdown", "_shutting_down")
+            )
             return {"type": "system_ack", "data": {"action": "shutdown", "status": "pending"}}
         elif action == "restart_service":
             service_id = data.get("service_id", "main")
             self.logger.info(f"Service restart requested: {service_id}")
+
+            if service_id == "main":
+                if self._restarting_service:
+                    return {"type": "error", "data": {"code": 429, "message": "Service restart already in progress"}}
+                self._restarting_service = True
+                self.logger.warning("Main service restart requested via systemd")
+                asyncio.create_task(
+                    self._delayed_system_command(
+                        ["sudo", "systemctl", "restart", "wobot-control"],
+                        "Restart service",
+                        "_restarting_service",
+                    )
+                )
+                return {
+                    "type": "system_ack",
+                    "data": {"action": "restart_service", "service_id": "main", "status": "pending"},
+                }
+
             if hasattr(self, "service_manager") and self.service_manager:
-                if service_id == "main":
-                    self.logger.warning("Main service restart requested via systemd")
-                    asyncio.create_task(self._delayed_restart_service())
-                    return {
-                        "type": "system_ack",
-                        "data": {"action": "restart_service", "service_id": "main", "status": "pending"},
-                    }
                 success = await self.service_manager.restart_service(service_id)
                 return {
                     "type": "system_ack",
@@ -624,18 +656,10 @@ class MessageHandler:
                         "status": "ok" if success else "failed",
                     },
                 }
-            else:
-                if service_id == "main":
-                    self.logger.warning("Main service restart requested via systemd (no service_manager)")
-                    asyncio.create_task(self._delayed_restart_service())
-                    return {
-                        "type": "system_ack",
-                        "data": {"action": "restart_service", "service_id": "main", "status": "pending"},
-                    }
-                return {
-                    "type": "system_ack",
-                    "data": {"action": "restart_service", "status": "pending", "service_id": service_id},
-                }
+            return {
+                "type": "system_ack",
+                "data": {"action": "restart_service", "status": "pending", "service_id": service_id},
+            }
 
         return {"type": "error", "data": {"code": 400, "message": "Invalid system action"}}
 
@@ -688,29 +712,18 @@ class MessageHandler:
             },
         }
 
-    async def _delayed_reboot(self):
-        """延迟重启"""
+    async def _delayed_system_command(self, cmd: list[str], action_name: str, flag_attr: str):
+        """通用延迟系统命令执行（防重入保护）"""
         await asyncio.sleep(2)
         try:
-            subprocess.run(["sudo", "reboot"], check=False)
+            # 强制刷新所有日志 handler，确保日志落盘
+            for handler in self.logger.handlers:
+                handler.flush()
+            subprocess.run(cmd, check=False)
         except Exception as e:
-            self.logger.error(f"Reboot failed: {e}", exc_info=True)
-
-    async def _delayed_shutdown(self):
-        """延迟关机"""
-        await asyncio.sleep(2)
-        try:
-            subprocess.run(["sudo", "shutdown", "-h", "now"], check=False)
-        except Exception as e:
-            self.logger.error(f"Shutdown failed: {e}", exc_info=True)
-
-    async def _delayed_restart_service(self):
-        """延迟重启主服务（通过 systemd）"""
-        await asyncio.sleep(2)
-        try:
-            subprocess.run(["sudo", "systemctl", "restart", "wobot-control"], check=False)
-        except Exception as e:
-            self.logger.error(f"Restart service failed: {e}", exc_info=True)
+            self.logger.error(f"{action_name} failed: {e}", exc_info=True)
+        finally:
+            setattr(self, flag_attr, False)
 
     async def _handle_exec(self, data: dict) -> dict:
         """执行命令（持久 Shell 会话，保持工作目录）"""
@@ -2203,9 +2216,7 @@ class MessageHandler:
         if not self.service_manager:
             return
         try:
-            result = await self.service_manager.send_subprocess_command(
-                "software_manager", "check_updates", {}
-            )
+            result = await self.service_manager.send_subprocess_command("software_manager", "check_updates", {})
             if result and result.get("type") == "software_updates_available":
                 updates = result.get("data", {}).get("updates", [])
                 if updates:
