@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 import websockets
@@ -39,7 +40,7 @@ class SignalClient:
         self.webrtc_service = webrtc_service
         self.logger = logger or logging.getLogger(__name__)
 
-        self._ws = None
+        self._ws: Any = None
         self._running = False
         self._reconnect_count = 0
         self._current_client_id = None  # Track the client being served
@@ -160,7 +161,7 @@ class SignalClient:
 
                     # Message loop
                     async for raw_msg in ws:
-                        await self._handle_message(raw_msg)
+                        await self._handle_message(raw_msg if isinstance(raw_msg, str) else raw_msg.decode())
 
             except asyncio.CancelledError:
                 break
