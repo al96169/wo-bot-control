@@ -338,8 +338,7 @@ class WebSocketServer:
                         client_token = new_token
                         if self.logger:
                             self.logger.info(
-                                f"[{client_id}] Auto-bound via account token: "
-                                f"user={user_id}, client={user_client_id}"
+                                f"[{client_id}] Auto-bound via account token: user={user_id}, client={user_client_id}"
                             )
 
         self._client_bound[client_id] = is_bound if binding_enabled else True

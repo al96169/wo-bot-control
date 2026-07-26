@@ -20,8 +20,9 @@ import base64
 import os
 import shutil
 import time
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 import cv2
 import numpy as np
@@ -29,21 +30,21 @@ import numpy as np
 # ===== 常量 =====
 
 # 画质 → FPS 映射
-QUALITY_FPS_MAP: Dict[str, int] = {
+QUALITY_FPS_MAP: dict[str, int] = {
     "high": 30,
     "medium": 20,
     "low": 15,
 }
 
 # 画质 → JPEG 压缩质量映射
-QUALITY_JPEG_MAP: Dict[str, int] = {
+QUALITY_JPEG_MAP: dict[str, int] = {
     "high": 95,
     "medium": 75,
     "low": 60,
 }
 
 # 分辨率 → (width, height) 映射
-RESOLUTION_MAP: Dict[str, tuple] = {
+RESOLUTION_MAP: dict[str, tuple] = {
     "480p": (640, 480),
     "720p": (1280, 720),
     "1080p": (1920, 1080),
@@ -54,16 +55,16 @@ THUMBNAIL_WIDTH = 320
 THUMBNAIL_HEIGHT = 240
 
 # 录制参数
-MAX_RECORDING_DURATION_S = 10 * 60      # 最大录制时长 10 分钟（10 段 × 1 分钟）
+MAX_RECORDING_DURATION_S = 10 * 60  # 最大录制时长 10 分钟（10 段 × 1 分钟）
 MIN_DISK_SPACE_BYTES = 500 * 1024 * 1024  # 最小剩余空间 500 MB
-STATUS_PUSH_INTERVAL_S = 5               # 状态推送间隔 5 秒
-JPEG_QUALITY = 85                        # 拍照 JPEG 质量
-THUMBNAIL_JPEG_QUALITY = 80              # 缩略图 JPEG 质量
+STATUS_PUSH_INTERVAL_S = 5  # 状态推送间隔 5 秒
+JPEG_QUALITY = 85  # 拍照 JPEG 质量
+THUMBNAIL_JPEG_QUALITY = 80  # 缩略图 JPEG 质量
 
 # 循环录制参数
-DEFAULT_SEGMENT_DURATION_S = 60          # 默认单段时长 1 分钟
-MAX_SEGMENTS = 10                        # 最大保留段数（兜底防溢出）
-CLIENT_CHECK_INTERVAL_S = 5              # 客户端在线检查间隔
+DEFAULT_SEGMENT_DURATION_S = 60  # 默认单段时长 1 分钟
+MAX_SEGMENTS = 10  # 最大保留段数（兜底防溢出）
+CLIENT_CHECK_INTERVAL_S = 5  # 客户端在线检查间隔
 
 
 # ===== 模块级工具函数 =====
@@ -85,9 +86,7 @@ def _make_thumbnail_base64(frame: np.ndarray) -> str:
         base64 编码的 JPEG 缩略图字符串，失败时返回空字符串
     """
     thumbnail = cv2.resize(frame, (THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT))
-    success, encoded = cv2.imencode(
-        ".jpg", thumbnail, [cv2.IMWRITE_JPEG_QUALITY, THUMBNAIL_JPEG_QUALITY]
-    )
+    success, encoded = cv2.imencode(".jpg", thumbnail, [cv2.IMWRITE_JPEG_QUALITY, THUMBNAIL_JPEG_QUALITY])
     if not success:
         return ""
     return base64.b64encode(encoded.tobytes()).decode("ascii")
@@ -127,9 +126,7 @@ def _make_video_cover_base64(video_path: str) -> str:
     return _make_thumbnail_base64(frame)
 
 
-def _write_video_frame(
-    writer: cv2.VideoWriter, frame: np.ndarray, width: int, height: int
-) -> None:
+def _write_video_frame(writer: cv2.VideoWriter, frame: np.ndarray, width: int, height: int) -> None:
     """将帧写入 VideoWriter，必要时缩放到目标分辨率
 
     Args:
@@ -144,9 +141,7 @@ def _write_video_frame(
     writer.write(frame)
 
 
-def _create_video_writer(
-    file_path: str, fps: int, width: int, height: int
-) -> Optional[cv2.VideoWriter]:
+def _create_video_writer(file_path: str, fps: int, width: int, height: int) -> cv2.VideoWriter | None:
     """创建 VideoWriter，按优先级尝试多种编码器
 
     优先级: avc1 (H.264) → H264 → mp4v (MPEG-4)
@@ -206,7 +201,7 @@ class MediaManager:
         storage_dir: str,
         robot_name: str,
         camera_manager: Any,
-        logger: Optional[Any] = None,
+        logger: Any | None = None,
     ):
         self.storage_dir = os.path.abspath(storage_dir)
         self.robot_name = robot_name
@@ -222,29 +217,29 @@ class MediaManager:
         # 录制状态
         self._recording = False
         self._finalizing = False
-        self._recording_task: Optional[asyncio.Task] = None
-        self._recording_camera_id: Optional[int] = None
+        self._recording_task: asyncio.Task | None = None
+        self._recording_camera_id: int | None = None
         self._recording_start_time: float = 0.0
         self._recording_segment_start: float = 0.0
-        self._current_writer: Optional[cv2.VideoWriter] = None
-        self._current_file_path: Optional[str] = None
-        self._current_file_start_ts: Optional[str] = None
+        self._current_writer: cv2.VideoWriter | None = None
+        self._current_file_path: str | None = None
+        self._current_file_start_ts: str | None = None
         self._segment_duration_s: int = 300
         self._recording_fps: int = 20
         self._recording_resolution: str = "720p"
         self._recording_quality: str = "medium"
         self._total_recorded_bytes: int = 0
-        self._segment_files: List[Dict[str, Any]] = []
+        self._segment_files: list[dict[str, Any]] = []
         # 标记是否由录制启动了摄像头流（停止录制时需关闭）
         self._started_stream_for_recording: bool = False
 
         # 回调函数（由外部注入，用于推送 WebSocket 消息）
         # 签名: async def callback(message: dict) -> None  或  def callback(message: dict) -> None
-        self.recording_status_callback: Optional[Callable] = None
-        self.recording_ui_state_callback: Optional[Callable] = None
+        self.recording_status_callback: Callable | None = None
+        self.recording_ui_state_callback: Callable | None = None
         # 客户端在线检查回调：返回 True 表示至少有一个客户端在线
         # 签名: def callback() -> bool
-        self.client_online_check: Optional[Callable[[], bool]] = None
+        self.client_online_check: Callable[[], bool] | None = None
 
     # ----------------------------------------------------------------
     # 生命周期
@@ -256,9 +251,7 @@ class MediaManager:
         os.makedirs(self.videos_dir, exist_ok=True)
         self.running = True
         if self.logger:
-            self.logger.info(
-                "MediaManager started (storage: %s)" % self.storage_dir
-            )
+            self.logger.info(f"MediaManager started (storage: {self.storage_dir})")
 
     async def stop(self) -> None:
         """停止媒体管理器 —— 停止录制并清理资源"""
@@ -273,9 +266,7 @@ class MediaManager:
     # 拍照
     # ----------------------------------------------------------------
 
-    async def capture(
-        self, quality: str = "high", camera_ids: Optional[List[int]] = None
-    ) -> Dict[str, Any]:
+    async def capture(self, quality: str = "high", camera_ids: list[int] | None = None) -> dict[str, Any]:
         """拍照 —— 对指定摄像头（或全部）各拍一张照片
 
         调用 camera_manager.get_frame() 获取当前帧，编码为 JPEG 保存到本地，
@@ -296,16 +287,13 @@ class MediaManager:
         jpeg_quality = QUALITY_JPEG_MAP.get(quality, JPEG_QUALITY)
 
         # 确定目标摄像头列表
-        if camera_ids is None:
-            target_ids = list(self.camera_manager.cameras.keys())
-        else:
-            target_ids = list(camera_ids)
+        target_ids = list(self.camera_manager.cameras.keys()) if camera_ids is None else list(camera_ids)
 
         if not target_ids:
             return {"success": False, "error": "No cameras available"}
 
         # 确保摄像头流已启动（拍照与预览流解耦，必要时自动启动）
-        started_streams: List[int] = []
+        started_streams: list[int] = []
         for cam_id in target_ids:
             active_streams = getattr(self.camera_manager, "active_streams", {})
             if cam_id not in active_streams:
@@ -319,12 +307,10 @@ class MediaManager:
                         await asyncio.sleep(0.1)
                 except Exception as e:
                     if self.logger:
-                        self.logger.warning(
-                            "Failed to start stream for camera %s: %s" % (cam_id, e)
-                        )
+                        self.logger.warning(f"Failed to start stream for camera {cam_id}: {e}")
 
         ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        photos: List[Dict[str, Any]] = []
+        photos: list[dict[str, Any]] = []
 
         try:
             for cam_id in target_ids:
@@ -335,7 +321,7 @@ class MediaManager:
                 except Exception as e:
                     if self.logger:
                         self.logger.error(
-                            "Capture failed for camera %s: %s" % (cam_id, e),
+                            f"Capture failed for camera {cam_id}: {e}",
                             exc_info=True,
                         )
         finally:
@@ -353,7 +339,7 @@ class MediaManager:
 
     async def _capture_single(
         self, camera_id: int, ts_str: str, jpeg_quality: int = JPEG_QUALITY
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """对单个摄像头拍照
 
         Args:
@@ -368,7 +354,7 @@ class MediaManager:
         frame = self.camera_manager.get_frame(camera_id)
         if frame is None:
             if self.logger:
-                self.logger.warning("No frame from camera %s" % camera_id)
+                self.logger.warning(f"No frame from camera {camera_id}")
             return None
 
         loop = asyncio.get_event_loop()
@@ -376,38 +362,29 @@ class MediaManager:
         # 编码为 JPEG
         success, encoded = await loop.run_in_executor(
             None,
-            lambda: cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
-            ),
+            lambda: cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]),
         )
         if not success:
             if self.logger:
-                self.logger.error("JPEG encode failed for camera %s" % camera_id)
+                self.logger.error(f"JPEG encode failed for camera {camera_id}")
             return None
 
         # 文件命名: {robot_name}-cam{id}-{YYYYMMDD_HHmmss}.jpg
-        file_name = "%s-cam%s-%s.jpg" % (self.robot_name, camera_id, ts_str)
+        file_name = f"{self.robot_name}-cam{camera_id}-{ts_str}.jpg"
         file_path = os.path.join(self.photos_dir, file_name)
 
         # 写入文件
-        await loop.run_in_executor(
-            None, _write_bytes, file_path, encoded.tobytes()
-        )
+        await loop.run_in_executor(None, _write_bytes, file_path, encoded.tobytes())
 
         # 获取图片尺寸
         height, width = frame.shape[:2]
         size_bytes = int(encoded.nbytes)
 
         # 生成缩略图 (320x240 base64)
-        thumbnail_b64 = await loop.run_in_executor(
-            None, _make_thumbnail_base64, frame
-        )
+        thumbnail_b64 = await loop.run_in_executor(None, _make_thumbnail_base64, frame)
 
         if self.logger:
-            self.logger.info(
-                "Photo captured: %s (%dx%d, %d bytes)"
-                % (file_name, width, height, size_bytes)
-            )
+            self.logger.info(f"Photo captured: {file_name} ({width}x{height}, {size_bytes} bytes)")
 
         return {
             "camera_id": camera_id,
@@ -430,7 +407,7 @@ class MediaManager:
         quality: str = "medium",
         resolution: str = "720p",
         segment_duration_s: int = DEFAULT_SEGMENT_DURATION_S,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """开始循环录像（仅主摄）
 
         使用 cv2.VideoWriter 录制 MP4 视频，循环录制在后台 asyncio task 中运行。
@@ -458,7 +435,7 @@ class MediaManager:
         if camera_id not in cameras:
             return {
                 "success": False,
-                "error": "Camera %s not found" % camera_id,
+                "error": f"Camera {camera_id} not found",
             }
 
         # 检查磁盘空间
@@ -466,8 +443,7 @@ class MediaManager:
         if disk.free < MIN_DISK_SPACE_BYTES:
             return {
                 "success": False,
-                "error": "Insufficient disk space (%dMB < 500MB)"
-                % (disk.free // (1024 * 1024)),
+                "error": f"Insufficient disk space ({disk.free // (1024 * 1024)}MB < 500MB)",
             }
 
         # 参数映射
@@ -496,17 +472,11 @@ class MediaManager:
                     await asyncio.sleep(0.1)
             except Exception as e:
                 if self.logger:
-                    self.logger.warning(
-                        "Failed to start stream for recording: %s" % e
-                    )
+                    self.logger.warning(f"Failed to start stream for recording: {e}")
 
         # 生成文件名（初始无时长，分段结束时重命名加上时长）
         self._current_file_start_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_name = "%s-cam%s-%s.mp4" % (
-            self.robot_name,
-            camera_id,
-            self._current_file_start_ts,
-        )
+        file_name = f"{self.robot_name}-cam{camera_id}-{self._current_file_start_ts}.mp4"
         self._current_file_path = os.path.join(self.videos_dir, file_name)
 
         # 创建 VideoWriter
@@ -541,15 +511,9 @@ class MediaManager:
 
         if self.logger:
             self.logger.info(
-                "Recording started: camera=%s, quality=%s, resolution=%s, "
-                "fps=%d, segment=%ds"
-                % (
-                    camera_id,
-                    quality,
-                    resolution,
-                    self._recording_fps,
-                    segment_duration_s,
-                )
+                f"Recording started: camera={camera_id}, quality={quality}, "
+                f"resolution={resolution}, fps={self._recording_fps}, "
+                f"segment={segment_duration_s}s"
             )
 
         return {
@@ -585,38 +549,27 @@ class MediaManager:
                             online = True  # 检查失败时不停止
                         if not online:
                             if self.logger:
-                                self.logger.info(
-                                    "Recording auto-stopped: client offline"
-                                )
+                                self.logger.info("Recording auto-stopped: client offline")
                             break
 
                 # 检查最大段数（单次录制最多 10 段）
                 if len(self._segment_files) >= MAX_SEGMENTS:
                     if self.logger:
-                        self.logger.info(
-                            "Recording auto-stopped: max segments (%d) reached"
-                            % MAX_SEGMENTS
-                        )
+                        self.logger.info(f"Recording auto-stopped: max segments ({MAX_SEGMENTS}) reached")
                     break
 
                 # 检查最大录制时长（兜底：10 分钟）
                 elapsed = now - self._recording_start_time
                 if elapsed >= MAX_RECORDING_DURATION_S:
                     if self.logger:
-                        self.logger.info(
-                            "Recording auto-stopped: max duration (%ds) reached"
-                            % MAX_RECORDING_DURATION_S
-                        )
+                        self.logger.info(f"Recording auto-stopped: max duration ({MAX_RECORDING_DURATION_S}s) reached")
                     break
 
                 # 检查磁盘空间
                 disk = shutil.disk_usage(self.storage_dir)
                 if disk.free < MIN_DISK_SPACE_BYTES:
                     if self.logger:
-                        self.logger.warning(
-                            "Recording auto-stopped: low disk space (%dMB)"
-                            % (disk.free // (1024 * 1024))
-                        )
+                        self.logger.warning(f"Recording auto-stopped: low disk space ({disk.free // (1024 * 1024)}MB)")
                     break
 
                 # 检查分段时长
@@ -652,9 +605,7 @@ class MediaManager:
             # 不 re-raise，让 finally 正常执行清理
         except Exception as e:
             if self.logger:
-                self.logger.error(
-                    "Recording loop error: %s" % e, exc_info=True
-                )
+                self.logger.error(f"Recording loop error: {e}", exc_info=True)
         finally:
             # 确保录制停止并完成文件写入
             await self._finalize_recording()
@@ -674,11 +625,7 @@ class MediaManager:
         # 开始新段
         self._recording_segment_start = time.time()
         self._current_file_start_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        temp_name = "%s-cam%s-%s.mp4" % (
-            self.robot_name,
-            self._recording_camera_id,
-            self._current_file_start_ts,
-        )
+        temp_name = f"{self.robot_name}-cam{self._recording_camera_id}-{self._current_file_start_ts}.mp4"
         self._current_file_path = os.path.join(self.videos_dir, temp_name)
 
         # 创建新的 VideoWriter
@@ -702,14 +649,12 @@ class MediaManager:
                     pass
             self._current_file_path = None
             if self.logger:
-                self.logger.error(
-                    "Failed to create VideoWriter for new segment, stopping recording"
-                )
+                self.logger.error("Failed to create VideoWriter for new segment, stopping recording")
             # 不设 _recording=False，让 while 条件通过 _current_writer is None 自然退出
             # _finalize_recording 会在 finally 中处理后续清理
         else:
             if self.logger:
-                self.logger.info("Rotated to new segment: %s" % temp_name)
+                self.logger.info(f"Rotated to new segment: {temp_name}")
 
     async def _finalize_segment_file(self, duration_s: int) -> None:
         """完成分段文件：重命名加上时长并记录元数据
@@ -729,28 +674,21 @@ class MediaManager:
             if os.path.getsize(self._current_file_path) == 0:
                 await loop.run_in_executor(None, os.remove, self._current_file_path)
                 if self.logger:
-                    self.logger.warning("Skipped empty segment file: %s" % self._current_file_path)
+                    self.logger.warning(f"Skipped empty segment file: {self._current_file_path}")
                 return
         except OSError:
             pass
 
         # 重命名：加上时长后缀
         dir_name = os.path.dirname(self._current_file_path)
-        final_name = "%s-cam%s-%s-%ds.mp4" % (
-            self.robot_name,
-            self._recording_camera_id,
-            self._current_file_start_ts,
-            duration_s,
-        )
+        final_name = f"{self.robot_name}-cam{self._recording_camera_id}-{self._current_file_start_ts}-{duration_s}s.mp4"
         final_path = os.path.join(dir_name, final_name)
 
         try:
-            await loop.run_in_executor(
-                None, os.rename, self._current_file_path, final_path
-            )
+            await loop.run_in_executor(None, os.rename, self._current_file_path, final_path)
         except Exception as e:
             if self.logger:
-                self.logger.error("Failed to rename segment file: %s" % e)
+                self.logger.error(f"Failed to rename segment file: {e}")
             final_path = self._current_file_path
             final_name = os.path.basename(final_path)
 
@@ -762,9 +700,7 @@ class MediaManager:
         self._total_recorded_bytes += size_bytes
 
         # 生成封面缩略图
-        cover_b64 = await loop.run_in_executor(
-            None, _make_video_cover_base64, final_path
-        )
+        cover_b64 = await loop.run_in_executor(None, _make_video_cover_base64, final_path)
 
         self._segment_files.append(
             {
@@ -778,10 +714,7 @@ class MediaManager:
         )
 
         if self.logger:
-            self.logger.info(
-                "Segment finalized: %s (%ds, %d bytes)"
-                % (final_name, duration_s, size_bytes)
-            )
+            self.logger.info(f"Segment finalized: {final_name} ({duration_s}s, {size_bytes} bytes)")
 
     async def _finalize_recording(self) -> None:
         """完成录制：关闭 VideoWriter，完成文件，停止流，推送 UI 状态
@@ -815,7 +748,7 @@ class MediaManager:
                 await self.camera_manager.stop_stream(self._recording_camera_id)
             except Exception as e:
                 if self.logger:
-                    self.logger.debug("Failed to stop camera stream: %s" % e)
+                    self.logger.debug(f"Failed to stop camera stream: {e}")
             self._started_stream_for_recording = False
 
         # 推送录制 UI 状态（录制停止）
@@ -823,11 +756,11 @@ class MediaManager:
 
         if self.logger:
             self.logger.info(
-                "Recording finalized: segments=%d, total_size=%d bytes"
-                % (len(self._segment_files), self._total_recorded_bytes)
+                f"Recording finalized: segments={len(self._segment_files)}, "
+                f"total_size={self._total_recorded_bytes} bytes"
             )
 
-    async def stop_recording(self) -> Dict[str, Any]:
+    async def stop_recording(self) -> dict[str, Any]:
         """停止录像
 
         取消录制后台任务，完成文件写入，返回录制结果。
@@ -868,7 +801,7 @@ class MediaManager:
         # 汇总结果
         if self._segment_files:
             last_segment = self._segment_files[-1]
-            result: Dict[str, Any] = {
+            result: dict[str, Any] = {
                 "success": True,
                 "is_recording": False,
                 "file_name": last_segment["file_name"],
@@ -876,9 +809,7 @@ class MediaManager:
                 "duration_s": total_duration,
                 "size_bytes": self._total_recorded_bytes,
                 "resolution": self._recording_resolution,
-                "cover_thumbnail_base64": last_segment.get(
-                    "cover_thumbnail_base64", ""
-                ),
+                "cover_thumbnail_base64": last_segment.get("cover_thumbnail_base64", ""),
             }
         else:
             result = {
@@ -894,12 +825,9 @@ class MediaManager:
 
         if self.logger:
             self.logger.info(
-                "Recording stopped: duration=%ds, segments=%d, total_size=%d bytes"
-                % (
-                    total_duration,
-                    len(self._segment_files),
-                    self._total_recorded_bytes,
-                )
+                f"Recording stopped: duration={total_duration}s, "
+                f"segments={len(self._segment_files)}, "
+                f"total_size={self._total_recorded_bytes} bytes"
             )
 
         # 清理录制状态
@@ -941,7 +869,7 @@ class MediaManager:
                 await result
         except Exception as e:
             if self.logger:
-                self.logger.debug("recording_status_callback error: %s" % e)
+                self.logger.debug(f"recording_status_callback error: {e}")
 
     async def _push_ui_state(self, is_recording: bool) -> None:
         """推送录制 UI 状态（录制开始/停止时调用 recording_ui_state_callback）
@@ -966,7 +894,7 @@ class MediaManager:
                 await result
         except Exception as e:
             if self.logger:
-                self.logger.debug("recording_ui_state_callback error: %s" % e)
+                self.logger.debug(f"recording_ui_state_callback error: {e}")
 
     # ----------------------------------------------------------------
     # 图库管理
@@ -975,10 +903,10 @@ class MediaManager:
     async def list_media(
         self,
         media_type: str = "all",
-        camera_id: Optional[int] = None,
+        camera_id: int | None = None,
         page: int = 1,
         page_size: int = 20,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """查询媒体文件列表
 
         扫描存储目录，返回按时间倒序排列的文件列表，包含缩略图、文件大小、时间戳。
@@ -995,9 +923,7 @@ class MediaManager:
              "used_bytes", "available_bytes"}}
         """
         loop = asyncio.get_event_loop()
-        files = await loop.run_in_executor(
-            None, self._scan_media_files, media_type, camera_id
-        )
+        files = await loop.run_in_executor(None, self._scan_media_files, media_type, camera_id)
 
         # 分页
         total = len(files)
@@ -1020,9 +946,7 @@ class MediaManager:
             },
         }
 
-    def _scan_media_files(
-        self, media_type: str, camera_id: Optional[int]
-    ) -> List[Dict[str, Any]]:
+    def _scan_media_files(self, media_type: str, camera_id: int | None) -> list[dict[str, Any]]:
         """扫描存储目录，返回按时间倒序排列的文件列表
 
         Args:
@@ -1032,7 +956,7 @@ class MediaManager:
         Returns:
             文件信息列表，按修改时间倒序
         """
-        files: List[Dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
 
         # 当前正在录制的文件（不列入列表）
         recording_files = set()
@@ -1041,41 +965,35 @@ class MediaManager:
 
         cam_filter = None
         if camera_id is not None:
-            cam_filter = "-cam%d-" % camera_id
+            cam_filter = f"-cam{camera_id}-"
 
         # 扫描照片
-        if media_type in ("all", "photo"):
-            if os.path.isdir(self.photos_dir):
-                for name in os.listdir(self.photos_dir):
-                    if not name.endswith(".jpg"):
-                        continue
-                    if name in recording_files:
-                        continue
-                    if cam_filter is not None and cam_filter not in name:
-                        continue
-                    file_path = os.path.join(self.photos_dir, name)
-                    if not os.path.isfile(file_path):
-                        continue
-                    files.append(
-                        self._make_file_info(name, file_path, "photo")
-                    )
+        if media_type in ("all", "photo") and os.path.isdir(self.photos_dir):
+            for name in os.listdir(self.photos_dir):
+                if not name.endswith(".jpg"):
+                    continue
+                if name in recording_files:
+                    continue
+                if cam_filter is not None and cam_filter not in name:
+                    continue
+                file_path = os.path.join(self.photos_dir, name)
+                if not os.path.isfile(file_path):
+                    continue
+                files.append(self._make_file_info(name, file_path, "photo"))
 
         # 扫描视频
-        if media_type in ("all", "video"):
-            if os.path.isdir(self.videos_dir):
-                for name in os.listdir(self.videos_dir):
-                    if not name.endswith(".mp4"):
-                        continue
-                    if name in recording_files:
-                        continue
-                    if cam_filter is not None and cam_filter not in name:
-                        continue
-                    file_path = os.path.join(self.videos_dir, name)
-                    if not os.path.isfile(file_path):
-                        continue
-                    files.append(
-                        self._make_file_info(name, file_path, "video")
-                    )
+        if media_type in ("all", "video") and os.path.isdir(self.videos_dir):
+            for name in os.listdir(self.videos_dir):
+                if not name.endswith(".mp4"):
+                    continue
+                if name in recording_files:
+                    continue
+                if cam_filter is not None and cam_filter not in name:
+                    continue
+                file_path = os.path.join(self.videos_dir, name)
+                if not os.path.isfile(file_path):
+                    continue
+                files.append(self._make_file_info(name, file_path, "video"))
 
         # 按修改时间倒序
         files.sort(key=lambda f: f.get("_mtime", 0), reverse=True)
@@ -1086,9 +1004,7 @@ class MediaManager:
 
         return files
 
-    def _make_file_info(
-        self, file_name: str, file_path: str, media_type: str
-    ) -> Dict[str, Any]:
+    def _make_file_info(self, file_name: str, file_path: str, media_type: str) -> dict[str, Any]:
         """构造单个文件的元数据
 
         Args:
@@ -1109,7 +1025,7 @@ class MediaManager:
         ts_str = datetime.fromtimestamp(mtime).strftime("%Y%m%d_%H%M%S")
         cam_id = self._extract_camera_id(file_name)
 
-        info: Dict[str, Any] = {
+        info: dict[str, Any] = {
             "file_name": file_name,
             "type": media_type,
             "camera_id": cam_id,
@@ -1131,7 +1047,7 @@ class MediaManager:
 
         return info
 
-    def _extract_camera_id(self, file_name: str) -> Optional[int]:
+    def _extract_camera_id(self, file_name: str) -> int | None:
         """从文件名中提取 camera_id
 
         文件名格式: {robot_name}-cam{id}-{timestamp}...
@@ -1149,7 +1065,7 @@ class MediaManager:
                 return int(part[3:])
         return None
 
-    def _extract_video_duration(self, file_name: str) -> Optional[int]:
+    def _extract_video_duration(self, file_name: str) -> int | None:
         """从视频文件名中提取时长（秒）
 
         文件名格式: ...-{duration}s.mp4
@@ -1168,7 +1084,7 @@ class MediaManager:
                 return int(part[:-1])
         return None
 
-    async def delete_media(self, file_names: List[str]) -> Dict[str, Any]:
+    async def delete_media(self, file_names: list[str]) -> dict[str, Any]:
         """批量删除媒体文件
 
         Args:
@@ -1178,8 +1094,8 @@ class MediaManager:
             {"success": bool, "deleted": [...], "failed": [{...}]}
         """
         loop = asyncio.get_event_loop()
-        deleted: List[str] = []
-        failed: List[Dict[str, str]] = []
+        deleted: list[str] = []
+        failed: list[dict[str, str]] = []
 
         for file_name in file_names:
             # 防止路径遍历攻击：只取文件名部分，忽略任何路径分隔符
@@ -1194,13 +1110,11 @@ class MediaManager:
                 await loop.run_in_executor(None, os.remove, file_path)
                 deleted.append(safe_name)
                 if self.logger:
-                    self.logger.info("Deleted media file: %s" % safe_name)
+                    self.logger.info(f"Deleted media file: {safe_name}")
             except Exception as e:
                 failed.append({"file_name": safe_name, "error": str(e)})
                 if self.logger:
-                    self.logger.error(
-                        "Failed to delete %s: %s" % (safe_name, e)
-                    )
+                    self.logger.error(f"Failed to delete {safe_name}: {e}")
 
         return {
             "success": len(failed) == 0,
@@ -1208,7 +1122,7 @@ class MediaManager:
             "failed": failed,
         }
 
-    def get_media_path(self, file_name: str) -> Optional[str]:
+    def get_media_path(self, file_name: str) -> str | None:
         """根据文件名获取完整路径
 
         防止路径遍历攻击：使用 os.path.basename() 去除任何路径分隔符，
@@ -1234,7 +1148,7 @@ class MediaManager:
 
         return None
 
-    def get_thumbnail(self, file_name: str) -> Optional[str]:
+    def get_thumbnail(self, file_name: str) -> str | None:
         """获取文件的 base64 缩略图
 
         照片: 缩略图 (320x240)
@@ -1267,7 +1181,7 @@ class MediaManager:
         """是否正在录制"""
         return self._recording
 
-    def get_recording_status(self) -> Dict[str, Any]:
+    def get_recording_status(self) -> dict[str, Any]:
         """获取当前录制状态
 
         Returns:

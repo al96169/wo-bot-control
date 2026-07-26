@@ -14,7 +14,6 @@ import json
 import logging
 import socket
 import time
-from typing import Optional
 
 import cv2
 import numpy as np
@@ -80,13 +79,12 @@ class CameraVideoTrack(VideoStreamTrack):
 
     # 画质 → (width, height) 映射（直播流专用）
     QUALITY_RESOLUTION_MAP = {
-        "high": None,       # 使用配置页的原生分辨率
+        "high": None,  # 使用配置页的原生分辨率
         "medium": (640, 480),
         "low": (480, 360),
     }
 
-    def __init__(self, camera_manager, camera_id=0, fps=30,
-                 native_resolution=None, logger=None, client_id=""):
+    def __init__(self, camera_manager, camera_id=0, fps=30, native_resolution=None, logger=None, client_id=""):
         super().__init__()
         self.camera_manager = camera_manager
         self.camera_id = camera_id
@@ -120,10 +118,7 @@ class CameraVideoTrack(VideoStreamTrack):
             self._target_height = self._native_height
         else:
             self._target_width, self._target_height = res
-        self._resize_needed = (
-            self._target_width != self._native_width
-            or self._target_height != self._native_height
-        )
+        self._resize_needed = self._target_width != self._native_width or self._target_height != self._native_height
         info = self.get_quality_info()
         if self.logger:
             self.logger.info(
@@ -159,9 +154,7 @@ class CameraVideoTrack(VideoStreamTrack):
                 )
 
         # 动态分辨率缩放
-        if self._resize_needed and (
-            frame.shape[1] != self._target_width or frame.shape[0] != self._target_height
-        ):
+        if self._resize_needed and (frame.shape[1] != self._target_width or frame.shape[0] != self._target_height):
             frame = cv2.resize(frame, (self._target_width, self._target_height))
 
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -187,7 +180,7 @@ class WebRTCService:
         self._cleaning_up: set[str] = set()
 
         # 画质管理
-        self._stream_quality_mode: dict[str, str] = {}   # client_id → auto/high/medium/low
+        self._stream_quality_mode: dict[str, str] = {}  # client_id → auto/high/medium/low
         self._auto_negotiators: dict[str, asyncio.Task] = {}  # client_id → auto-negotiation task
 
         # 服务端对外公告 IP（用于 SDP ICE candidate 中替换 .local）
@@ -196,16 +189,17 @@ class WebRTCService:
 
     # ---------- 画质管理 ----------
 
-    def set_client_quality(self, client_id: str, mode: str) -> Optional[dict]:
+    def set_client_quality(self, client_id: str, mode: str) -> dict | None:
         """设置指定客户端的画质模式，返回画质信息（含所有 track）"""
         tracks = self._video_tracks.get(client_id, {})
         if not tracks:
             return None
         self._stream_quality_mode[client_id] = mode
-        result = {"mode": mode, "tracks": {}}
+        tracks_info: dict[int, object] = {}
+        result: dict[str, object] = {"mode": mode, "tracks": tracks_info}
         for cam_id, track in tracks.items():
             info = track.set_quality(mode)
-            result["tracks"][cam_id] = info
+            tracks_info[cam_id] = info
         # 自动模式启动协商引擎，手动模式停止
         if mode == "auto":
             self._start_auto_negotiation(client_id)
@@ -224,9 +218,7 @@ class WebRTCService:
         """启动自动画质协商后台任务"""
         if client_id in self._auto_negotiators:
             return
-        self._auto_negotiators[client_id] = asyncio.ensure_future(
-            self._auto_negotiate_loop(client_id)
-        )
+        self._auto_negotiators[client_id] = asyncio.ensure_future(self._auto_negotiate_loop(client_id))
         self.logger.info(f"[{client_id}] Auto quality negotiation started")
 
     def _stop_auto_negotiation(self, client_id: str):
@@ -238,11 +230,11 @@ class WebRTCService:
     async def _auto_negotiate_loop(self, client_id: str):
         """自动协商循环：每 3 秒评估连接质量，调整画质"""
         # 降级/升级防抖计数器
-        degrade_streak = 0   # 连续满足降级条件的次数
-        upgrade_streak = 0   # 连续满足升级条件的次数
+        degrade_streak = 0  # 连续满足降级条件的次数
+        upgrade_streak = 0  # 连续满足升级条件的次数
         current_level = "high"  # 当前生效档位
-        DEGRADE_THRESHOLD = 1   # 连续 1 次即降级（≈3秒）
-        UPGRADE_THRESHOLD = 2   # 连续 2 次即升级（≈6秒）
+        DEGRADE_THRESHOLD = 1  # 连续 1 次即降级（≈3秒）
+        UPGRADE_THRESHOLD = 2  # 连续 2 次即升级（≈6秒）
 
         try:
             while True:
@@ -264,28 +256,22 @@ class WebRTCService:
                     # 需要降级
                     degrade_streak += 1
                     upgrade_streak = 0
-                    if degrade_streak >= DEGRADE_THRESHOLD:
-                        if current_level != quality_level:
-                            self.logger.info(
-                                f"[{client_id}] Auto degrade: {current_level} → {quality_level}"
-                            )
-                            current_level = quality_level
-                            self._apply_quality_to_tracks(client_id, current_level)
-                            await self._notify_quality_changed(client_id, current_level)
-                            degrade_streak = 0
+                    if degrade_streak >= DEGRADE_THRESHOLD and current_level != quality_level:
+                        self.logger.info(f"[{client_id}] Auto degrade: {current_level} → {quality_level}")
+                        current_level = quality_level
+                        self._apply_quality_to_tracks(client_id, current_level)
+                        await self._notify_quality_changed(client_id, current_level)
+                        degrade_streak = 0
                 elif target_idx > cur_idx:
                     # 需要升级
                     upgrade_streak += 1
                     degrade_streak = 0
-                    if upgrade_streak >= UPGRADE_THRESHOLD:
-                        if current_level != quality_level:
-                            self.logger.info(
-                                f"[{client_id}] Auto upgrade: {current_level} → {quality_level}"
-                            )
-                            current_level = quality_level
-                            self._apply_quality_to_tracks(client_id, current_level)
-                            await self._notify_quality_changed(client_id, current_level)
-                            upgrade_streak = 0
+                    if upgrade_streak >= UPGRADE_THRESHOLD and current_level != quality_level:
+                        self.logger.info(f"[{client_id}] Auto upgrade: {current_level} → {quality_level}")
+                        current_level = quality_level
+                        self._apply_quality_to_tracks(client_id, current_level)
+                        await self._notify_quality_changed(client_id, current_level)
+                        upgrade_streak = 0
                 else:
                     degrade_streak = 0
                     upgrade_streak = 0
@@ -294,7 +280,7 @@ class WebRTCService:
         except Exception as e:
             self.logger.error(f"[{client_id}] Auto-negotiation error: {e}", exc_info=True)
 
-    async def _eval_connection_quality(self, client_id: str) -> Optional[str]:
+    async def _eval_connection_quality(self, client_id: str) -> str | None:
         """评估连接质量，返回 high/medium/low 档位"""
         pc = self._connections.get(client_id)
         if not pc:
@@ -307,7 +293,7 @@ class WebRTCService:
             try:
                 t0 = time.time()
                 # 发送 ping，等待 pong（pong 由 message_handler 处理）
-                dc.send('{"type":"ping","data":{"ts":%.6f}}' % t0)
+                dc.send(f'{{"type":"ping","data":{{"ts":{t0:.6f}}}}}')
                 # RTT 近似：用上次心跳的 RTT（如果有的话）
                 rtt_ms = getattr(self, f"_last_rtt_{client_id}", None)
             except Exception:

@@ -11,7 +11,6 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlencode
 
 import websockets
@@ -32,7 +31,7 @@ class SignalClient:
         robot_secret: str,
         device_id: str,
         webrtc_service=None,
-        logger: Optional[logging.Logger] = None,
+        logger: logging.Logger | None = None,
     ):
         self.server_url = server_url.rstrip("/")
         self.robot_secret = robot_secret
@@ -56,8 +55,8 @@ class SignalClient:
         config: dict,
         webrtc_service=None,
         device_id: str = "",
-        logger: Optional[logging.Logger] = None,
-    ) -> "Optional[SignalClient]":
+        logger: logging.Logger | None = None,
+    ) -> "SignalClient | None":
         """Create SignalClient from config dict."""
         signal_cfg = config.get("signal", {})
         if not signal_cfg.get("enabled", False):
@@ -114,12 +113,14 @@ class SignalClient:
         """Build WebSocket URL with auth params."""
         timestamp = int(time.time() * 1000)
         signature = self._sign(timestamp)
-        params = urlencode({
-            "role": "robot",
-            "deviceId": self.device_id,
-            "timestamp": str(timestamp),
-            "signature": signature,
-        })
+        params = urlencode(
+            {
+                "role": "robot",
+                "deviceId": self.device_id,
+                "timestamp": str(timestamp),
+                "signature": signature,
+            }
+        )
         # server_url may be wss:// or ws://
         separator = "&" if "?" in self.server_url else "?"
         return f"{self.server_url}{separator}{params}"
@@ -175,7 +176,7 @@ class SignalClient:
                 break
 
             # Exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s
-            delay = min(2 ** self._reconnect_count, 30)
+            delay = min(2**self._reconnect_count, 30)
             self._reconnect_count += 1
             self.logger.info(f"[Signal] Reconnecting in {delay}s (attempt {self._reconnect_count})")
             await asyncio.sleep(delay)
@@ -217,10 +218,7 @@ class SignalClient:
         sdp_data = msg.get("sdp", "")
 
         # 浏览器发送的 SDP 可能是对象 {type, sdp} 或纯字符串
-        if isinstance(sdp_data, dict):
-            sdp_offer = sdp_data.get("sdp", "")
-        else:
-            sdp_offer = sdp_data
+        sdp_offer = sdp_data.get("sdp", "") if isinstance(sdp_data, dict) else sdp_data
 
         if not sdp_offer:
             self.logger.warning("[Signal] Call message missing SDP")

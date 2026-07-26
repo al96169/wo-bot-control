@@ -669,7 +669,7 @@ class BindingManager:
             return None
         if not self.can_add_binding():
             if self._logger:
-                self._logger.warning(f"[Bind] Cannot add binding: max reached")
+                self._logger.warning("[Bind] Cannot add binding: max reached")
             return None
         client_token = self._generate_client_token(user_client_id)
         now_iso = datetime.now(timezone.utc).isoformat()

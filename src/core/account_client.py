@@ -289,9 +289,7 @@ class AccountClient:
                     self.logger.info("[Account] Device has no owner")
                     return None
                 if owner_user_id != user_id:
-                    self.logger.warning(
-                        f"[Account] JWT user {user_id} != device owner {owner_user_id}"
-                    )
+                    self.logger.warning(f"[Account] JWT user {user_id} != device owner {owner_user_id}")
                     return None
                 self.logger.info(f"[Account] Account token verified for user {user_id}")
                 return user_id

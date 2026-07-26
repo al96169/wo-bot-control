@@ -370,13 +370,10 @@ class SoftwareManager:
 
         # 查询升级后版本（自升级跳过：software_manager 即将被杀死）
         new_version = ""
-        is_self_upgrade = (package == "wobot-control")
+        is_self_upgrade = package == "wobot-control"
         if success and not is_self_upgrade:
             installed_after = await self._get_installed_packages()
-            if stype == "apt":
-                apt_name = apt_pkg
-            else:
-                apt_name = self._pkg_install_name(pkg)
+            apt_name = apt_pkg if stype == "apt" else self._pkg_install_name(pkg)
             new_version = installed_after.get(apt_name, "")
         elif success and is_self_upgrade:
             new_version = pkg.get("latest_version", "")
@@ -650,13 +647,13 @@ class SoftwareManager:
         suffix = display_name.replace("/", "_").replace(" ", "_")
         status_file = f"/tmp/wobot-dpkg-{suffix}.status"
         log_file = f"/tmp/wobot-dpkg-{suffix}.log"
-        is_self_upgrade = (display_name == "wobot-control")
+        is_self_upgrade = display_name == "wobot-control"
 
         # 清理残留
-        for f in (status_file, log_file):
+        for file_path in (status_file, log_file):
             try:
-                if os.path.exists(f):
-                    os.remove(f)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
             except OSError:
                 pass
 
@@ -760,8 +757,7 @@ echo $DPKG_RC > "{status_file}"
         launched = False
         try:
             subprocess.Popen(
-                ["systemd-run", "--scope", "--quiet", "--unit=wobot-dpkg-upgrade",
-                 "bash", script_path],
+                ["systemd-run", "--scope", "--quiet", "--unit=wobot-dpkg-upgrade", "bash", script_path],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -792,8 +788,7 @@ echo $DPKG_RC > "{status_file}"
         # 自升级：立即返回成功，本进程即将被 prerm 杀死
         if is_self_upgrade:
             logger.info("Self-upgrade detached script launched, returning optimistic success")
-            self._emit_progress(display_name, action, 100, "done",
-                              "self-upgrade initiated, service will restart...")
+            self._emit_progress(display_name, action, 100, "done", "self-upgrade initiated, service will restart...")
             return True, "self-upgrade detached"
 
         # 非自升级：轮询状态文件
@@ -822,9 +817,10 @@ echo $DPKG_RC > "{status_file}"
                     except OSError:
                         pass
 
-                success = (rc == 0)
+                success = rc == 0
                 self._emit_progress(
-                    display_name, action,
+                    display_name,
+                    action,
                     100 if success else 0,
                     "done" if success else "failed",
                 )
@@ -844,7 +840,10 @@ echo $DPKG_RC > "{status_file}"
                         last_line = lines[-1].strip() if lines else ""
                         if last_line:
                             self._emit_progress(
-                                display_name, action, progress, "install",
+                                display_name,
+                                action,
+                                progress,
+                                "install",
                                 last_line[-100:],
                             )
                 except OSError:

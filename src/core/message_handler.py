@@ -1675,17 +1675,20 @@ class MessageHandler:
                 self.logger.info(f"[Config] Password binding → {enabled}")
 
         # software_manager 配置变更 → 重启 software_manager 子进程使新配置生效
-        if any(c.startswith("software_manager") for c in diff):
-            if hasattr(self, "service_manager") and self.service_manager:
-                try:
-                    if self.logger:
-                        self.logger.info("[Config] software_manager config changed, restarting subprocess...")
-                    await self.service_manager.restart_service("software_manager")
-                    if self.logger:
-                        self.logger.info("[Config] software_manager subprocess restarted")
-                except Exception as e:
-                    if self.logger:
-                        self.logger.warning(f"[Config] software_manager restart failed: {e}")
+        if (
+            any(c.startswith("software_manager") for c in diff)
+            and hasattr(self, "service_manager")
+            and self.service_manager
+        ):
+            try:
+                if self.logger:
+                    self.logger.info("[Config] software_manager config changed, restarting subprocess...")
+                await self.service_manager.restart_service("software_manager")
+                if self.logger:
+                    self.logger.info("[Config] software_manager subprocess restarted")
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"[Config] software_manager restart failed: {e}")
 
         return requires_reboot
 
