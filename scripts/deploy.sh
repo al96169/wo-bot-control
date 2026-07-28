@@ -166,13 +166,35 @@ crontab -l 2>/dev/null | grep -v "wo-bot-control" | crontab - 2>/dev/null || tru
 echo "  -> 创建目标目录..."
 mkdir -p ${REMOTE_DIR}
 
-echo "  -> 清理旧文件（保留 venv/）..."
-# 删除除 venv 外的所有内容，避免破坏已安装依赖
+echo "  -> 清理旧文件（保留 venv/ + 绑定凭据）..."
+
+# 备份绑定凭据（避免每次部署都需要重新绑定客户端）
+BINDING_BACKUP=$(mktemp -d)
+if [ -f ${REMOTE_DIR}/config/.binding_secret ]; then
+    cp ${REMOTE_DIR}/config/.binding_secret "$BINDING_BACKUP/" 2>/dev/null || true
+fi
+if [ -f ${REMOTE_DIR}/config/.binding_password ]; then
+    cp ${REMOTE_DIR}/config/.binding_password "$BINDING_BACKUP/" 2>/dev/null || true
+fi
+
+# 删除除 venv 外的所有内容
 find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 ! -name 'venv' -exec rm -rf {} + 2>/dev/null || true
 eval "${SUDO} find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 ! -name 'venv' -exec rm -rf {} +" 2>/dev/null || true
 
 echo "  -> 解压部署包..."
 tar -xzf /tmp/${PACKAGE_NAME} -C ${REMOTE_DIR}
+
+# 还原绑定凭据
+mkdir -p ${REMOTE_DIR}/config
+if [ -f "$BINDING_BACKUP/.binding_secret" ]; then
+    cp "$BINDING_BACKUP/.binding_secret" ${REMOTE_DIR}/config/
+    echo "  -> 已还原绑定凭据 .binding_secret"
+fi
+if [ -f "$BINDING_BACKUP/.binding_password" ]; then
+    cp "$BINDING_BACKUP/.binding_password" ${REMOTE_DIR}/config/
+    echo "  -> 已还原绑定凭据 .binding_password"
+fi
+rm -rf "$BINDING_BACKUP"
 
 # ---- 编译本地 C 工具 ----
 echo "  -> 编译 C 工具..."

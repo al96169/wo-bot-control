@@ -33,11 +33,6 @@ import yaml
 
 BUILTIN_DRIVERS: dict[str, Callable] = {}
 
-# DHT11 共享缓存（一次读取同时提供温度和湿度，避免重复调用 C 程序）
-_dht11_shared_cache: dict[str, float | None] = {}
-_dht11_shared_cache_time: float = 0.0
-_DHT11_CACHE_TTL: float = 30.0
-
 
 def register_builtin_driver(name: str):
     """装饰器：注册内置驱动到全局注册表"""
@@ -52,8 +47,7 @@ def register_builtin_driver(name: str):
 # ============================================================
 
 SLOT_DEFINITIONS: dict[str, dict] = {
-    "ambient_temperature": {"unit": "°C",   "category": "environment"},
-    "ambient_humidity":    {"unit": "%",    "category": "environment"},
+    "dht11":               {"unit": "",     "category": "environment"},
     "gas":                 {"unit": "",     "category": "environment"},
     "light":               {"unit": "lux",  "category": "environment"},
     "co2":                 {"unit": "ppm",  "category": "environment"},
@@ -75,8 +69,9 @@ class PeripheralRegistry:
         self.logger = logger
         self._slots: dict[str, dict] = {}       # slot_name → 合并后的完整配置
         self._providers: dict[str, Any] = {}    # slot_name → DataProvider 实例
-        self._cache: dict[str, Any] = {}        # slot_name → 最近一次采集值
+        self._cache: dict[str, Any] = {}        # slot_name → 最近一次有效采集值（None 不写入）
         self._cache_times: dict[str, float] = {} # slot_name → 最近采集时间戳
+        self._last_success_times: dict[str, float] = {}  # slot_name → 最后一次成功采集时间戳
         self._config_mtime: float = 0.0
         self._load_config()
 
@@ -190,6 +185,7 @@ class PeripheralRegistry:
             self._providers.clear()
             self._cache.clear()
             self._cache_times.clear()
+            self._last_success_times.clear()
             self._load_config()
             return True
         return False
@@ -261,22 +257,38 @@ class PeripheralRegistry:
             # 采集
             try:
                 value = await provider.read()
-                self._cache[slot_name] = value
                 self._cache_times[slot_name] = now
-                results[slot_name] = value
+                if value is not None:
+                    # 成功：更新缓存值和成功时间
+                    self._cache[slot_name] = value
+                    self._last_success_times[slot_name] = now
+                # 失败时保持缓存中的上一次有效值（不写入 None）
+                results[slot_name] = self._cache.get(slot_name)
             except Exception as e:
                 if self.logger:
                     self.logger.debug(f"Peripheral '{slot_name}' read error: {e}")
+                self._cache_times[slot_name] = now
                 results[slot_name] = self._cache.get(slot_name)
 
         return results
 
     async def collect_environment(self) -> dict[str, float | None]:
-        """采集环境类槽位（兼容现有 collector.py 的 environment 结构）"""
+        """采集环境类槽位（兼容现有 collector.py 的 environment 结构）
+
+        DHT11 槽位返回 dict {temperature, humidity}，这里拆解为独立字段。
+        """
         all_data = await self.collect_all()
+        dht11 = all_data.get("dht11")
+        if isinstance(dht11, dict):
+            return {
+                "temperature": dht11.get("temperature"),
+                "humidity": dht11.get("humidity"),
+                "gas": all_data.get("gas"),
+                "light": all_data.get("light"),
+            }
         return {
-            "temperature": all_data.get("ambient_temperature"),
-            "humidity": all_data.get("ambient_humidity"),
+            "temperature": None,
+            "humidity": None,
             "gas": all_data.get("gas"),
             "light": all_data.get("light"),
         }
@@ -285,13 +297,23 @@ class PeripheralRegistry:
         """获取外设状态摘要（随 WebSocket status 推送）
 
         返回 {slot_name: {state, provider, unit, category}}
+        在线判断依据：最近一次采集成功时间，而非临时性失败。
         """
+        now = time.time()
         status: dict[str, dict] = {}
         for slot_name, slot_cfg in self._slots.items():
             ptype = slot_cfg["provider"]
             if ptype == "none":
                 state = "unconfigured"
+            elif slot_name in self._last_success_times:
+                # 最近一次成功在合理时间内 → 在线
+                interval = slot_cfg.get("interval_sec", 30)
+                if (now - self._last_success_times[slot_name]) < max(interval * 3, 120):
+                    state = "online"
+                else:
+                    state = "offline"
             elif slot_name in self._cache and self._cache[slot_name] is not None:
+                # 有缓存数据但从未记录成功时间（首次读取前的过渡状态）
                 state = "online"
             else:
                 state = "offline"
@@ -342,25 +364,14 @@ class DataProviderBuiltin:
 # ---- 内置驱动实现 ----
 
 @register_builtin_driver("dht11")
-async def _dht11_read(slot_name: str, config: dict, logger) -> float | None:
-    """DHT11 温湿度传感器驱动。
-
-    一次 C 程序调用同时获取温度和湿度，使用模块级共享缓存避免重复调用。
-    """
-    global _dht11_shared_cache, _dht11_shared_cache_time
+async def _dht11_read(slot_name: str, config: dict, logger) -> dict | None:
+    """DHT11 温湿度传感器驱动。一次 C 程序调用同时获取温度和湿度，返回 dict。"""
 
     pin = config.get("pin", 194)
     bin_path = DataProviderBuiltin.DRIVER_BIN_MAP.get(
         "dht11", "/opt/wobot/bin/dht11_reader"
     )
 
-    # 共享缓存命中（另一个槽位已读取过）
-    now = time.time()
-    if _dht11_shared_cache and (now - _dht11_shared_cache_time) < _DHT11_CACHE_TTL:
-        key = "temperature" if slot_name == "ambient_temperature" else "humidity"
-        return _dht11_shared_cache.get(key)
-
-    # 调用 C 程序
     if not os.path.isfile(bin_path):
         if logger:
             logger.debug(f"DHT11 binary not found: {bin_path}")
@@ -384,14 +395,10 @@ async def _dht11_read(slot_name: str, config: dict, logger) -> float | None:
         temp = float(data.get("temperature", 0))
         hum = float(data.get("humidity", 0))
 
-        # 更新共享缓存
-        _dht11_shared_cache = {"temperature": temp, "humidity": hum}
-        _dht11_shared_cache_time = now
-
         if logger:
             logger.info(f"DHT11: {temp:.1f}°C, {hum:.1f}%")
 
-        return temp if slot_name == "ambient_temperature" else hum
+        return {"temperature": temp, "humidity": hum}
 
     except asyncio.TimeoutError:
         if logger:

@@ -10,19 +10,12 @@
 data_slots:
 
   # ---- 环境 ----
-  ambient_temperature:
+  dht11:
     provider: builtin
     driver: dht11
     config: { bus: gpio, pin: 194 }
     interval_sec: 30
-    unit: "°C"
-
-  ambient_humidity:
-    provider: builtin
-    driver: dht11
-    config: { bus: gpio, pin: 194 }
-    interval_sec: 30
-    unit: "%"
+    unit: ""
 
   gas:
     provider: none
