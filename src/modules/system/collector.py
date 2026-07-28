@@ -1,12 +1,16 @@
 """
 系统信息采集模块
-采集电池、CPU、内存、网络等系统状态
+采集电池、CPU、内存、网络、环境温湿度等系统状态
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import platform
 import subprocess
+import time
 from datetime import datetime
 
 import psutil
@@ -26,11 +30,19 @@ class SystemCollector:
     # 当实测放速率不可信时，使用保守估算：~0.002 V/min ≈ 约 17 小时从满到空（10Ah 电池 + Jetson 约 10W 负载）
     FALLBACK_DISCHARGE_RATE = 0.002  # V/分钟
 
+    # DHT11 温湿度传感器
+    DHT11_BIN = "/opt/wobot/bin/dht11_reader"
+    DHT11_GPIO = 194
+    DHT11_CACHE_TTL = 30  # 缓存 30 秒
+
     def __init__(self, logger=None):
         self.logger = logger
         self.start_time = datetime.now()
         self._rosmaster_bot = None  # Rosmaster bot 实例引用（用于读取电池电压）
         self._battery_history: list[tuple[float, float]] = []  # (timestamp, voltage) 用于剩余时长估计
+        # DHT11 环境数据缓存
+        self._env_cache: dict | None = None
+        self._env_cache_time: float = 0.0
 
     def set_bot(self, bot) -> None:
         """注入 Rosmaster bot 实例（与运动/云台共享串口），用于读取电池电压"""
@@ -98,8 +110,9 @@ class SystemCollector:
             battery = await self._collect_battery()
             system = await self._collect_system()
             network = await self._collect_network()
+            environment = await self._collect_environment()
 
-            return {"battery": battery, "system": system, "network": network}
+            return {"battery": battery, "system": system, "network": network, "environment": environment}
         except Exception as e:
             if self.logger:
                 self.logger.error(f"System collection error: {e}", exc_info=True)
@@ -306,6 +319,63 @@ class SystemCollector:
 
         except Exception:
             return {}
+
+    async def _collect_environment(self) -> dict:
+        """采集环境温湿度（DHT11 传感器），带 30 秒缓存"""
+        now = time.time()
+
+        # 缓存有效则直接返回
+        if self._env_cache is not None and (now - self._env_cache_time) < self.DHT11_CACHE_TTL:
+            return self._env_cache
+
+        result = {"temperature": None, "humidity": None, "gas": None, "light": None}
+
+        # 检查 DHT11 程序是否存在
+        if not os.path.isfile(self.DHT11_BIN):
+            if self.logger:
+                self.logger.debug(f"DHT11 binary not found: {self.DHT11_BIN}")
+            return result
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.DHT11_BIN, str(self.DHT11_GPIO),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+
+            if proc.returncode != 0:
+                if self.logger:
+                    stderr_msg = stderr.decode(errors="replace").strip()
+                    self.logger.debug(f"DHT11 read failed (rc={proc.returncode}): {stderr_msg[-200:]}")
+                return result
+
+            # 解析 JSON 输出
+            data = json.loads(stdout.decode().strip())
+            if "temperature" in data and "humidity" in data:
+                result["temperature"] = float(data["temperature"])
+                result["humidity"] = float(data["humidity"])
+
+                # 更新缓存
+                self._env_cache = result
+                self._env_cache_time = now
+
+                if self.logger:
+                    self.logger.info(
+                        f"Environment: {result['temperature']:.1f}°C, {result['humidity']:.1f}%"
+                    )
+
+        except asyncio.TimeoutError:
+            if self.logger:
+                self.logger.debug("DHT11 read timeout")
+        except (json.JSONDecodeError, ValueError) as e:
+            if self.logger:
+                self.logger.debug(f"DHT11 parse error: {e}")
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"DHT11 read error: {e}")
+
+        return result
 
     async def get_detailed_info(self) -> dict:
         """获取详细信息"""

@@ -124,7 +124,7 @@ Priority: optional
 Depends: python3
 EOF
 
-# postinst — 首次安装时创建配置、启用 systemd 服务
+# postinst — 首次安装时创建配置、编译C工具、启用 systemd 服务
 cat > "$DEBIAN_DIR/postinst" << 'POSTINST_EOF'
 #!/bin/bash
 set -e
@@ -140,6 +140,17 @@ if [ ! -f "$CONFIG_FILE" ] && [ -f "$CONFIG_EXAMPLE" ]; then
     cp "$CONFIG_EXAMPLE" "$CONFIG_FILE"
     chmod 644 "$CONFIG_FILE"
 fi
+
+# 编译本地 C 工具
+echo "[postinst] Compiling C tools..."
+mkdir -p "$INSTALL_DIR/bin"
+for cfile in "$INSTALL_DIR/src/tools/dht11/dht11_reader.c"; do
+    if [ -f "$cfile" ]; then
+        toolname=$(basename "$cfile" .c)
+        gcc -O2 -o "${INSTALL_DIR}/bin/${toolname}" "$cfile" || echo "[postinst] WARNING: ${toolname} compile failed"
+        echo "[postinst] ${toolname} compiled"
+    fi
+done
 
 if command -v systemctl &>/dev/null; then
     systemctl daemon-reload 2>/dev/null || true

@@ -174,6 +174,17 @@ eval "${SUDO} find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 ! -name 'venv' -exec rm
 echo "  -> 解压部署包..."
 tar -xzf /tmp/${PACKAGE_NAME} -C ${REMOTE_DIR}
 
+# ---- 编译本地 C 工具 ----
+echo "  -> 编译 C 工具..."
+mkdir -p ${REMOTE_DIR}/bin
+for cfile in ${REMOTE_DIR}/src/tools/dht11/dht11_reader.c; do
+    if [ -f "$cfile" ]; then
+        toolname=$(basename "$cfile" .c)
+        gcc -O2 -o "${REMOTE_DIR}/bin/${toolname}" "$cfile" 2>&1 || echo "  [警告] ${toolname} 编译失败"
+        echo "  -> ${toolname} 已编译"
+    fi
+done
+
 # ---- 音频硬件自动检测 & 配置 ----
 echo "  -> 运行音频硬件自动配置..."
 if [ -f "${REMOTE_DIR}/scripts/setup_audio.sh" ]; then
