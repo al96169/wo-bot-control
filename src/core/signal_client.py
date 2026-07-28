@@ -4,6 +4,8 @@ Connects to wo-bot-signal server via WebSocket, handles WebRTC signaling
 for cross-network remote control.
 """
 
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import hmac
