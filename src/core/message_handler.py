@@ -141,6 +141,11 @@ class MessageHandler:
         if self._get_media_manager() and self._is_feature_enabled("camera_capture"):
             features.append("camera_capture")
         status_data["features"] = features
+
+        # R00044: 外设在线状态（随 status 消息周期推送）
+        if self.system_collector and hasattr(self.system_collector, "get_peripheral_status"):
+            status_data["peripherals"] = self.system_collector.get_peripheral_status()
+
         return {"type": "status", "data": status_data}
 
     async def _handle_motion(self, data: dict) -> dict:

@@ -1,0 +1,52 @@
+# 通用外设数据采集框架 — 数据槽位配置
+# 每个槽位可独立配置数据来源：builtin / custom / external / none
+# builtin:   平台内置驱动读取（如 DHT11、YS-IRTM）
+# custom:    用户自写可执行文件，stdout 输出 JSON，exit code 0=成功
+# external:  外部数据源接入（mqtt / http / file / serial / websocket）
+# none:      无此硬件，槽位的值为 null，前端显示 --
+#
+# 修改后无需重启服务，collector 会动态检测配置变更
+
+data_slots:
+
+  # ---- 环境 ----
+  ambient_temperature:
+    provider: builtin
+    driver: dht11
+    config: { bus: gpio, pin: 194 }
+    interval_sec: 30
+    unit: "°C"
+
+  ambient_humidity:
+    provider: builtin
+    driver: dht11
+    config: { bus: gpio, pin: 194 }
+    interval_sec: 30
+    unit: "%"
+
+  gas:
+    provider: none
+    unit: ""
+
+  light:
+    provider: none
+    unit: "lux"
+
+  # ---- 空气质量（external 示例，按需替换为实际硬件） ----
+  co2:
+    provider: none
+    unit: "ppm"
+
+  pm25:
+    provider: none
+    unit: "μg/m³"
+
+  # ---- 智能家居 ----
+  ir_transceiver:
+    provider: none
+    unit: ""
+
+  # ---- 电源 ----
+  battery_voltage:
+    provider: none
+    unit: "V"

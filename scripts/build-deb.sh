@@ -97,6 +97,11 @@ else
     fi
 fi
 
+# 外设配置文件（R00044 通用外设数据采集框架）
+if [ -f "$PROJECT_DIR/config/peripherals.yaml" ]; then
+    cp "$PROJECT_DIR/config/peripherals.yaml" "$DATA_DIR/config/peripherals.yaml"
+fi
+
 # 版本文件
 echo "$VERSION" > "$DATA_DIR/version.txt"
 
