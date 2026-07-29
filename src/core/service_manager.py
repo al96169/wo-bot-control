@@ -82,6 +82,14 @@ SERVICE_DEFINITIONS: dict[str, dict] = {
         "auto_start": True,
         "in_process": True,
     },
+    "sensor_recorder": {
+        "name": "传感器日志服务",
+        "module": "modules.system.sensor_recorder",
+        "script": None,
+        "description": "传感器数据持久化记录（SQLite）",
+        "auto_start": True,
+        "in_process": True,
+    },
 }
 
 MAX_RESTART_ATTEMPTS = 10

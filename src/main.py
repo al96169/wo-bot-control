@@ -36,6 +36,7 @@ except (ImportError, AttributeError) as e:
     print(f"Warning: WebRTC not available: {e}")
 from modules.motion.controller import MotionController
 from modules.system.collector import SystemCollector
+from modules.system.sensor_recorder import SensorRecorder
 from modules.system.power_policy import PowerPolicy
 
 # Camera 可选导入（兼容无opencv环境）
@@ -86,6 +87,7 @@ class WoBotControl:
         self.find_device_controller = None
         self.media_manager = None
         self.power_policy = None
+        self.sensor_recorder = None  # R00045 传感器数据持久化
 
         # 绑定认证模块
         self.binding_manager = None
@@ -250,6 +252,10 @@ class WoBotControl:
         # 注入 service_manager 到 message_handler
         self.message_handler.service_manager = self.service_manager
 
+        # 注入 sensor_recorder 到 message_handler（R00045 查询入口）
+        if self.sensor_recorder:
+            self.message_handler.sensor_recorder = self.sensor_recorder
+
         # 注入 power_policy 到 message_handler
         if self.power_policy:
             self.message_handler.power_policy = self.power_policy
@@ -280,6 +286,9 @@ class WoBotControl:
             self.logger.info("Power policy injected into message handler")
 
         # 注册进程内服务
+        if self.sensor_recorder:
+            await self.sensor_recorder.start()
+            self.service_manager.register_in_process_service("sensor_recorder", self.sensor_recorder)
         if self.webrtc_service:
             self.service_manager.register_in_process_service("webrtc", self.webrtc_service)
         if self.dance_controller:
@@ -405,8 +414,20 @@ class WoBotControl:
 
     async def _init_modules(self):
         """初始化功能模块"""
+        # 传感器数据记录器（R00045，先初始化以便注入到 SystemCollector）
+        sr_cfg = self.config.get("sensor_recorder", {})
+        if sr_cfg.get("enabled", True):
+            self.sensor_recorder = SensorRecorder(
+                db_path=sr_cfg.get("db_path", "data/peripherals.db"),
+                retention_days=int(sr_cfg.get("retention_days", 7)),
+                cleanup_interval_hours=float(sr_cfg.get("cleanup_interval_hours", 1)),
+                logger=self.logger,
+            )
+        else:
+            self.sensor_recorder = None
+
         # 系统信息采集
-        self.system_collector = SystemCollector(self.logger)
+        self.system_collector = SystemCollector(self.logger, sensor_recorder=self.sensor_recorder)
         self.logger.info("System collector initialized")
 
         # 省电策略引擎

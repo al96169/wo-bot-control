@@ -90,6 +90,13 @@ gimbal:
   tilt_invert: false            # 反转俯仰方向 (摇杆向上→舵机逆时针)
   step: 3.0                     # 增量模式每步移动角度
 
+# Sensor Recorder（传感器数据持久化，R00045）
+sensor_recorder:
+  enabled: true
+  db_path: "data/peripherals.db"     # SQLite 文件路径
+  retention_days: 7                  # 数据保留天数
+  cleanup_interval_hours: 1          # 清理间隔
+
 # Power Policy
 power_policy:
   threshold: 30  # 省电阀值（电量百分比），范围 10-50

@@ -148,6 +148,41 @@ class MessageHandler:
 
         return {"type": "status", "data": status_data}
 
+    async def _handle_get_peripheral_history(self, data: dict) -> dict:
+        """R00045: 查询传感器历史数据（WebSocket）"""
+        slots_raw = data.get("slots", "")
+        if isinstance(slots_raw, str):
+            slot_list = [s.strip() for s in slots_raw.split(",") if s.strip()]
+        elif isinstance(slots_raw, list):
+            slot_list = slots_raw
+        else:
+            return {"type": "error", "data": {"code": 400, "message": "slots is required (string or list)"}}
+
+        if not slot_list:
+            return {"type": "error", "data": {"code": 400, "message": "At least one slot name is required"}}
+
+        range_str = data.get("range", "1h")
+        from_ts = data.get("from_ts")
+        to_ts = data.get("to_ts")
+
+        recorder = getattr(self, "sensor_recorder", None)
+
+        if not recorder:
+            return {"type": "error", "data": {"code": 503, "message": "Sensor recorder not available"}}
+
+        try:
+            result = await recorder.query(
+                slots=slot_list,
+                start_ts=from_ts,
+                end_ts=to_ts,
+                range_str=range_str,
+            )
+            return {"type": "peripheral_history", "data": result}
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Peripheral history query error: {e}")
+            return {"type": "error", "data": {"code": 500, "message": str(e)}}
+
     async def _handle_motion(self, data: dict) -> dict:
         """处理运动控制（支持双轴兼容 + 三轴麦轮协议）"""
         if not self._is_feature_enabled("motion"):

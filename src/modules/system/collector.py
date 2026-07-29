@@ -32,13 +32,16 @@ class SystemCollector:
     # 当实测放速率不可信时，使用保守估算：~0.002 V/min ≈ 约 17 小时从满到空（10Ah 电池 + Jetson 约 10W 负载）
     FALLBACK_DISCHARGE_RATE = 0.002  # V/分钟
 
-    def __init__(self, logger=None, peripheral_registry: PeripheralRegistry | None = None):
+    def __init__(self, logger=None, peripheral_registry: PeripheralRegistry | None = None,
+                 sensor_recorder=None):
         self.logger = logger
         self.start_time = datetime.now()
         self._rosmaster_bot = None  # Rosmaster bot 实例引用（用于读取电池电压）
         self._battery_history: list[tuple[float, float]] = []  # (timestamp, voltage) 用于剩余时长估计
         # 外设采集注册表（声明式配置，支持 builtin/custom/external 三种 Provider）
         self._peripheral_registry = peripheral_registry or PeripheralRegistry(logger=logger)
+        # 传感器数据持久化记录器（R00045）
+        self._sensor_recorder = sensor_recorder
 
     def set_bot(self, bot) -> None:
         """注入 Rosmaster bot 实例（与运动/云台共享串口），用于读取电池电压"""
@@ -108,11 +111,33 @@ class SystemCollector:
             network = await self._collect_network()
             environment = await self._collect_environment()
 
+            # R00045: 持久化外设数据到 SQLite
+            await self._record_peripheral_data()
+
             return {"battery": battery, "system": system, "network": network, "environment": environment}
         except Exception as e:
             if self.logger:
                 self.logger.error(f"System collection error: {e}", exc_info=True)
             return {}
+
+    async def _record_peripheral_data(self) -> None:
+        """将最新外设采集数据写入传感器记录器"""
+        if self._sensor_recorder is None:
+            return
+        try:
+            all_data = await self._peripheral_registry.collect_all()
+            # 过滤掉 None 值
+            valid_data = {k: v for k, v in all_data.items() if v is not None}
+            if valid_data:
+                # 构建槽位元数据（含单位）
+                slot_metas = {
+                    name: {"unit": slot.get("unit", "")}
+                    for name, slot in self._peripheral_registry._slots.items()
+                }
+                await self._sensor_recorder.write_batch(valid_data, slot_metas)
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Peripheral data recording skipped: {e}")
 
     async def _collect_battery(self) -> dict:
         """采集电池信息"""
