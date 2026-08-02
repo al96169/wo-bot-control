@@ -210,8 +210,8 @@ done
 # ---- 音频硬件自动检测 & 配置 ----
 echo "  -> 运行音频硬件自动配置..."
 if [ -f "${REMOTE_DIR}/scripts/setup_audio.sh" ]; then
-    eval "${SUDO} bash ${REMOTE_DIR}/scripts/setup_audio.sh"
-    echo "  -> 音频配置完成"
+    eval "${SUDO} bash ${REMOTE_DIR}/scripts/setup_audio.sh" || echo "  [警告] 音频配置失败（非致命，可能已配置过），继续部署"
+    echo "  -> 音频配置步骤完成"
 else
     echo "  [警告] setup_audio.sh 不存在，跳过音频配置"
 fi
@@ -245,9 +245,9 @@ fi
 # Monkey-patch: aiortc 在 OpenSSL 1.1.1 上有多个不兼容的 ctypes 调用
 echo "  -> 应用 aiortc OpenSSL 兼容补丁..."
 AIORTC_DTLS="${REMOTE_DIR}/venv/lib/python3*/site-packages/aiortc/rtcdtlstransport.py"
-if [ -f "$(ls ${AIORTC_DTLS} 2>/dev/null | head -1)" ]; then
-    AIORTC_FILE=$(ls ${AIORTC_DTLS} | head -1)
-    ${PYTHON_BIN} -c "
+AIORTC_FILE=$(ls ${AIORTC_DTLS} 2>/dev/null | head -1)
+if [ -n "$AIORTC_FILE" ] && [ -f "$AIORTC_FILE" ]; then
+    python -c "
 import os, re
 f = open('${AIORTC_FILE}')
 content = f.read(); f.close()
@@ -293,7 +293,9 @@ else:
     with open('${AIORTC_FILE}', 'w') as f2:
         f2.write(content)
     print('aiortc: patched (SSL_CTX_set_read_ahead + skip BIO_ctrl)')
-"
+" || echo "  [警告] aiortc 补丁应用失败（非致命，可能已打过补丁）"
+else
+    echo "  [跳过] aiortc 未安装或路径不匹配，跳过补丁"
 fi
 
 # 检查 systemd 服务文件是否存在，不存在则创建

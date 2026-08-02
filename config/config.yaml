@@ -100,6 +100,16 @@ sensor_recorder:
 # Power Policy
 power_policy:
   threshold: 30  # 省电阀值（电量百分比），范围 10-50
+
+# IR Remote (红外遥控, R00020)
+ir:
+  enabled: true
+  port: "/dev/ttyTHS1"
+  baudrate: 115200
+  module_addr: 0x00
+  data_dir: "data/ir_codes"
+  learn_timeout: 30
+
 modules:
   auto_load: true
   module_dir: "src/modules/extension"

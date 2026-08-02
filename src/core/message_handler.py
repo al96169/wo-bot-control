@@ -140,6 +140,9 @@ class MessageHandler:
         # R00034: 拍照/录像功能（MediaManager 存在 + feature 未禁用）
         if self._get_media_manager() and self._is_feature_enabled("camera_capture"):
             features.append("camera_capture")
+        # R00020: 红外遥控（IRController 存在 + feature 未禁用）
+        if hasattr(self, "ir_controller") and self.ir_controller and self._is_feature_enabled("ir_remote"):
+            features.append("ir_remote")
         status_data["features"] = features
 
         # R00044: 外设在线状态（随 status 消息周期推送）
@@ -1062,6 +1065,74 @@ class MessageHandler:
             },
         }
 
+    # ---------- 红外遥控 (IR Remote, R00020) ----------
+
+    async def _handle_ir_device_list(self, data: dict) -> dict:
+        """获取红外设备列表"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("device_list", data)
+
+    async def _handle_ir_device_add(self, data: dict) -> dict:
+        """新增红外设备"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("device_add", data)
+
+    async def _handle_ir_device_delete(self, data: dict) -> dict:
+        """删除红外设备"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("device_delete", data)
+
+    async def _handle_ir_device_update(self, data: dict) -> dict:
+        """更新红外设备"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("device_update", data)
+
+    async def _handle_ir_button_list(self, data: dict) -> dict:
+        """获取红外按键列表"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("button_list", data)
+
+    async def _handle_ir_learn_start(self, data: dict) -> dict:
+        """开始红外学习"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("learn_start", data)
+
+    async def _handle_ir_button_rename(self, data: dict) -> dict:
+        """重命名红外按键"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("button_rename", data)
+
+    async def _handle_ir_button_delete(self, data: dict) -> dict:
+        """删除红外按键"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("button_delete", data)
+
+    async def _handle_ir_send(self, data: dict) -> dict:
+        """发射红外信号"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("send", data)
+
+    async def _handle_ir_codes_export(self, data: dict) -> dict:
+        """导出红外码库"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("codes_export", data)
+
+    async def _handle_ir_codes_import(self, data: dict) -> dict:
+        """导入红外码库"""
+        if not hasattr(self, "ir_controller") or not self.ir_controller:
+            return {"type": "error", "data": {"code": 503, "message": "IR controller not available"}}
+        return await self.ir_controller.handle_command("codes_import", data)
+
     async def _handle_power_policy_toggle(self, data: dict) -> dict:
         """处理省电模式切换"""
         if not hasattr(self, "power_policy") or not self.power_policy:
@@ -1760,6 +1831,9 @@ class MessageHandler:
             and _enabled("voice_broadcast")
         ):
             features.append("voice_broadcast")
+        # R00020: 红外遥控
+        if hasattr(self, "ir_controller") and self.ir_controller and _enabled("ir_remote"):
+            features.append("ir_remote")
 
         await self.ws_server.broadcast_message(
             {

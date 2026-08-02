@@ -425,6 +425,19 @@ class CameraStream:
         if self._csi_proc is not None and self._csi_proc.poll() is not None:
             self._csi_proc = None  # 已死，回退冷启动
         if self.cap is not None or self._csi_proc is not None:
+            # 刷新 V4L2 缓冲区，丢弃 stop 期间残留的旧帧
+            if self.cap is not None:
+                try:
+                    for _ in range(5):
+                        if not self.cap.grab():
+                            break
+                    if self.logger:
+                        self.logger.info(f"V4L2 buffer flushed on hot resume: {self.camera_info['name']}")
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"V4L2 buffer flush failed (non-fatal): {e}")
+            # 清除旧帧，确保采集循环产出新帧后才更新
+            self.current_frame = None
             self.running = True
             self._capture_task = asyncio.create_task(self._capture_loop())
             if self.logger:
@@ -561,6 +574,8 @@ class CameraStream:
             except asyncio.CancelledError:
                 pass
         self._capture_task = None
+        # 清除旧帧，防止热恢复后继续发送冻结画面
+        self.current_frame = None
 
         if self.logger:
             self.logger.info(f"Camera stream paused: {self.camera_info['name']}")
@@ -611,6 +626,7 @@ class CameraStream:
         w, h, fps = getattr(self, "_cap_w", 320), getattr(self, "_cap_h", 240), getattr(self, "_cap_fps", 10)
         is_yuyv = getattr(self, "_yuyv", False)
         self._frame_seq = 0
+        _consecutive_failures = 0
 
         while self.running and self.cap:
             try:
@@ -622,11 +638,30 @@ class CameraStream:
                         frame = yuyv_to_bgr(frame, w, h)
                     self.current_frame = frame
                     self._frame_seq += 1
+                    _consecutive_failures = 0
                     if self._frame_seq == 1 and self.logger:
                         mean_val = frame.mean(axis=(0, 1))
                         self.logger.info(
                             f"First frame: {w}x{h} mean_BGR=({mean_val[0]:.1f},{mean_val[1]:.1f},{mean_val[2]:.1f})"
                         )
+                else:
+                    _consecutive_failures += 1
+                    if _consecutive_failures == 5 and self.logger:
+                        self.logger.warning(
+                            f"cap.read() returning empty frames ({_consecutive_failures}x): {self.camera_info['name']}"
+                        )
+                    if _consecutive_failures >= 10:
+                        if self.logger:
+                            self.logger.error(
+                                f"cap.read() failed 10 consecutive times, releasing device for cold restart: {self.camera_info['name']}"
+                            )
+                        try:
+                            self.cap.release()
+                        except Exception:
+                            pass
+                        self.cap = None
+                        self.running = False
+                        break
                 await asyncio.sleep(1.0 / (fps * 2))
 
             except asyncio.CancelledError:

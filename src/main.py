@@ -85,6 +85,7 @@ class WoBotControl:
         self.dance_controller = None
         self.voice_broadcast_controller = None
         self.find_device_controller = None
+        self.ir_controller = None  # R00020 红外遥控
         self.media_manager = None
         self.power_policy = None
         self.sensor_recorder = None  # R00045 传感器数据持久化
@@ -229,6 +230,10 @@ class WoBotControl:
         # 注入寻找设备控制器到消息处理器
         if self.find_device_controller:
             self.message_handler.find_device_controller = self.find_device_controller
+
+        # 注入红外遥控控制器到消息处理器
+        if self.ir_controller:
+            self.message_handler.ir_controller = self.ir_controller
 
         # 注入绑定认证模块到消息处理器
         if self.binding_manager:
@@ -525,6 +530,21 @@ class WoBotControl:
             self.find_device_controller = None
             self.logger.warning(f"Find device controller init failed: {e}")
 
+        # 红外遥控控制器（R00020，智家物联红外学习模块）
+        try:
+            from modules.extension.ir_controller import IRController
+
+            ir_config = self.config.get("ir", {})
+            if ir_config.get("enabled", False):
+                self.ir_controller = IRController(config=ir_config, logger=self.logger)
+                await self.ir_controller.start()
+                self.logger.info("IR controller initialized")
+            else:
+                self.ir_controller = None
+        except Exception as e:
+            self.ir_controller = None
+            self.logger.warning(f"IR controller init failed: {e}")
+
         # ---- 媒体管理器（拍照/录像/图库，R00034）----
         try:
             from modules.vision.media_manager import MediaManager
@@ -678,6 +698,9 @@ class WoBotControl:
 
         if self.find_device_controller:
             await self.find_device_controller.stop()
+
+        if self.ir_controller:
+            await self.ir_controller.stop()
 
         # R00034: 停止媒体管理器（含录制循环清理）
         if self.media_manager:
