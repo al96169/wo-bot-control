@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -122,10 +121,7 @@ class SensorRecorder:
             conn.commit()
 
         if self.logger:
-            self.logger.info(
-                f"SensorRecorder: DB initialized at {self.db_path}, "
-                f"retention={self.retention_days}d"
-            )
+            self.logger.info(f"SensorRecorder: DB initialized at {self.db_path}, retention={self.retention_days}d")
 
     def _get_conn(self) -> sqlite3.Connection:
         """获取 SQLite 连接（单线程，无需 check_same_thread）"""
@@ -222,6 +218,7 @@ class SensorRecorder:
 
     def _start_flush_task(self) -> None:
         """启动定时刷盘任务"""
+
         async def _flush_loop():
             while True:
                 await asyncio.sleep(self._flush_interval)
@@ -281,9 +278,7 @@ class SensorRecorder:
         # 在线程池中执行同步查询
         return await _to_thread(self._sync_query, slots, start_ts, end_ts)
 
-    def _sync_query(
-        self, slots: list[str], start_ts: float, end_ts: float
-    ) -> dict[str, Any]:
+    def _sync_query(self, slots: list[str], start_ts: float, end_ts: float) -> dict[str, Any]:
         """同步查询 SQLite（在线程池中运行）"""
         with self._get_conn() as conn:
             conn.row_factory = sqlite3.Row
@@ -311,7 +306,6 @@ class SensorRecorder:
             sub_key = row["sub_key"]
             ts = row["timestamp"]
             value = row["value"]
-            value_json = row["value_json"]
 
             if slot_name not in data:
                 data[slot_name] = []
@@ -357,8 +351,7 @@ class SensorRecorder:
             deleted = await _to_thread(self._sync_cleanup, cutoff)
             if self.logger and deleted > 0:
                 self.logger.info(
-                    f"SensorRecorder: cleaned up {deleted} expired rows "
-                    f"(older than {self.retention_days}d)"
+                    f"SensorRecorder: cleaned up {deleted} expired rows (older than {self.retention_days}d)"
                 )
             return deleted
         except Exception as e:
@@ -368,14 +361,13 @@ class SensorRecorder:
 
     def _sync_cleanup(self, cutoff: float) -> int:
         with self._get_conn() as conn:
-            cursor = conn.execute(
-                "DELETE FROM peripheral_data WHERE timestamp < ?", (cutoff,)
-            )
+            cursor = conn.execute("DELETE FROM peripheral_data WHERE timestamp < ?", (cutoff,))
             conn.commit()
             return cursor.rowcount
 
     def _start_cleanup_task(self) -> None:
         """启动定时清理任务"""
+
         async def _cleanup_loop():
             # 首次延迟 60 秒后执行
             await asyncio.sleep(60)

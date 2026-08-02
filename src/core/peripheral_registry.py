@@ -21,11 +21,11 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
-
 
 # ============================================================
 # 内置驱动注册表
@@ -36,9 +36,11 @@ BUILTIN_DRIVERS: dict[str, Callable] = {}
 
 def register_builtin_driver(name: str):
     """装饰器：注册内置驱动到全局注册表"""
+
     def decorator(func):
         BUILTIN_DRIVERS[name] = func
         return func
+
     return decorator
 
 
@@ -47,13 +49,13 @@ def register_builtin_driver(name: str):
 # ============================================================
 
 SLOT_DEFINITIONS: dict[str, dict] = {
-    "dht11":               {"unit": "",     "category": "environment"},
-    "gas":                 {"unit": "",     "category": "environment"},
-    "light":               {"unit": "lux",  "category": "environment"},
-    "co2":                 {"unit": "ppm",  "category": "environment"},
-    "pm25":                {"unit": "μg/m³","category": "environment"},
-    "ir_transceiver":      {"unit": "",     "category": "smart_home"},
-    "battery_voltage":     {"unit": "V",    "category": "power"},
+    "dht11": {"unit": "", "category": "environment"},
+    "gas": {"unit": "", "category": "environment"},
+    "light": {"unit": "lux", "category": "environment"},
+    "co2": {"unit": "ppm", "category": "environment"},
+    "pm25": {"unit": "μg/m³", "category": "environment"},
+    "ir_transceiver": {"unit": "", "category": "smart_home"},
+    "battery_voltage": {"unit": "V", "category": "power"},
 }
 
 
@@ -61,16 +63,17 @@ SLOT_DEFINITIONS: dict[str, dict] = {
 # PeripheralRegistry
 # ============================================================
 
+
 class PeripheralRegistry:
     """外设注册表：加载配置、管理 Provider、调度采集"""
 
     def __init__(self, config_path: str = "config/peripherals.yaml", logger=None):
         self.config_path = config_path
         self.logger = logger
-        self._slots: dict[str, dict] = {}       # slot_name → 合并后的完整配置
-        self._providers: dict[str, Any] = {}    # slot_name → DataProvider 实例
-        self._cache: dict[str, Any] = {}        # slot_name → 最近一次有效采集值（None 不写入）
-        self._cache_times: dict[str, float] = {} # slot_name → 最近采集时间戳
+        self._slots: dict[str, dict] = {}  # slot_name → 合并后的完整配置
+        self._providers: dict[str, Any] = {}  # slot_name → DataProvider 实例
+        self._cache: dict[str, Any] = {}  # slot_name → 最近一次有效采集值（None 不写入）
+        self._cache_times: dict[str, float] = {}  # slot_name → 最近采集时间戳
         self._last_success_times: dict[str, float] = {}  # slot_name → 最后一次成功采集时间戳
         self._config_mtime: float = 0.0
         self._load_config()
@@ -134,9 +137,7 @@ class PeripheralRegistry:
 
         if self.logger:
             configured = sum(1 for s in self._slots.values() if s["provider"] != "none")
-            self.logger.info(
-                f"PeripheralRegistry: {len(self._slots)} slots loaded, {configured} configured"
-            )
+            self.logger.info(f"PeripheralRegistry: {len(self._slots)} slots loaded, {configured} configured")
 
     def _init_defaults(self) -> None:
         """初始化默认配置：所有槽位为 none"""
@@ -161,13 +162,9 @@ class PeripheralRegistry:
         if ptype == "builtin":
             driver_name = slot_cfg.get("driver")
             if driver_name and driver_name in BUILTIN_DRIVERS:
-                self._providers[slot_name] = DataProviderBuiltin(
-                    slot_name, driver_name, slot_cfg, self.logger
-                )
+                self._providers[slot_name] = DataProviderBuiltin(slot_name, driver_name, slot_cfg, self.logger)
             elif self.logger:
-                self.logger.warning(
-                    f"Builtin driver '{driver_name}' not found for slot '{slot_name}'"
-                )
+                self.logger.warning(f"Builtin driver '{driver_name}' not found for slot '{slot_name}'")
         elif ptype == "custom":
             self._providers[slot_name] = DataProviderCustom(slot_name, slot_cfg, self.logger)
         elif ptype == "external":
@@ -219,7 +216,7 @@ class PeripheralRegistry:
         返回 {slot_name: "online"|"offline"|"unconfigured"}
         """
         results: dict[str, str] = {}
-        for slot_name, slot_cfg in self._slots.items():
+        for slot_name, _slot_cfg in self._slots.items():
             provider = self._providers.get(slot_name)
             if provider is None:
                 results[slot_name] = "unconfigured"
@@ -308,10 +305,7 @@ class PeripheralRegistry:
             elif slot_name in self._last_success_times:
                 # 最近一次成功在合理时间内 → 在线
                 interval = slot_cfg.get("interval_sec", 30)
-                if (now - self._last_success_times[slot_name]) < max(interval * 3, 120):
-                    state = "online"
-                else:
-                    state = "offline"
+                state = "online" if (now - self._last_success_times[slot_name]) < max(interval * 3, 120) else "offline"
             elif slot_name in self._cache and self._cache[slot_name] is not None:
                 # 有缓存数据但从未记录成功时间（首次读取前的过渡状态）
                 state = "online"
@@ -330,6 +324,7 @@ class PeripheralRegistry:
 # ============================================================
 # DataProviderBuiltin — 平台内置驱动
 # ============================================================
+
 
 class DataProviderBuiltin:
     """内置驱动 Provider：调用已注册的平台驱动采集数据"""
@@ -363,14 +358,13 @@ class DataProviderBuiltin:
 
 # ---- 内置驱动实现 ----
 
+
 @register_builtin_driver("dht11")
 async def _dht11_read(slot_name: str, config: dict, logger) -> dict | None:
     """DHT11 温湿度传感器驱动。一次 C 程序调用同时获取温度和湿度，返回 dict。"""
 
     pin = config.get("pin", 194)
-    bin_path = DataProviderBuiltin.DRIVER_BIN_MAP.get(
-        "dht11", "/opt/wobot/bin/dht11_reader"
-    )
+    bin_path = DataProviderBuiltin.DRIVER_BIN_MAP.get("dht11", "/opt/wobot/bin/dht11_reader")
 
     if not os.path.isfile(bin_path):
         if logger:
@@ -379,7 +373,8 @@ async def _dht11_read(slot_name: str, config: dict, logger) -> dict | None:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            bin_path, str(pin),
+            bin_path,
+            str(pin),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -416,6 +411,7 @@ async def _dht11_read(slot_name: str, config: dict, logger) -> dict | None:
 # ============================================================
 # DataProviderCustom — 用户自写驱动 (subprocess + JSON 契约)
 # ============================================================
+
 
 class DataProviderCustom:
     """自定义 Provider：subprocess 调用用户提供的可执行文件。
@@ -457,9 +453,7 @@ class DataProviderCustom:
             if proc.returncode != 0:
                 if self.logger:
                     msg = stderr.decode(errors="replace").strip()[-200:]
-                    self.logger.debug(
-                        f"Custom '{self.slot_name}' rc={proc.returncode}: {msg}"
-                    )
+                    self.logger.debug(f"Custom '{self.slot_name}' rc={proc.returncode}: {msg}")
                 return None
 
             data = json.loads(stdout.decode().strip())
@@ -502,6 +496,7 @@ class DataProviderCustom:
 # ============================================================
 # DataProviderExternal — 外部数据源 (MQTT/HTTP/File/Serial/WebSocket)
 # ============================================================
+
 
 class DataProviderExternal:
     """外部数据源 Provider。
@@ -555,16 +550,17 @@ class DataProviderExternal:
             return None
         try:
             import aiohttp
+
             timeout = aiohttp.ClientTimeout(total=self._timeout)
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=timeout) as resp:
-                    if resp.status != 200:
-                        return None
-                    data = await resp.json()
-                    return self._extract_path(data, json_path)
+            async with aiohttp.ClientSession() as session, session.get(url, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return self._extract_path(data, json_path)
         except ImportError:
             # 降级：阻塞式 HTTP（不阻塞事件循环太久）
             import urllib.request
+
             try:
                 with urllib.request.urlopen(url, timeout=int(self._timeout)) as resp:
                     data = json.loads(resp.read().decode())

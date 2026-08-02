@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import platform
 import subprocess
-import time
 from datetime import datetime
 
 import psutil
@@ -32,8 +31,7 @@ class SystemCollector:
     # 当实测放速率不可信时，使用保守估算：~0.002 V/min ≈ 约 17 小时从满到空（10Ah 电池 + Jetson 约 10W 负载）
     FALLBACK_DISCHARGE_RATE = 0.002  # V/分钟
 
-    def __init__(self, logger=None, peripheral_registry: PeripheralRegistry | None = None,
-                 sensor_recorder=None):
+    def __init__(self, logger=None, peripheral_registry: PeripheralRegistry | None = None, sensor_recorder=None):
         self.logger = logger
         self.start_time = datetime.now()
         self._rosmaster_bot = None  # Rosmaster bot 实例引用（用于读取电池电压）
@@ -131,8 +129,7 @@ class SystemCollector:
             if valid_data:
                 # 构建槽位元数据（含单位）
                 slot_metas = {
-                    name: {"unit": slot.get("unit", "")}
-                    for name, slot in self._peripheral_registry._slots.items()
+                    name: {"unit": slot.get("unit", "")} for name, slot in self._peripheral_registry._slots.items()
                 }
                 await self._sensor_recorder.write_batch(valid_data, slot_metas)
         except Exception as e:

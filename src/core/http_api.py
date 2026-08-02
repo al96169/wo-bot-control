@@ -15,7 +15,6 @@ except ImportError:
     CV2_AVAILABLE = False
 
 import uvicorn
-
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.middleware.cors import CORSMiddleware

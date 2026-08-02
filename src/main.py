@@ -36,8 +36,8 @@ except (ImportError, AttributeError) as e:
     print(f"Warning: WebRTC not available: {e}")
 from modules.motion.controller import MotionController
 from modules.system.collector import SystemCollector
-from modules.system.sensor_recorder import SensorRecorder
 from modules.system.power_policy import PowerPolicy
+from modules.system.sensor_recorder import SensorRecorder
 
 # Camera 可选导入（兼容无opencv环境）
 try:

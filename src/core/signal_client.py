@@ -59,7 +59,7 @@ class SignalClient:
         webrtc_service=None,
         device_id: str = "",
         logger: logging.Logger | None = None,
-    ) -> "SignalClient | None":
+    ) -> SignalClient | None:
         """Create SignalClient from config dict."""
         signal_cfg = config.get("signal", {})
         if not signal_cfg.get("enabled", False):
