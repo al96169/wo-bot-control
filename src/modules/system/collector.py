@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import json
 import platform
 import subprocess
 from datetime import datetime
+from pathlib import Path
 
 import psutil
 
@@ -31,6 +33,9 @@ class SystemCollector:
     # 当实测放速率不可信时，使用保守估算：~0.002 V/min ≈ 约 17 小时从满到空（10Ah 电池 + Jetson 约 10W 负载）
     FALLBACK_DISCHARGE_RATE = 0.002  # V/分钟
 
+    # 累计运行时长持久化文件路径
+    RUNTIME_STATS_FILE = Path("data/runtime_stats.json")
+
     def __init__(self, logger=None, peripheral_registry: PeripheralRegistry | None = None, sensor_recorder=None):
         self.logger = logger
         self.start_time = datetime.now()
@@ -40,6 +45,8 @@ class SystemCollector:
         self._peripheral_registry = peripheral_registry or PeripheralRegistry(logger=logger)
         # 传感器数据持久化记录器（R00045）
         self._sensor_recorder = sensor_recorder
+        # R00046: 累计运行时长（从持久化文件加载）
+        self._total_runtime_seconds: int = self._load_total_runtime()
 
     def set_bot(self, bot) -> None:
         """注入 Rosmaster bot 实例（与运动/云台共享串口），用于读取电池电压"""
@@ -112,7 +119,27 @@ class SystemCollector:
             # R00045: 持久化外设数据到 SQLite
             await self._record_peripheral_data()
 
-            return {"battery": battery, "system": system, "network": network, "environment": environment}
+            # R00046: 设备详情信息
+            device_info = {
+                "hostname": system.get("hostname", ""),
+                "os": self._get_os_info(),
+                "kernel": self._get_kernel_version(),
+                "cpu_model": self._get_cpu_model(),
+                "cpu_count": psutil.cpu_count() or 0,
+                "ip": network.get("ip"),
+                "mac": network.get("mac"),
+                "bluetooth_mac": network.get("bluetooth_mac"),
+                "uptime": system.get("uptime", 0),
+                "total_runtime": system.get("total_runtime", 0),
+            }
+
+            return {
+                "battery": battery,
+                "system": system,
+                "network": network,
+                "environment": environment,
+                "device_info": device_info,
+            }
         except Exception as e:
             if self.logger:
                 self.logger.error(f"System collection error: {e}", exc_info=True)
@@ -238,6 +265,9 @@ class SystemCollector:
             # 运行时间
             uptime = (datetime.now() - self.start_time).total_seconds()
 
+            # R00046: 累计运行时长
+            total_runtime = self.get_total_runtime_seconds()
+
             # CPU 温度（Jetson 特有）
             temperature = await self._get_cpu_temperature()
 
@@ -246,6 +276,7 @@ class SystemCollector:
                 "memory_percent": round(memory_percent, 1),
                 "disk_percent": round(disk_percent, 1),
                 "uptime": int(uptime),
+                "total_runtime": total_runtime,
                 "temperature": temperature,
                 "platform": platform.system(),
                 "hostname": platform.node(),
@@ -283,22 +314,33 @@ class SystemCollector:
         try:
             # 获取网络接口信息
             interfaces = psutil.net_if_addrs()
-            _ = psutil.net_if_stats()
+            stats = psutil.net_if_stats()
 
-            # 查找主要网络接口（通常是 wlan0 或 eth0）
+            # 排除虚拟/回环接口
+            virtual_prefixes = ("lo", "docker", "br-", "veth", "virbr", "tunl", "flannel")
+
+            # 查找主要网络接口（优先 wlan0/eth0，其次选第一个非虚拟且 carrier-up 的接口）
             main_interface = None
             for iface in ["wlan0", "eth0", "enp3s0", "wlp3s0"]:
-                if iface in interfaces:
+                if iface in interfaces and iface not in virtual_prefixes:
                     main_interface = iface
                     break
 
             if not main_interface:
-                main_interface = list(interfaces.keys())[0] if interfaces else None
+                for iface_name in interfaces:
+                    if iface_name in virtual_prefixes:
+                        continue
+                    if iface_name in stats and stats[iface_name].isup:
+                        main_interface = iface_name
+                        break
 
-            result = {"ip": None, "ssid": None, "signal_strength": None, "mac": None}
+            if not main_interface and interfaces:
+                main_interface = list(interfaces.keys())[0]
+
+            result: dict = {"ip": None, "ssid": None, "signal_strength": None, "mac": None, "bluetooth_mac": None}
 
             if main_interface:
-                # 获取 IP 地址
+                # 获取 IP 地址和 MAC
                 for addr in interfaces[main_interface]:
                     if addr.family == 2:  # AF_INET
                         result["ip"] = addr.address
@@ -309,6 +351,9 @@ class SystemCollector:
                 if main_interface.startswith("w"):
                     wifi_info = await self._get_wifi_info(main_interface)
                     result.update(wifi_info)
+
+            # 蓝牙 MAC 地址
+            result["bluetooth_mac"] = self._get_bluetooth_mac()
 
             return result
 
@@ -338,6 +383,77 @@ class SystemCollector:
         except Exception:
             return {}
 
+    @staticmethod
+    def _get_bluetooth_mac() -> str | None:
+        """读取蓝牙控制器 MAC 地址。
+
+        优先从 /sys/class/bluetooth/hci0/address 读取，
+        回退到 hciconfig 命令。无蓝牙模块时返回 None。
+        """
+        # 方法1: sysfs
+        bt_sys_path = "/sys/class/bluetooth/hci0/address"
+        try:
+            with open(bt_sys_path) as f:
+                mac = f.read().strip()
+                if mac and len(mac) == 17:
+                    return mac.upper()
+        except (FileNotFoundError, PermissionError):
+            pass
+
+        # 方法2: hciconfig
+        try:
+            result = subprocess.run(["hciconfig", "hci0", "address"], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                for line in result.stdout.split("\n"):
+                    if "BD Address:" in line:
+                        parts = line.split("BD Address:")
+                        if len(parts) > 1:
+                            mac = parts[1].strip().split()[0]
+                            if mac and len(mac) == 17:
+                                return mac.upper()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        return None
+
+    # ---- R00046: 累计运行时长管理 ----
+
+    def _load_total_runtime(self) -> int:
+        """从持久化文件加载累计运行时长（秒）"""
+        try:
+            if self.RUNTIME_STATS_FILE.exists():
+                with open(self.RUNTIME_STATS_FILE) as f:
+                    data = json.load(f)
+                    return int(data.get("total_runtime_seconds", 0))
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Failed to load runtime stats: {e}")
+        return 0
+
+    def _save_total_runtime(self) -> None:
+        """将累计运行时长保存到持久化文件"""
+        try:
+            self.RUNTIME_STATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            current_session = (datetime.now() - self.start_time).total_seconds()
+            total = self._total_runtime_seconds + int(current_session)
+            with open(self.RUNTIME_STATS_FILE, "w") as f:
+                json.dump(
+                    {
+                        "total_runtime_seconds": total,
+                        "last_start_time": self.start_time.isoformat(),
+                        "last_stop_time": datetime.now().isoformat(),
+                    },
+                    f,
+                )
+        except Exception as e:
+            if self.logger:
+                self.logger.debug(f"Failed to save runtime stats: {e}")
+
+    def get_total_runtime_seconds(self) -> int:
+        """获取累计运行总时长（秒）= 历史累计 + 本次会话"""
+        current_session = int((datetime.now() - self.start_time).total_seconds())
+        return self._total_runtime_seconds + current_session
+
     async def _collect_environment(self) -> dict:
         """采集环境数据（温湿度、燃气、光照等）。
 
@@ -352,6 +468,58 @@ class SystemCollector:
     def get_peripheral_status(self) -> dict[str, dict]:
         """获取外设在线状态（随 WebSocket status 推送）"""
         return self._peripheral_registry.get_status()
+
+    def shutdown(self) -> None:
+        """服务停止时调用，保存累计运行时长"""
+        self._save_total_runtime()
+        if self.logger:
+            self.logger.info("SystemCollector: runtime stats saved on shutdown")
+
+    @staticmethod
+    def _get_os_info() -> str:
+        """获取操作系统描述"""
+        try:
+            result = subprocess.run(["lsb_release", "-ds"], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return f"{platform.system()} {platform.release()}"
+
+    @staticmethod
+    def _get_kernel_version() -> str:
+        """获取内核版本"""
+        try:
+            result = subprocess.run(["uname", "-r"], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return platform.release()
+
+    @staticmethod
+    def _get_cpu_model() -> str:
+        """获取 CPU 型号"""
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        return line.split(":")[1].strip()
+        except Exception:
+            pass
+        return platform.processor() or "Unknown"
+
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        """将秒数格式化为 'Xd Xh Xm' 形式"""
+        days = seconds // 86400
+        hours = (seconds % 86400) // 3600
+        minutes = (seconds % 3600) // 60
+        if days > 0:
+            return f"{days}d {hours}h {minutes}m"
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
 
     async def get_detailed_info(self) -> dict:
         """获取详细信息"""

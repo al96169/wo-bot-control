@@ -30,11 +30,13 @@ except ImportError:  # pragma: no cover - 开发环境兼容
 
 # ---------- Python 3.7 兼容: asyncio.to_thread 在 3.9+ 才有 ----------
 if hasattr(asyncio, "to_thread"):
-    _to_thread = asyncio.to_thread
+    _to_thread = asyncio.to_thread  # type: ignore[misc]
 else:
-    def _to_thread(func, *args, **kwargs):
+
+    def _to_thread(func, *args, **kwargs):  # type: ignore[misc]
         loop = asyncio.get_event_loop()
         return loop.run_in_executor(None, lambda: func(*args, **kwargs))
+
 
 # ---------- 帧常量 ----------
 FRAME_HEAD = 0x68
@@ -140,11 +142,7 @@ class IRController(ExtensionModule):
         total_length = 5 + len(payload)
         checksum = sum(payload) % 256
         return (
-            bytes([FRAME_HEAD])
-            + total_length.to_bytes(2, "little")
-            + payload
-            + bytes([checksum])
-            + bytes([FRAME_TAIL])
+            bytes([FRAME_HEAD]) + total_length.to_bytes(2, "little") + payload + bytes([checksum]) + bytes([FRAME_TAIL])
         )
 
     def read_frame(self, ser, timeout: float = 2.0) -> tuple[int, int, bytes] | None:
@@ -204,7 +202,10 @@ class IRController(ExtensionModule):
             afn = payload[1]
             data = payload[2:]
             if self.logger:
-                hex_str = " ".join(f"{b:02X}" for b in (bytes([FRAME_HEAD]) + total_length.to_bytes(2, "little") + payload + checksum_byte + tail))
+                hex_str = " ".join(
+                    f"{b:02X}"
+                    for b in (bytes([FRAME_HEAD]) + total_length.to_bytes(2, "little") + payload + checksum_byte + tail)
+                )
                 self.logger.debug(f"IR RX: {hex_str}")
             return (addr, afn, data)
         except Exception as e:
@@ -227,16 +228,13 @@ class IRController(ExtensionModule):
         """读取一帧（同步，在线程中调用）"""
         return self.read_frame(self._serial, timeout)
 
-    async def _transaction(
-        self, afn: int, data: bytes = b"", timeout: float = 2.0
-    ) -> tuple[int, int, bytes] | None:
+    async def _transaction(self, afn: int, data: bytes = b"", timeout: float = 2.0) -> tuple[int, int, bytes] | None:
         """发送请求并读取一帧响应（线程安全，asyncio.Lock 保护串口访问）"""
+        assert self._lock is not None
         async with self._lock:
             return await _to_thread(self._transaction_sync, afn, data, timeout)
 
-    def _transaction_sync(
-        self, afn: int, data: bytes, timeout: float
-    ) -> tuple[int, int, bytes] | None:
+    def _transaction_sync(self, afn: int, data: bytes, timeout: float) -> tuple[int, int, bytes] | None:
         """请求-响应事务（同步）"""
         # 清空输入缓冲区中的残留数据
         try:
@@ -298,6 +296,7 @@ class IRController(ExtensionModule):
 
         线程安全：整个事务在 asyncio.Lock 内完成，避免学习期间被其他串口操作打断。
         """
+        assert self._lock is not None
         async with self._lock:
             return await _to_thread(self._learn_sync, index, timeout)
 
@@ -715,7 +714,7 @@ class IRController(ExtensionModule):
         if not isinstance(devices, list):
             return {"type": "error", "data": {"code": 400, "message": "data.devices 格式无效"}}
 
-        result = {"imported": 0, "skipped": 0, "overwritten": 0, "renamed": 0, "errors": []}
+        result: dict[str, Any] = {"imported": 0, "skipped": 0, "overwritten": 0, "renamed": 0, "errors": []}
         imported_devices: list[dict] = []
         for dev in devices:
             if not isinstance(dev, dict) or not dev.get("device_id"):

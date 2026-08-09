@@ -706,6 +706,10 @@ class WoBotControl:
         if self.media_manager:
             await self.media_manager.stop()
 
+        # R00046: 保存累计运行时长
+        if self.system_collector:
+            self.system_collector.shutdown()
+
         self.logger.info("wo-bot-control stopped")
 
     async def _on_service_message(self, message: dict) -> None:

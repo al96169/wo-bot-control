@@ -107,7 +107,8 @@ class WebSocketServer:
                 dead.append(cid)
         for cid in dead:
             self._ws_clients.pop(cid, None)
-            self._clients.discard(self._ws_clients.get(cid))
+            if ws_client := self._ws_clients.get(cid):
+                self._clients.discard(ws_client)
 
     async def send_to_client(self, ws_client_id: str, message: dict) -> None:
         """向指定 WebSocket 客户端发送消息"""
@@ -706,7 +707,8 @@ class WebSocketServer:
                             dead.append(cid)
                     for cid in dead:
                         self._ws_clients.pop(cid, None)
-                        self._clients.discard(self._ws_clients.get(cid))
+                        if ws_client := self._ws_clients.get(cid):
+                            self._clients.discard(ws_client)
                 except asyncio.CancelledError:
                     return
                 except Exception as e:
