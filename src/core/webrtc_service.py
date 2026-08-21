@@ -456,12 +456,24 @@ class WebRTCService:
 
     # ---------- 视频轨设置 ----------
 
+    def _physical_first_cam_ids(self) -> list[int]:
+        """物理摄像头优先排序（克隆摄像头共享源帧）。
+
+        若先启动克隆摄像头（shared_from 指向源），其源尚未启动时会被当作
+        物理设备打开，抢占同一个传感器/设备，导致真实摄像头流启动失败（黑屏）。
+        先启动物理摄像头，克隆走 SharedCameraStream 共享分支即可。
+        """
+        keys = sorted(self.camera_manager.cameras.keys())
+        return [c for c in keys if not self.camera_manager.cameras[c].get("shared_from")] + [
+            c for c in keys if self.camera_manager.cameras[c].get("shared_from")
+        ]
+
     async def _setup_video_tracks(self, client_id: str, pc: RTCPeerConnection) -> None:
         """为每个摄像头创建视频轨并绑定到 transceiver"""
         if not self.camera_manager:
             return
 
-        for cam_id in sorted(self.camera_manager.cameras.keys()):
+        for cam_id in self._physical_first_cam_ids():
             try:
                 await self.camera_manager.start_stream(cam_id)
             except Exception as e:
@@ -475,7 +487,7 @@ class WebRTCService:
             f"[{client_id}] Found {len(video_transceivers)} video transceivers (total={len(transceivers)})"
         )
 
-        cam_ids = sorted(self.camera_manager.cameras.keys())
+        cam_ids = self._physical_first_cam_ids()
 
         # 多客户端场景降低帧率，减少 Jetson Nano VP8 软编码 CPU 压力
         # 注意: 此时新连接已加入 _connections，所以 len(_connections) 包含当前客户端
