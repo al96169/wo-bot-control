@@ -92,13 +92,14 @@ class CameraVideoTrack(VideoStreamTrack):
         self.logger = logger
         self.client_id = client_id
         self._frame_count = 0
-        # 画质控制
-        self._quality_mode = "high"
+        # 画质控制 — 默认 medium(640x480)：Jetson Nano 软编码双路 1280x960 会 CPU 过载
+        # 导致延迟严重 + USB 读取超时失败。用户手动切 high 时才回原生分辨率。
+        self._quality_mode = "medium"
         self._native_width = native_resolution.get("width", 640) if native_resolution else 640
         self._native_height = native_resolution.get("height", 480) if native_resolution else 480
-        self._target_width = self._native_width
-        self._target_height = self._native_height
-        self._resize_needed = False
+        self._target_width = 640
+        self._target_height = 480
+        self._resize_needed = self._target_width != self._native_width or self._target_height != self._native_height
 
     def get_quality_info(self) -> dict:
         return {
