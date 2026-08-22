@@ -76,6 +76,10 @@ class MDNSService:
                 "model": model,
                 "version": version,
                 "id": robot_id,
+                # 显式广播 IP：部分客户端（Android multicast_dns）SRV/A 查询
+                # 收不到响应，TXT 查询可拿到 ip + 端口，绕过 SRV
+                "ip": addresses[0] if addresses else "",
+                "port": str(self.port),
             }
 
             self.service_info = ServiceInfo(
