@@ -43,6 +43,7 @@ class MessageHandler:
         # 云台速度控制：客户端发速度(-1.0~+1.0)，服务端持续循环移动
         self._gimbal_speed = {"pan": 0.0, "tilt": 0.0}
         self._gimbal_running = threading.Event()
+        self._gimbal_last_cmd = time.monotonic()  # 云台看门狗：最近一次命令时间
         self._gimbal_task: asyncio.Task | None = None
         # 绑定认证异步任务跟踪（ws_client_id -> [task, ...]）
         self._bind_tasks: dict[str, list[asyncio.Task]] = {}
@@ -263,18 +264,21 @@ class MessageHandler:
                 # 开始持续移动: {action: "move_begin", pan_speed: 0.5, tilt_speed: -0.3}
                 self._gimbal_speed["pan"] = float(data.get("pan_speed", 0) or 0)
                 self._gimbal_speed["tilt"] = float(data.get("tilt_speed", 0) or 0)
+                self._gimbal_last_cmd = time.monotonic()
                 self._start_gimbal_loop()
                 return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
             elif action == "move_update":
                 # 更新移动速度: {action: "move_update", pan_speed: 0.5, tilt_speed: -0.3}
                 self._gimbal_speed["pan"] = float(data.get("pan_speed", 0) or 0)
                 self._gimbal_speed["tilt"] = float(data.get("tilt_speed", 0) or 0)
+                self._gimbal_last_cmd = time.monotonic()
                 # 不返回 status，避免大量响应阻塞
                 return None
             elif action == "move_end":
                 # 停止持续移动
                 self._gimbal_speed["pan"] = 0.0
                 self._gimbal_speed["tilt"] = 0.0
+                self._gimbal_last_cmd = time.monotonic()
                 self._stop_gimbal_loop()
                 return {"type": "gimbal_status", "data": self.gimbal_controller.get_state()}
             else:
@@ -313,6 +317,13 @@ class MessageHandler:
             while self._gimbal_running.is_set():
                 pan_spd = self._gimbal_speed.get("pan", 0)
                 tilt_spd = self._gimbal_speed.get("tilt", 0)
+
+                # 看门狗：超过 1.5s 未收到任何云台命令 → 自动停止，兜底丢失的 move_end
+                if time.monotonic() - getattr(self, "_gimbal_last_cmd", 0.0) > 1.5:
+                    self._gimbal_speed["pan"] = 0.0
+                    self._gimbal_speed["tilt"] = 0.0
+                    self._stop_gimbal_loop()
+                    break
 
                 if pan_spd == 0 and tilt_spd == 0:
                     time.sleep(0.05)
