@@ -209,6 +209,25 @@ class DanceController(ExtensionModule):
             },
         }
 
+    async def _cmd_set_loop(self, data: dict) -> dict:
+        """设置循环播放开关（不依赖 play 时传入，支持播放中切换）"""
+        loop = data.get("loop")
+        if isinstance(loop, bool):
+            self._loop = loop
+        elif isinstance(loop, (int, float)):
+            self._loop = bool(loop)
+        if self.logger:
+            self.logger.info(f"Dance loop set to {self._loop}")
+        return {
+            "type": "dance_status",
+            "data": {
+                "status": "paused" if self._paused else ("playing" if self._playing else "stopped"),
+                "dance_id": self._current_dance,
+                "progress": self._progress,
+                "loop": self._loop,
+            },
+        }
+
     async def _cmd_reload(self, data: dict) -> dict:
         """重新加载舞蹈配置"""
         success = self.reload()
