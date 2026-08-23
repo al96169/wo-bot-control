@@ -138,16 +138,32 @@ def apply() -> None:
             raise ConnectionError("No remote candidates received")
 
         # 收集所有兼容的 candidate pair，优先 IPv6（平板在同一 /64 子网，无 NAT）
+        # 跳过 loopback（::1/127.0.0.1）：手机双栈切换时 libwebrtc 可能只上报回环地址，
+        # 强制配对回环会导致 DTLS 永远连不通（SCTP DataChannel 打不开）。
         pairs_v6 = []
         pairs_v4 = []
         for remote_cand in self._remote_candidates:
+            host = remote_cand.host
+            if host in ("::1", "127.0.0.1", "0:0:0:0:0:0:0:1"):
+                continue
             for protocol in self._protocols:
                 if protocol.local_candidate.can_pair_with(remote_cand):
                     pair_info = (protocol, remote_cand)
-                    if ":" in remote_cand.host:
+                    if ":" in host:
                         pairs_v6.append(pair_info)
                     else:
                         pairs_v4.append(pair_info)
+
+        # 若无非回环候选（极端情况仅剩 loopback），回退到全部候选（含回环）
+        if not pairs_v6 and not pairs_v4:
+            for remote_cand in self._remote_candidates:
+                for protocol in self._protocols:
+                    if protocol.local_candidate.can_pair_with(remote_cand):
+                        pair_info = (protocol, remote_cand)
+                        if ":" in remote_cand.host:
+                            pairs_v6.append(pair_info)
+                        else:
+                            pairs_v4.append(pair_info)
 
         all_pairs = pairs_v6 + pairs_v4  # IPv6 优先
         if not all_pairs:

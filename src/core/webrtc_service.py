@@ -875,6 +875,14 @@ class WebRTCService:
 
             dc.send(json.dumps(data) if isinstance(data, dict) else data)
 
+    def get_open_data_channels(self) -> dict[str, RTCDataChannel]:
+        """返回所有已打开（readyState=open）的 DataChannel，供 WS 触发的分块传输使用"""
+        return {
+            cid: dc
+            for cid, dc in self._data_channels.items()
+            if dc is not None and getattr(dc, "readyState", "") == "open"
+        }
+
     async def broadcast_message(self, data):
         """向所有 DataChannel 客户端广播消息"""
         import json

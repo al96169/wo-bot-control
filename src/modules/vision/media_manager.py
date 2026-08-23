@@ -931,7 +931,9 @@ class MediaManager:
         end = start + page_size
         page_files = files[start:end]
 
-        # 存储信息
+        # 存储信息：显示媒体目录所在分区的容量（df Size）。
+        # 不叠加整机所有物理盘：机器人可能有多个存储（如 USB 盘 + 板载 eMMC 系统盘），
+        # 叠加会把系统盘也算进去，导致"总容量"虚高（71GB vs 实际可用 55GB）。
         disk = shutil.disk_usage(self.storage_dir)
         used_bytes = _get_dir_size(self.storage_dir)
 

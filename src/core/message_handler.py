@@ -551,58 +551,67 @@ class MessageHandler:
         CHUNK_SIZE = 48 * 1024  # 48KB raw → ~64KB base64（DC 消息安全大小）
         total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
 
-        # 如果有 DC 上下文（通过 WebRTC DataChannel），分块发送
+        # 优先使用 DataChannel 分块传输。
+        # 1) DC 消息处理期间（_dc_client_id 有值）→ 定向发送
+        # 2) WS 收到请求但已建立 DC（client DC 可能因 server DC 覆盖而丢消息）→ 广播分块
         dc_client_id = getattr(self, "_dc_client_id", None)
         webrtc_svc = getattr(self, "_webrtc_service", None)
-        if dc_client_id and webrtc_svc:
-            # 发送开始消息
-            await webrtc_svc.send_message(
-                dc_client_id,
-                {
-                    "type": "camera_media_download_start",
-                    "data": {
-                        "file_name": file_name,
-                        "size_bytes": file_size,
-                        "total_chunks": total_chunks,
-                        "thumbnail_base64": thumbnail,
-                    },
-                },
-            )
-            # 逐块读取并发送
-            with open(media_path, "rb") as f:
-                chunk_index = 0
-                while True:
-                    chunk = f.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    chunk_b64 = base64.b64encode(chunk).decode("ascii")
+        if webrtc_svc:
+            targets = [dc_client_id] if dc_client_id else []
+            if not targets:
+                # 从 webrtc_service 收集所有 open 的 DC 客户端（WS 请求场景）
+                for cid, dc in webrtc_svc.get_open_data_channels().items():
+                    targets.append(cid)
+            if targets:
+                for target in targets:
+                    # 发送开始消息
                     await webrtc_svc.send_message(
-                        dc_client_id,
+                        target,
                         {
-                            "type": "camera_media_download_chunk",
+                            "type": "camera_media_download_start",
                             "data": {
                                 "file_name": file_name,
-                                "chunk_index": chunk_index,
+                                "size_bytes": file_size,
                                 "total_chunks": total_chunks,
-                                "data": chunk_b64,
+                                "thumbnail_base64": thumbnail,
                             },
                         },
                     )
-                    chunk_index += 1
-            # 发送完成消息
-            await webrtc_svc.send_message(
-                dc_client_id,
-                {
-                    "type": "camera_media_download_end",
-                    "data": {
-                        "file_name": file_name,
-                        "size_bytes": file_size,
-                        "total_chunks": total_chunks,
-                    },
-                },
-            )
-            # 返回 None（不通过 send_message 再发一次）
-            return {"type": "camera_media_download_done", "data": {"file_name": file_name}}
+                    # 逐块读取并发送
+                    with open(media_path, "rb") as f:
+                        chunk_index = 0
+                        while True:
+                            chunk = f.read(CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            chunk_b64 = base64.b64encode(chunk).decode("ascii")
+                            await webrtc_svc.send_message(
+                                target,
+                                {
+                                    "type": "camera_media_download_chunk",
+                                    "data": {
+                                        "file_name": file_name,
+                                        "chunk_index": chunk_index,
+                                        "total_chunks": total_chunks,
+                                        "data": chunk_b64,
+                                    },
+                                },
+                            )
+                            chunk_index += 1
+                    # 发送完成消息
+                    await webrtc_svc.send_message(
+                        target,
+                        {
+                            "type": "camera_media_download_end",
+                            "data": {
+                                "file_name": file_name,
+                                "size_bytes": file_size,
+                                "total_chunks": total_chunks,
+                            },
+                        },
+                    )
+                # 返回 None（不通过 send_message 再发一次）
+                return {"type": "camera_media_download_done", "data": {"file_name": file_name}}
 
         # 无 DC 上下文（通过 WebSocket），回退到单次 base64（小文件）
         if file_size <= 2 * 1024 * 1024:
