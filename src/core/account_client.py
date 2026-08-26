@@ -177,7 +177,8 @@ class AccountClient:
                     "User-Agent": "wo-bot-control/1.0",
                 },
             ) as resp:
-                if resp.status not in (200, 204):
+                # NestJS POST 默认返回 201，兼容 200/201/204
+                if resp.status not in (200, 201, 204):
                     body = await resp.text()
                     self.logger.warning(f"[Account] Heartbeat failed ({resp.status}): {body[:100]}")
         except aiohttp.ClientError as e:
