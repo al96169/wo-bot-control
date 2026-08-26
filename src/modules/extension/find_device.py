@@ -120,10 +120,15 @@ class FindDeviceController(ExtensionModule):
         """声光提示主循环：LED 闪烁 + 循环提示音，持续 FIND_DURATION 秒"""
         import time
 
+        # 立即响第一声（不等待音乐暂停/音频预热，保证点击后马上有声）
+        next_beep = time.monotonic()
+        try:
+            await self._play_beep()
+        except Exception:
+            pass
         self._music_paused = await self._pause_music()
         try:
             start = time.monotonic()
-            next_beep = start  # 立即播放第一声
             led_on = False
 
             while self._active:
@@ -138,10 +143,10 @@ class FindDeviceController(ExtensionModule):
                 else:
                     await self._set_led(0, 0, 0)  # 灭
 
-                # 提示音（每 BEEP_INTERVAL 秒一次）
+                # 提示音（每 BEEP_INTERVAL 秒一次，不阻塞 LED 循环）
                 now = time.monotonic()
                 if now >= next_beep:
-                    await self._play_beep()
+                    asyncio.ensure_future(self._play_beep())
                     next_beep = now + BEEP_INTERVAL
 
                 await asyncio.sleep(LED_TOGGLE_INTERVAL)
