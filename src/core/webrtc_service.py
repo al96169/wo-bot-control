@@ -561,12 +561,23 @@ class WebRTCService:
 
     # ---------- 核心: 创建 PeerConnection ----------
 
-    async def create_peer_connection(self, client_id: str, sdp_offer: str, send_callback=None) -> str:
-        """处理客户端的 SDP offer，返回 SDP answer"""
+    async def create_peer_connection(
+        self, client_id: str, sdp_offer: str, send_callback=None, turn: dict | None = None
+    ) -> str:
+        """处理客户端的 SDP offer，返回 SDP answer
 
-        pc = RTCPeerConnection(
-            configuration=RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])])
-        )
+        turn: 信令服务器下发的 TURN 凭证 {host, username, credential, ttl}。
+        远程（4G 手机）场景必须配置，否则手机 relay 候选无法与本机匹配。
+        """
+        ice_servers = [RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
+        if turn and turn.get("host") and turn.get("username") and turn.get("credential"):
+            host = turn["host"]
+            ice_servers.append(
+                RTCIceServer(urls=[f"turn:{host}:3478", f"turn:{host}:3478?transport=tcp"], username=turn["username"], credential=turn["credential"])
+            )
+            self.logger.info(f"[{client_id}] TURN configured: turn:{host}:3478")
+
+        pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
 
         # 清理旧连接（幂等安全）
         old_pc = self._connections.get(client_id)

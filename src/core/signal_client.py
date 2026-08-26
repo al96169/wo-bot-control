@@ -215,6 +215,7 @@ class SignalClient:
 
         client_id = msg.get("clientId", "signal-client")
         sdp_data = msg.get("sdp", "")
+        turn = msg.get("turn")  # 信令服务器下发的 TURN 凭证（远程场景必需）
 
         # 浏览器发送的 SDP 可能是对象 {type, sdp} 或纯字符串
         sdp_offer = sdp_data.get("sdp", "") if isinstance(sdp_data, dict) else sdp_data
@@ -244,9 +245,9 @@ class SignalClient:
                         await self._ws.send(json.dumps(ice_msg))
                         self.logger.debug(f"[Signal] Sent ICE candidate to client={client_id}")
 
-            # Create peer connection and get SDP answer
+            # Create peer connection and get SDP answer（传入 TURN 凭证）
             answer_sdp = await self.webrtc_service.create_peer_connection(
-                client_id, sdp_offer, send_callback=send_callback
+                client_id, sdp_offer, send_callback=send_callback, turn=turn
             )
 
             # Send answer back via signal server
