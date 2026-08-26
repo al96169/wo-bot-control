@@ -17,6 +17,7 @@ import yaml
 
 from core.account_client import AccountClient
 from core.binding_manager import BindingManager
+from core.device_secret import load_device_secret
 from core.http_api import HttpAPIServer
 from core.mdns_service import MDNSService
 from core.message_handler import MessageHandler
@@ -600,19 +601,12 @@ class WoBotControl:
             self.config.setdefault("robot", {})["id"] = device_id
             self.logger.info(f"[DeviceID] Device ID: {device_id}")
             config_dir = Path(__file__).parent.parent / "config"
-            secret = binding_config.get("secret", "")
-            if not secret:
-                # config.yaml 中 secret 为空：尝试从持久化文件读取
-                secret_file = config_dir / ".binding_secret"
-                if secret_file.exists():
-                    secret = secret_file.read_text(encoding="utf-8").strip()
-                    self.logger.info(f"[Bind] Loaded ROBOT_SECRET from {secret_file}")
-                if not secret:
-                    # 首次启动：生成新 secret 并持久化到文件
-                    secret = BindingManager.generate_secret()
-                    secret_file.parent.mkdir(parents=True, exist_ok=True)
-                    secret_file.write_text(secret, encoding="utf-8")
-                    self.logger.info(f"[Bind] Auto-generated and saved ROBOT_SECRET to {secret_file}")
+            # 密钥加载策略（新架构：设备独立 device_secret；兼容旧：全局 binding_secret）
+            secret = load_device_secret(
+                config_dir,
+                explicit_secret=binding_config.get("secret", ""),
+                logger=self.logger,
+            )
             self.binding_manager = BindingManager(
                 config_dir=config_dir,
                 device_id=device_id,

@@ -63,10 +63,19 @@ class AccountClient:
 
     async def start(self) -> None:
         """启动：注册设备 + 开始心跳"""
-        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        # 强制 IPv4：Jetson 网络无 IPv6 连通性，aiohttp 默认 IPv6 优先会连接挂起超时
+        try:
+            import socket
+
+            conn = aiohttp.TCPConnector(family=socket.AF_INET)
+        except Exception:
+            conn = None
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10),
+            connector=conn,
+        )
         await self._register()
-        if self._registered:
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     async def stop(self) -> None:
         """停止：取消心跳 + 关闭 HTTP 会话"""
@@ -91,6 +100,9 @@ class AccountClient:
             "robotId": self.device_id,
             "robotName": self.robot_name,
             "timestamp": timestamp,
+            # 设备独立密钥哈希（新架构）：服务器存此哈希用于后续心跳/信令验证，
+            # 明文 device_secret 永不上传
+            "deviceSecretHash": hashlib.sha256(self.robot_secret.encode()).hexdigest(),
         }
         # 包含 clientTokenHash（如果存在绑定关系）
         bindings = self.binding_manager.get_bindings() if self.binding_manager else []
@@ -129,10 +141,14 @@ class AccountClient:
     # ----------------------------------------------------------------
 
     async def _heartbeat_loop(self) -> None:
-        """心跳循环：每 HEARTBEAT_INTERVAL 秒上报一次"""
+        """心跳循环：每 HEARTBEAT_INTERVAL 秒上报一次；未注册成功时重试注册"""
         while True:
             try:
                 await asyncio.sleep(HEARTBEAT_INTERVAL)
+                if not self._registered:
+                    # 用户尚未把设备绑定到云端（新架构：先绑定后注册），每轮重试注册
+                    await self._register()
+                    continue
                 await self._send_heartbeat()
             except asyncio.CancelledError:
                 raise
@@ -148,7 +164,12 @@ class AccountClient:
         try:
             async with self._session.post(
                 f"{self.server_url}/api/devices/heartbeat",
-                json={"robotId": self.device_id, "timestamp": timestamp},
+                json={
+                    "robotId": self.device_id,
+                    "timestamp": timestamp,
+                    # 设备独立密钥哈希（新架构）：服务器按此校验心跳合法性
+                    "deviceSecretHash": hashlib.sha256(self.robot_secret.encode()).hexdigest(),
+                },
                 headers={
                     "X-Robot-Id": self.device_id,
                     "X-Timestamp": str(timestamp),
@@ -200,6 +221,8 @@ class AccountClient:
             "accountId": account_id,
             "nonce": nonce,
             "expiresAt": now_ms + BINDING_PROOF_TTL * 1000,
+            # 设备独立密钥哈希（新架构）：云端注册时存储，用于后续设备验证
+            "deviceSecretHash": hashlib.sha256(self.robot_secret.encode()).hexdigest(),
         }
 
         payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
@@ -266,7 +289,7 @@ class AccountClient:
             self.logger.warning(f"[Account] JWT invalid: {e}")
             return None
 
-        # 2. 查询设备归属
+        # 2. 查询设备归属（新架构：携带 X-Device-Secret-Hash 头，服务器按设备哈希验证）
         assert self._session is not None
         try:
             timestamp = int(time.time() * 1000)
@@ -277,6 +300,7 @@ class AccountClient:
                     "X-Robot-Id": self.device_id,
                     "X-Timestamp": str(timestamp),
                     "X-Signature": signature,
+                    "X-Device-Secret-Hash": hashlib.sha256(self.robot_secret.encode()).hexdigest(),
                     "User-Agent": "wo-bot-control/1.0",
                 },
             ) as resp:
@@ -322,17 +346,15 @@ class AccountClient:
                 logger.warning("[Account] Enabled but server_url is empty")
             return None
 
-        # 读取 ROBOT_SECRET
+        # 读取设备密钥（新架构：.device_secret 优先；兼容：.binding_secret）
+        from core.device_secret import load_device_secret
+
         config_dir = Path(__file__).parent.parent.parent / "config"
-        secret = account_cfg.get("secret", "") or config.get("binding", {}).get("secret", "")
-        if not secret:
-            secret_file = config_dir / ".binding_secret"
-            if secret_file.exists():
-                secret = secret_file.read_text(encoding="utf-8").strip()
-        if not secret:
-            if logger:
-                logger.error("[Account] ROBOT_SECRET not found (set binding.secret or create config/.binding_secret)")
-            return None
+        secret = load_device_secret(
+            config_dir,
+            explicit_secret=account_cfg.get("secret", "") or config.get("binding", {}).get("secret", ""),
+            logger=logger,
+        )
 
         robot_name = config.get("robot", {}).get("name", "")
 

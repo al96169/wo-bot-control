@@ -71,21 +71,15 @@ class SignalClient:
                 logger.warning("[Signal] signal.server_url not configured")
             return None
 
-        # Read ROBOT_SECRET (same as account_client)
-        config_dir = Path(__file__).parent.parent.parent / "config"
-        secret = signal_cfg.get("secret", "")
-        if not secret:
-            # Try binding.secret first
-            secret = config.get("binding", {}).get("secret", "")
-        if not secret:
-            secret_file = config_dir / ".binding_secret"
-            if secret_file.exists():
-                secret = secret_file.read_text(encoding="utf-8").strip()
+        # Read device secret (new arch: .device_secret preferred; legacy: .binding_secret)
+        from core.device_secret import load_device_secret
 
-        if not secret:
-            if logger:
-                logger.error("[Signal] ROBOT_SECRET not found")
-            return None
+        config_dir = Path(__file__).parent.parent.parent / "config"
+        secret = load_device_secret(
+            config_dir,
+            explicit_secret=signal_cfg.get("secret", "") or config.get("binding", {}).get("secret", ""),
+            logger=logger,
+        )
 
         # Get device_id from config or parameter
         if not device_id:
@@ -122,6 +116,8 @@ class SignalClient:
                 "deviceId": self.device_id,
                 "timestamp": str(timestamp),
                 "signature": signature,
+                # 设备独立密钥哈希（新架构）：信令服务器按此比对，替代全局 ROBOT_SECRET HMAC
+                "deviceSecretHash": hashlib.sha256(self.robot_secret.encode("utf-8")).hexdigest(),
             }
         )
         # server_url may be wss:// or ws://
