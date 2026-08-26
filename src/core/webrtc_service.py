@@ -567,15 +567,13 @@ class WebRTCService:
         """处理客户端的 SDP offer，返回 SDP answer
 
         turn: 信令服务器下发的 TURN 凭证 {host, username, credential, ttl}。
-        远程（4G 手机）场景必须配置，否则手机 relay 候选无法与本机匹配。
+        注意：机器人处于局域网，多数场景访问不到公网 TURN（出站 UDP 3478 被阻断），
+        配置后 aiortc 会因 STUN/TURN 事务超时导致整个协商失败。
+        因此**不主动配置 TURN**，保持 STUN + host 候选：
+        - 同一局域网（手机连机器人 WiFi）：host 直连
+        - 4G：依赖 srflx/NAT 打洞（不可达时无法中继，属网络限制）
         """
         ice_servers = [RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
-        if turn and turn.get("host") and turn.get("username") and turn.get("credential"):
-            host = turn["host"]
-            ice_servers.append(
-                RTCIceServer(urls=[f"turn:{host}:3478", f"turn:{host}:3478?transport=tcp"], username=turn["username"], credential=turn["credential"])
-            )
-            self.logger.info(f"[{client_id}] TURN configured: turn:{host}:3478")
 
         pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
 
