@@ -560,7 +560,7 @@ class MessageHandler:
             targets = [dc_client_id] if dc_client_id else []
             if not targets:
                 # 从 webrtc_service 收集所有 open 的 DC 客户端（WS 请求场景）
-                for cid, dc in webrtc_svc.get_open_data_channels().items():
+                for cid, _dc in webrtc_svc.get_open_data_channels().items():
                     targets.append(cid)
             if targets:
                 for target in targets:
