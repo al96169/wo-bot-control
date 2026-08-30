@@ -78,20 +78,19 @@ class CameraManager:
 
         physical_count = len(self.cameras)
 
+        # 注意：单物理摄像头时**不再克隆**为 2 个逻辑摄像头。
+        # 克隆会让 cameras 列表出现 2 条，前端（web-debug/app）按
+        # cameras.length > 1 判定存在副摄并启用右画面，导致两个画面
+        # 显示同一摄像头内容（用户明确反馈：摄像头不可用不应双画面同内容）。
+        # 正确行为：只有 1 个摄像头时 cameras 只有 1 条，前端自动隐藏副摄。
         if physical_count == 1:
-            # 只有 1 个物理摄像头 → 克隆为 2 个逻辑摄像头（帧共享）
-            source_id = 0 if 0 in self.cameras else 1
-            source_cam = self.cameras[source_id]
-            clone_id = 1 if source_id == 0 else 0
-
-            clone = dict(source_cam)
-            clone["id"] = clone_id
-            clone["name"] = f"{source_cam['name']} (shared)"
-            clone["shared_from"] = source_id
-            self.cameras[clone_id] = clone
-
             if self.logger:
-                self.logger.info("Detected 1 physical camera, cloned to 2 logical cameras")
+                self.logger.info(
+                    f"Detected 1 physical camera only: "
+                    f"id={list(self.cameras.keys())[0]} "
+                    f"({self.cameras[list(self.cameras.keys())[0]]['name']}), "
+                    f"secondary view will be hidden"
+                )
         elif physical_count == 2:
             if self.logger:
                 self.logger.info("Detected 2 cameras: USB(cam0) + CSI(cam1)")
