@@ -1315,32 +1315,41 @@ async def main():
     logger.info("Music Player sub-service started")
     logger.info(f"Media directory: {DEFAULT_MEDIA_DIR}")
 
-    # 清理上一次运行残留的孤儿推流进程（防止混音和端口冲突）
-    # _kill_orphaned_streams 内部已包含等待逻辑（最多 5 秒确认进程退出）
     player = get_player()
-    player._kill_orphaned_streams()
 
-    # 自动启动推流服务，作为音乐服务的子进程管理
-    try:
-        dlna_result = await player.stream_start("dlna")
-        if dlna_result.get("error"):
-            logger.warning(f"DLNA 自动启动失败: {dlna_result['error']}")
-        else:
-            logger.info("DLNA (gmediarender) 已自动启动")
-    except Exception as e:
-        logger.warning(f"DLNA 自动启动异常: {e}")
+    # 先启动命令处理循环，保证子进程立即响应主服务的 IPC 请求。
+    # 之前把 _kill_orphaned_streams / stream_start 放在 reader_loop 之前，
+    # 它们内部的同步 subprocess.run + time.sleep 会阻塞事件循环数秒，
+    # 期间 music_list/music_status 等命令全部超时（"有时无法加载音乐列表"根因）。
+    reader_task = asyncio.create_task(_reader_loop())
+
+    # 后台任务：清理孤儿推流进程 + 自动启动 DLNA/AirPlay（不阻塞命令处理）
+    async def _background_startup():
+        try:
+            player._kill_orphaned_streams()
+        except Exception as e:
+            logger.warning(f"清理孤儿进程异常: {e}")
+        try:
+            dlna_result = await player.stream_start("dlna")
+            if dlna_result.get("error"):
+                logger.warning(f"DLNA 自动启动失败: {dlna_result['error']}")
+            else:
+                logger.info("DLNA (gmediarender) 已自动启动")
+        except Exception as e:
+            logger.warning(f"DLNA 自动启动异常: {e}")
+        try:
+            airplay_result = await player.stream_start("airplay")
+            if airplay_result.get("error"):
+                logger.warning(f"AirPlay 自动启动失败: {airplay_result['error']}")
+            else:
+                logger.info("AirPlay (shairport-sync) 已自动启动")
+        except Exception as e:
+            logger.warning(f"AirPlay 自动启动异常: {e}")
+
+    asyncio.create_task(_background_startup())
 
     try:
-        airplay_result = await player.stream_start("airplay")
-        if airplay_result.get("error"):
-            logger.warning(f"AirPlay 自动启动失败: {airplay_result['error']}")
-        else:
-            logger.info("AirPlay (shairport-sync) 已自动启动")
-    except Exception as e:
-        logger.warning(f"AirPlay 自动启动异常: {e}")
-
-    try:
-        await _reader_loop()
+        await reader_task
     finally:
         # 服务停止时清理所有子进程（mpg123/gmediarender/shairport-sync 等）
         await player.shutdown()
