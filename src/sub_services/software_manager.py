@@ -1044,9 +1044,14 @@ async def main():
             "Running without root privileges — install/uninstall/upgrade will be rejected. "
             "Ensure wobot-control service runs as root (User=root in systemd unit)."
         )
-    # 启动时拉取白名单
-    await _manager._refresh_manifest()
-    await _reader_loop()
+    # 先启动命令处理循环，保证子进程立即响应主服务的 IPC 请求。
+    # 之前把 _refresh_manifest 放在 reader_loop 之前，市场服务器不可达时
+    # urllib urlopen 可能阻塞数秒到 10s 超时，期间 software_list 等命令
+    # 全部超时（与 music_player 启动阻塞同类问题）。
+    reader_task = asyncio.create_task(_reader_loop())
+    # 后台任务：拉取市场白名单（不阻塞命令处理）
+    asyncio.create_task(_manager._refresh_manifest())
+    await reader_task
 
 
 if __name__ == "__main__":
