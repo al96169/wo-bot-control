@@ -71,8 +71,12 @@ class WebSocketServer:
             self._handle_client,
             self.host,
             self.port,
-            ping_interval=5,
-            ping_timeout=5,
+            # 调大 keepalive 参数：移动端（Flutter WebSocketChannel）在
+            # 事件循环繁忙或系统省电时可能延迟回 Pong，5s 窗口过短会把
+            # 正常客户端误判为超时断开（日志：keepalive ping timeout → 每 ~30s 重连）。
+            # 30s 间隔 + 10s 超时与 app 端心跳节奏匹配，仍能及时检出死连接。
+            ping_interval=30,
+            ping_timeout=10,
             max_size=2**20,
             origins=None,  # 允许所有 Origin（浏览器跨域 WebSocket 需要）
         )
@@ -107,7 +111,9 @@ class WebSocketServer:
                 dead.append(cid)
         for cid in dead:
             self._ws_clients.pop(cid, None)
-            if ws_client := self._ws_clients.get(cid):
+            # Python 3.7 不支持 walrus (:=)，用显式变量
+            ws_client = self._ws_clients.get(cid)
+            if ws_client:
                 self._clients.discard(ws_client)
 
     async def send_to_client(self, ws_client_id: str, message: dict) -> None:
@@ -707,7 +713,9 @@ class WebSocketServer:
                             dead.append(cid)
                     for cid in dead:
                         self._ws_clients.pop(cid, None)
-                        if ws_client := self._ws_clients.get(cid):
+                        # Python 3.7 不支持 walrus (:=)，用显式变量
+                        ws_client = self._ws_clients.get(cid)
+                        if ws_client:
                             self._clients.discard(ws_client)
                 except asyncio.CancelledError:
                     return
