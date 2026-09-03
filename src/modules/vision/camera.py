@@ -413,11 +413,16 @@ class CameraStream:
         self._capture_task: asyncio.Task | None = None
         self.current_frame: np.ndarray | None = None
         self.stream_port = 8080 + camera_info.get("id", 0)
+        # 停止标记：stop()/shutdown() 置 True，阻止自动重启
+        self._stopping = False
+        self._auto_restart_task: asyncio.Task | None = None
 
     async def start(self):
         """启动流 — 支持热恢复（设备已打开）和冷启动"""
         if self.running:
             return
+        # 主动启动：重置停止标记（允许自动重启逻辑在后续失败时生效）
+        self._stopping = False
 
         # 热恢复：设备已打开，直接重启采集循环
         # CSI 需额外检查子进程是否存活
@@ -564,6 +569,15 @@ class CameraStream:
 
     async def stop(self):
         """暂停流 — 停止采集但不释放设备，支持快速恢复"""
+        self._stopping = True  # 阻止自动重启（主动停止）
+        # 取消自动重启任务（若有）
+        if self._auto_restart_task and not self._auto_restart_task.done():
+            self._auto_restart_task.cancel()
+            try:
+                await self._auto_restart_task
+            except asyncio.CancelledError:
+                pass
+        self._auto_restart_task = None
         self.running = False
         # 取消采集任务并等待退出（保持 cap/csi_proc 不动）
         if self._capture_task and not self._capture_task.done():
@@ -581,6 +595,15 @@ class CameraStream:
 
     async def shutdown(self):
         """彻底释放设备资源（应用退出时调用）"""
+        self._stopping = True  # 阻止自动重启（彻底关闭）
+        # 取消自动重启任务（若有）
+        if self._auto_restart_task and not self._auto_restart_task.done():
+            self._auto_restart_task.cancel()
+            try:
+                await self._auto_restart_task
+            except asyncio.CancelledError:
+                pass
+        self._auto_restart_task = None
         self.running = False
         if self._capture_task and not self._capture_task.done():
             self._capture_task.cancel()
@@ -652,7 +675,7 @@ class CameraStream:
                     if _consecutive_failures >= 10:
                         if self.logger:
                             self.logger.error(
-                                f"cap.read() failed 10 consecutive times, releasing device for cold restart: {self.camera_info['name']}"
+                                f"cap.read() failed 10 consecutive times, releasing device: {self.camera_info['name']}"
                             )
                         try:
                             self.cap.release()
@@ -670,6 +693,42 @@ class CameraStream:
                     self.logger.error(f"Capture error: {e}", exc_info=True)
                 self.running = False  # 确保异常时流被标记为停止，允许后续重启
                 break
+
+        # ---- 采集循环意外退出（设备读帧失败/异常）→ 自动冷重启 ----
+        # USB 摄像头（尤其 Jetson + hub）读帧会间歇性失败；若不自愈，
+        # WebRTC 视频轨将永远发黑帧/断流，客户端画面卡死（"画面几秒后冻结"）。
+        if self.running is False and not self._stopping and self._auto_restart_task is None:
+            self._auto_restart_task = asyncio.create_task(self._auto_restart_with_backoff())
+
+    async def _auto_restart_with_backoff(self):
+        """自动冷重启流（读帧失败后），带指数退避；stop()/shutdown() 后不再重启"""
+        delay = 2.0
+        attempt = 0
+        try:
+            while not self._stopping:
+                attempt += 1
+                if self.logger:
+                    self.logger.info(
+                        f"Auto-restarting camera stream (attempt {attempt}): {self.camera_info.get('name')}"
+                    )
+                await asyncio.sleep(delay)
+                if self._stopping:
+                    return
+                try:
+                    await self.start()
+                    if self.running:
+                        if self.logger:
+                            self.logger.info(
+                                f"Camera stream auto-recovered after {attempt} attempt(s): "
+                                f"{self.camera_info.get('name')}"
+                            )
+                        return
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"Camera auto-restart failed: {e}")
+                delay = min(delay * 2, 30.0)
+        finally:
+            self._auto_restart_task = None
 
     async def _capture_loop_csi(self):
         """CSI 子进程帧采集循环：从 gst-launch-1.0 multifilesink 读取最新 JPEG"""
