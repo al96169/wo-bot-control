@@ -417,6 +417,58 @@ class CameraStream:
         self._stopping = False
         self._auto_restart_task: asyncio.Task | None = None
 
+    @staticmethod
+    def _usb_format_probe(path: str) -> bool | None:
+        """探测该节点是否具备 USB UVC 摄像头特征（MJPG/YUYV）。
+
+        三态返回：
+          True  = 明确是 USB 摄像头
+          False = 明确不是（如 CSI/imx219 只暴露 RG10）
+          None  = 无法判定（v4l2-ctl 缺失或调用失败）
+        """
+        try:
+            out = subprocess.run(
+                ["v4l2-ctl", "-d", path, "--list-formats"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout
+        except Exception:
+            return None
+        if not out:
+            return None
+        return "MJPG" in out or "YUYV" in out
+
+    def _resolve_device_path(self) -> str | None:
+        """重新解析本摄像头**当前**应使用的 /dev/video* 节点。
+
+        为什么必须每次重新解析：USB 摄像头掉线后重新枚举会拿到**不同的节点号**。
+        实测一次 uvcvideo 内核 oops 后，设备从 /dev/video1 漂移到了 /dev/video2；
+        而 camera_info["device"] 是启动时检测缓存下来的。若不刷新，
+        _auto_restart_with_backoff() 会永远去开那个已不存在的旧节点，
+        表现为**画面永久卡在最后一帧**（读帧一直失败，重试永不成功）。
+        """
+        known = self.camera_info.get("device")
+
+        # CSI 节点由 nvargus / v4l2 固定占用，不做漂移处理
+        if self.camera_info.get("type", "usb") == "csi":
+            return known
+
+        existing = [f"/dev/video{i}" for i in range(10) if os.path.exists(f"/dev/video{i}")]
+
+        # 原节点仍在，且"是 USB 摄像头"或"无法判定" → 复用，避免无谓抖动
+        if known and known in existing and self._usb_format_probe(known) is not False:
+            return known
+
+        # 否则找另一个具备 USB 特征的节点（CSI 只有 RG10，会返回 False 被排除）
+        for path in existing:
+            if self._usb_format_probe(path) is True:
+                return path
+
+        # 找不到就返回 None：宁可报"无设备"继续重试，
+        # 也不能退化成去开 CSI 节点（那会输出绿屏到错误的画面上）
+        return None
+
     async def start(self):
         """启动流 — 支持热恢复（设备已打开）和冷启动"""
         if self.running:
@@ -455,6 +507,17 @@ class CameraStream:
             fps = self.fps if self.fps > 0 else 30
             cam_type = self.camera_info.get("type", "usb")
             device = self.camera_info.get("device", f"/dev/video{self.camera_info.get('index', 0)}")
+
+            # 节点漂移修正：USB 摄像头掉线重枚举后会换节点号（实测 video1 → video2）。
+            # 不刷新的话，自动重启会一直去开已失效的旧路径，画面永久卡死。
+            resolved = self._resolve_device_path()
+            if resolved and resolved != device:
+                if self.logger:
+                    self.logger.warning(
+                        f"Camera device node changed: {device} -> {resolved} (old node gone, likely USB re-enumeration)"
+                    )
+                self.camera_info["device"] = resolved
+                device = resolved
 
             self.cap = None
 
