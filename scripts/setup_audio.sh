@@ -54,6 +54,13 @@ if [ "$SKIP_ALSA" = false ]; then
 pcm.wobot_dlna     { type softvol; slave.pcm "plug:dmix:${USB_CARD}"; control { name "WoBot DLNA"    card ${USB_CARD} }; resolution 101; }
 pcm.wobot_airplay  { type softvol; slave.pcm "plug:dmix:${USB_CARD}"; control { name "WoBot AirPlay" card ${USB_CARD} }; resolution 101; }
 pcm.wobot_local    { type softvol; slave.pcm "plug:dmix:${USB_CARD}"; control { name "WoBot Local"   card ${USB_CARD} }; resolution 101; }
+pcm.wobot_bt       { type softvol; slave.pcm "plug:dmix:${USB_CARD}"; control { name "WoBot BT"      card ${USB_CARD} }; resolution 101; }
+
+# 可选调优（T023 蓝牙延迟，默认不启用）：
+# dmix 会忽略应用请求的 period/buffer，若蓝牙播放出现爆音/欠载，
+# 可显式固定 dmix 的 period（注意会影响所有共用该 dmix 的音源）：
+# defaults.dmix.PCH.period_time 100000
+# defaults.dmix.PCH.periods 5
 EOF
 
     echo "  已生成: ${ALSA_CONF_FILE}"
@@ -118,8 +125,17 @@ HOOK_DEST="/opt/wobot/scripts"
 
 mkdir -p "$HOOK_DEST"
 
+# 说明：deploy.sh 会执行 ${REMOTE_DIR}/scripts/setup_audio.sh，
+# 此时 SCRIPT_DIR 与 HOOK_DEST 是同一个目录，`cp a a` 会报
+# "are the same file" 并因 set -e 中断整个脚本，故先判断同目录。
+SAME_DIR=false
+[ "$SCRIPT_DIR" = "$HOOK_DEST" ] && SAME_DIR=true
+
 # 复制 airplay-start.sh
-if [ -f "${SCRIPT_DIR}/airplay-start.sh" ]; then
+if [ "$SAME_DIR" = true ] && [ -f "${HOOK_DEST}/airplay-start.sh" ]; then
+    chmod +x "${HOOK_DEST}/airplay-start.sh"
+    echo "  已就位: ${HOOK_DEST}/airplay-start.sh"
+elif [ -f "${SCRIPT_DIR}/airplay-start.sh" ]; then
     cp "${SCRIPT_DIR}/airplay-start.sh" "$HOOK_DEST/"
     chmod +x "${HOOK_DEST}/airplay-start.sh"
     echo "  已部署: ${HOOK_DEST}/airplay-start.sh"
@@ -135,7 +151,10 @@ EOF
 fi
 
 # 复制 airplay-stop.sh
-if [ -f "${SCRIPT_DIR}/airplay-stop.sh" ]; then
+if [ "$SAME_DIR" = true ] && [ -f "${HOOK_DEST}/airplay-stop.sh" ]; then
+    chmod +x "${HOOK_DEST}/airplay-stop.sh"
+    echo "  已就位: ${HOOK_DEST}/airplay-stop.sh"
+elif [ -f "${SCRIPT_DIR}/airplay-stop.sh" ]; then
     cp "${SCRIPT_DIR}/airplay-stop.sh" "$HOOK_DEST/"
     chmod +x "${HOOK_DEST}/airplay-stop.sh"
     echo "  已部署: ${HOOK_DEST}/airplay-stop.sh"
@@ -171,6 +190,7 @@ check_tool "amixer" "ALSA 音量控制 (sudo apt-get install -y alsa-utils)"
 check_tool "gmediarender" "DLNA/UPnP 推流 (gmrender-resurrect, 源码编译: https://github.com/hzeller/gmrender-resurrect)"
 check_tool "shairport-sync" "AirPlay 推流 (sudo apt-get install -y shairport-sync)"
 check_tool "ffmpeg" "RTMP 推流 (sudo apt-get install -y ffmpeg)"
+check_tool "bluealsa-aplay" "蓝牙音频接收 T023 (sudo bash scripts/setup_bluetooth.sh)"
 
 if [ -n "$MISSING_TOOLS" ]; then
     echo ""

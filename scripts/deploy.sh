@@ -12,6 +12,7 @@ set -e
 REMOTE_HOST="192.168.1.47"
 REMOTE_USER="trae"
 REMOTE_PASSWORD=""
+SUDO_PASSWORD=""   # 远端 sudo 密码；留空则回退用 REMOTE_PASSWORD
 REMOTE_DIR="/opt/wobot"
 SERVICE_NAME="wobot-control"
 REQUIREMENTS_FILE="requirements-jetson.txt"  # Jetson Python 3.7 兼容
@@ -39,13 +40,18 @@ while [[ $# -gt 0 ]]; do
             REMOTE_PASSWORD="$2"
             shift 2
             ;;
+        --sudo-password)
+            # 仅用于远端 sudo，不影响 SSH 认证方式（可用密钥/SSH_ASKPASS 免密登录）
+            SUDO_PASSWORD="$2"
+            shift 2
+            ;;
         --req)
             REQUIREMENTS_FILE="$2"
             shift 2
             ;;
         *)
             echo "未知参数: $1"
-            echo "用法: bash scripts/deploy.sh [--jetson] [--host HOST] [--user USER] [--password PASSWORD] [--req REQUIREMENTS_FILE]"
+            echo "用法: bash scripts/deploy.sh [--jetson] [--host HOST] [--user USER] [--password PASSWORD] [--sudo-password PASSWORD] [--req REQUIREMENTS_FILE]"
             exit 1
             ;;
     esac
@@ -150,6 +156,15 @@ if [ -n "$SUDO_PASSWORD" ]; then
     SUDO="echo '${SUDO_PASSWORD}' | sudo -S"
 fi
 
+echo "  -> 部署前巡检（只读，不改动；详见 AGENT.md「零、接手第一步」）..."
+if [ -f "${REMOTE_DIR}/scripts/healthcheck.sh" ]; then
+    # 只读快照：暴露 L4T 版本错配 / 磁盘写满 / apt·dpkg 元数据损坏 / Argus 失效等隐性状态，
+    # 也让"是不是这次部署弄坏的"可判定。失败不阻断部署。
+    SUDO_PASS="${SUDO_PASSWORD}" bash "${REMOTE_DIR}/scripts/healthcheck.sh" 2>/dev/null | sed 's/^/     /' || true
+else
+    echo "     (机器人上还没有 scripts/healthcheck.sh，本次跳过)"
+fi
+
 echo "  -> 停止现有服务..."
 eval "${SUDO} systemctl stop ${SERVICE_NAME}" 2>/dev/null || true
 
@@ -166,35 +181,62 @@ crontab -l 2>/dev/null | grep -v "wo-bot-control" | crontab - 2>/dev/null || tru
 echo "  -> 创建目标目录..."
 mkdir -p ${REMOTE_DIR}
 
-echo "  -> 清理旧文件（保留 venv/ + 绑定凭据）..."
+echo "  -> 清理旧代码（保留运行时状态）..."
 
-# 备份绑定凭据（避免每次部署都需要重新绑定客户端）
-BINDING_BACKUP=$(mktemp -d)
-if [ -f ${REMOTE_DIR}/config/.binding_secret ]; then
-    cp ${REMOTE_DIR}/config/.binding_secret "$BINDING_BACKUP/" 2>/dev/null || true
-fi
-if [ -f ${REMOTE_DIR}/config/.binding_password ]; then
-    cp ${REMOTE_DIR}/config/.binding_password "$BINDING_BACKUP/" 2>/dev/null || true
+# 运行时状态目录，绝不参与清理：
+#   config/  设备配置 + 凭据(.binding_secret/.binding_password) + bindings.json
+#   data/    红外码库等业务数据
+#   logs/    日志历史
+# 说明：logs 可能非常大（曾出现 739MB 的陈旧轮转文件），因此只保留、不打包备份。
+KEEP_DIRS="venv config data logs"
+
+# 备份 config/ + data/（体积小），用 tar 以保留 root 属主与权限
+STATE_TAR="/tmp/wobot-state-$$.tar.gz"
+STATE_ITEMS=""
+for item in config data; do
+    if [ -e "${REMOTE_DIR}/$item" ]; then
+        STATE_ITEMS="$STATE_ITEMS $item"
+    fi
+done
+
+STATE_OK=true
+if [ -n "$STATE_ITEMS" ]; then
+    if eval "${SUDO} tar czf ${STATE_TAR} -C ${REMOTE_DIR}${STATE_ITEMS}"; then
+        echo "  -> 已备份运行时状态:${STATE_ITEMS}"
+    else
+        STATE_OK=false
+    fi
 fi
 
-# 删除除 venv 外的所有内容
-find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 ! -name 'venv' -exec rm -rf {} + 2>/dev/null || true
-eval "${SUDO} find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 ! -name 'venv' -exec rm -rf {} +" 2>/dev/null || true
+# 备份失败则中止：否则解压会用仓库里的默认 config 覆盖设备上的真实配置
+if [ "$STATE_OK" != true ]; then
+    echo "  [错误] 运行时状态备份失败，已中止部署以避免覆盖设备配置"
+    echo "         请检查磁盘空间: df -h ${REMOTE_DIR}"
+    rm -f "${STATE_TAR}"
+    exit 1
+fi
+
+# 删除旧代码，但保留 KEEP_DIRS
+FIND_ARGS=""
+for item in $KEEP_DIRS; do
+    FIND_ARGS="$FIND_ARGS ! -name $item"
+done
+find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 $FIND_ARGS -exec rm -rf {} + 2>/dev/null || true
+eval "${SUDO} find ${REMOTE_DIR} -mindepth 1 -maxdepth 1 ${FIND_ARGS} -exec rm -rf {} +" 2>/dev/null || true
 
 echo "  -> 解压部署包..."
 tar -xzf /tmp/${PACKAGE_NAME} -C ${REMOTE_DIR}
 
-# 还原绑定凭据
-mkdir -p ${REMOTE_DIR}/config
-if [ -f "$BINDING_BACKUP/.binding_secret" ]; then
-    cp "$BINDING_BACKUP/.binding_secret" ${REMOTE_DIR}/config/
-    echo "  -> 已还原绑定凭据 .binding_secret"
+# 还原运行时状态：设备上的实际配置/凭据/绑定优先于仓库默认值
+if [ -n "$STATE_ITEMS" ] && [ -f "$STATE_TAR" ]; then
+    if eval "${SUDO} tar xzf ${STATE_TAR} -C ${REMOTE_DIR}"; then
+        echo "  -> 已还原运行时状态（设备配置/凭据/绑定优先）"
+    else
+        echo "  [警告] 运行时状态还原失败，请检查 ${REMOTE_DIR}/config"
+    fi
+    # tar 由 sudo 创建（root 属主），删除必须用 sudo；且失败不得中止后续部署
+    eval "${SUDO} rm -f ${STATE_TAR}" 2>/dev/null || true
 fi
-if [ -f "$BINDING_BACKUP/.binding_password" ]; then
-    cp "$BINDING_BACKUP/.binding_password" ${REMOTE_DIR}/config/
-    echo "  -> 已还原绑定凭据 .binding_password"
-fi
-rm -rf "$BINDING_BACKUP"
 
 # ---- 编译本地 C 工具 ----
 echo "  -> 编译 C 工具..."
@@ -242,60 +284,25 @@ if [ -d "/home/jetson/py_install/Rosmaster_Lib" ]; then
     cp -r /home/jetson/py_install/Rosmaster_Lib ${REMOTE_DIR}/venv/lib/python3*/site-packages/ 2>/dev/null || true
 fi
 
-# Monkey-patch: aiortc 在 OpenSSL 1.1.1 上有多个不兼容的 ctypes 调用
-echo "  -> 应用 aiortc OpenSSL 兼容补丁..."
-AIORTC_DTLS="${REMOTE_DIR}/venv/lib/python3*/site-packages/aiortc/rtcdtlstransport.py"
-AIORTC_FILE=$(ls ${AIORTC_DTLS} 2>/dev/null | head -1)
-if [ -n "$AIORTC_FILE" ] && [ -f "$AIORTC_FILE" ]; then
-    python -c "
-import os, re
-f = open('${AIORTC_FILE}')
-content = f.read(); f.close()
-if '# NOTE: BIO_ctrl_pending is not available' in content:
-    print('aiortc: already patched')
-else:
-    # Patch 1: SSL_CTX_set_read_ahead 不存在 → hasattr guard
-    content = content.replace(
-        'lib.SSL_CTX_set_read_ahead(ctx, 1)',
-        'lib.SSL_CTX_set_read_ahead(ctx, 1) if hasattr(lib, \"SSL_CTX_set_read_ahead\") else 0'
-    )
-    # Patch 2: Replace BIO_ctrl_pending/BIO_ctrl check with direct BIO_read
-    # cryptography binding on OpenSSL 1.1.x doesn't expose BIO_ctrl*.
-    # BIO_read on a memory BIO returns 0 when empty → safe to call directly.
-    old_match = r'pending = lib\.(?:BIO_ctrl_pending|BIO_ctrl)\(self\.write_bio[^)]*\)\s*\n\s*if pending > 0:\s*\n\s*result = lib\.BIO_read\(\s*\n\s*self\.write_bio, self\.write_cdata, len\(self\.write_cdata\)\s*\n\s*\)\s*\n\s*(?:await self\.transport\._send|self\.__tx_bytes)'
-    if re.search(r'BIO_ctrl_pending|BIO_ctrl\(self\.write_bio', content):
-        content = re.sub(
-            r'pending = lib\.(?:BIO_ctrl_pending|BIO_ctrl)\(self\.write_bio[^)]*\)',
-            'pass  # patched: cryptography binding lacks BIO_ctrl* on OpenSSL 1.1.x',
-            content
-        )
-        content = re.sub(
-            r'if pending > 0:\s*\n\s*result = lib\.BIO_read\(',
-            'result = lib.BIO_read(',
-            content
-        )
-        content = re.sub(
-            r'(\s*result = lib\.BIO_read\(\s*\n\s*self\.write_bio.*?\))\s*\n\s*(await self\.transport)',
-            r'\1\n            if result > 0:\n                \2',
-            content,
-            flags=re.DOTALL
-        )
-    # Clean up any leftover _bio_ctrl_pending fallback from previous patches
-    content = re.sub(
-        r'\n# WORKAROUND.*?_bio_ctrl_pending[^\n]*\n.*?BIO_ctrl\(bio, 10, 0, None\)[^\n]*\n\s*',
-        '\n',
-        content,
-        flags=re.DOTALL
-    )
-    # backup
-    with open('${AIORTC_FILE}.pydl', 'w') as bf:
-        bf.write(open('${AIORTC_FILE}').read())
-    with open('${AIORTC_FILE}', 'w') as f2:
-        f2.write(content)
-    print('aiortc: patched (SSL_CTX_set_read_ahead + skip BIO_ctrl)')
-" || echo "  [警告] aiortc 补丁应用失败（非致命，可能已打过补丁）"
+# aiortc 在本机（Jetson + OpenSSL 1.1.1）**不需要任何补丁**：
+#   2026-10-07 实测 SSL_CTX_set_read_ahead 存在且返回 0（原始断言 `== 0` 本来就通过）、
+#   BIO_ctrl_pending 存在且可用 —— 原始 _write_ssl 本来就正确。
+#
+# 历史教训：deploy.sh 曾在此用 `hasattr` 三元表达式"保护" set_read_ahead，
+# 但那是错的 —— 它把 `_openssl_assert(lib.SSL_CTX_set_read_ahead(ctx, 1) == 0)`
+# 改成了 `_openssl_assert(lib.SSL_CTX_set_read_ahead(ctx, 1) if hasattr(...) else 0)`，
+# 断言语义从"返回 0"变成"等于 1"，于是必然抛
+#   DtlsError: OpenSSL call failed → 前端 "WebRTC negotiation failed"
+# 且该补丁幂等守卫写错字符串，每次部署重复叠加，最终把文件改成语法错误。
+#
+# 因此这里不再打补丁，改为跑一次 DTLS 回环自检（SDP→ICE→DTLS→DataChannel），
+# 一旦这一层被破坏就能在部署阶段立刻发现。
+echo "  -> WebRTC DTLS 自检..."
+if [ -f "${REMOTE_DIR}/scripts/webrtc_selftest.py" ]; then
+    ${REMOTE_DIR}/venv/bin/python ${REMOTE_DIR}/scripts/webrtc_selftest.py \
+        || echo "  [警告] DTLS 自检未通过，WebRTC 可能不可用（检查 aiortc 是否被改动）"
 else
-    echo "  [跳过] aiortc 未安装或路径不匹配，跳过补丁"
+    echo "  [跳过] 未找到 scripts/webrtc_selftest.py"
 fi
 
 # 检查 systemd 服务文件是否存在，不存在则创建
@@ -333,10 +340,11 @@ echo "  -> 部署完成！"
 DEPLOY_EOF
 )
 
-eval "${SSH_CMD} ${REMOTE_USER}@${REMOTE_HOST} 'bash -s' <<SCRIPT
+# 注意：参数必须写在 ssh 命令行上；写在 heredoc 结束标记之后会被本地 shell 当成命令执行，
+# 导致远端脚本收不到 $1..$5（REMOTE_DIR 为空时 find 会在远端 home 目录里删文件）。
+eval "${SSH_CMD} ${REMOTE_USER}@${REMOTE_HOST} 'bash -s' '${REMOTE_DIR}' '${PACKAGE_NAME}' '${SERVICE_NAME}' '${REQUIREMENTS_FILE}' '${SUDO_PASSWORD:-$REMOTE_PASSWORD}'" <<SCRIPT
 ${REMOTE_SCRIPT}
 SCRIPT
-${REMOTE_DIR} ${PACKAGE_NAME} ${SERVICE_NAME} ${REQUIREMENTS_FILE} ${REMOTE_PASSWORD}"
 
 # ============================================================
 # Step 5: 清理 & 验证
