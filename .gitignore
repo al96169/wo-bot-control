@@ -72,3 +72,7 @@ logs/
 # Local config
 config/local.yaml
 .DS_Store
+
+# 工具缓存
+.mypy_cache/
+.ruff_cache/
