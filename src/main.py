@@ -36,6 +36,7 @@ except (ImportError, AttributeError) as e:
     WEBRTC_AVAILABLE = False
     print(f"Warning: WebRTC not available: {e}")
 from modules.motion.controller import MotionController
+from modules.system.audio_output import AudioOutput
 from modules.system.collector import SystemCollector
 from modules.system.power_policy import PowerPolicy
 from modules.system.sensor_recorder import SensorRecorder
@@ -90,6 +91,7 @@ class WoBotControl:
         self.media_manager = None
         self.power_policy = None
         self.sensor_recorder = None  # R00045 传感器数据持久化
+        self.audio_output = None  # T017 一键静音
 
         # 绑定认证模块
         self.binding_manager = None
@@ -291,6 +293,11 @@ class WoBotControl:
             self.power_policy.set_on_mode_change(on_power_mode_change)
             self.logger.info("Power policy injected into message handler")
 
+        # 注入音频输出总开关到 message_handler（T017 一键静音）
+        if self.audio_output:
+            self.message_handler.audio_output = self.audio_output
+            self.logger.info("Audio output injected into message handler")
+
         # 注册进程内服务
         if self.sensor_recorder:
             await self.sensor_recorder.start()
@@ -440,6 +447,16 @@ class WoBotControl:
         pp_cfg = self.config.get("power_policy", {})
         self.power_policy = PowerPolicy(threshold=int(pp_cfg.get("threshold", 30)))
         self.logger.info(f"Power policy initialized (threshold={self.power_policy.threshold}%)")
+
+        # T017 一键静音（硬件混音器层总静音）
+        self.audio_output = AudioOutput(logger_=self.logger)
+        if self.audio_output.is_available():
+            self.logger.info(
+                f"Audio output mute initialized (card={self.audio_output._card}, "
+                f"controls={','.join(self.audio_output._controls)})"
+            )
+        else:
+            self.logger.warning("Audio output mute unavailable (no amixer/mixer control)")
 
         # 云台控制（先初始化，因为运动控制需要共享其 Rosmaster Bot 串口实例）
         gimbal_config = self.config.get("gimbal", {})

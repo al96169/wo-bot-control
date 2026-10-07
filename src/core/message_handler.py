@@ -1062,8 +1062,21 @@ class MessageHandler:
         if action in ("find_device", "find"):
             return await self._handle_find_device(enabled)
 
-        self.logger.info(f"Device control: {action} -> {'ON' if enabled else 'OFF'}")
-        return {"type": "device_control_ack", "data": {"action": action, "enabled": enabled, "status": "ok"}}
+        # T017 一键静音：硬件混音器层静音所有音频输出
+        if action == "mute":
+            return await self._handle_audio_mute(enabled)
+
+        # 其余动作尚未实现（如手电/去充电）：明确回执 unsupported，避免前端误判成功
+        self.logger.warning(f"Unsupported device control: {action} -> {'ON' if enabled else 'OFF'}")
+        return {
+            "type": "device_control_ack",
+            "data": {
+                "action": action,
+                "enabled": enabled,
+                "status": "unsupported",
+                "message": f"设备动作 '{action}' 尚未实现",
+            },
+        }
 
     async def _handle_find_device(self, enabled: bool) -> dict:
         """处理寻找设备（声光提示）"""
@@ -1084,6 +1097,37 @@ class MessageHandler:
                 **status,
             },
         }
+
+    # ---------- 一键静音 (T017) ----------
+
+    async def _handle_audio_mute(self, enabled: bool) -> dict:
+        """T017 一键静音：静音/恢复所有音频输出（硬件混音器层）"""
+        if not hasattr(self, "audio_output") or not self.audio_output:
+            return {"type": "error", "data": {"code": 503, "message": "Audio output not available"}}
+
+        if not self.audio_output.is_available():
+            return {
+                "type": "error",
+                "data": {"code": 501, "message": "本设备不支持一键静音（缺少音频硬件控制）"},
+            }
+
+        state = await self.audio_output.set_mute(bool(enabled))
+        if state.get("error"):
+            self.logger.warning(f"Audio mute partial failure: {state.get('error')}")
+        # 无论成功与否都广播真实状态，供前端纠正乐观 UI
+        await self._broadcast_audio_mute(state)
+        return {"type": "audio_mute_status", "data": state}
+
+    async def _handle_audio_mute_status(self, data: dict) -> dict:
+        """查询一键静音当前状态"""
+        if not hasattr(self, "audio_output") or not self.audio_output:
+            return {"type": "error", "data": {"code": 503, "message": "Audio output not available"}}
+        return {"type": "audio_mute_status", "data": self.audio_output.get_state()}
+
+    async def _broadcast_audio_mute(self, state: dict) -> None:
+        """广播静音状态给所有客户端"""
+        if hasattr(self, "ws_server") and self.ws_server:
+            await self.ws_server.broadcast_message({"type": "audio_mute_status", "data": state})
 
     # ---------- 红外遥控 (IR Remote, R00020) ----------
 
