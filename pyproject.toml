@@ -2,7 +2,9 @@
 name = "wo-bot-control"
 version = "0.2.5"
 description = "wo-bot 机器人设备服务端"
-requires-python = ">=3.10"
+# 真机（Jetson Nano / L4T R32.7.5）只有 Python 3.7.5，代码必须能在 3.7 下运行。
+# 开发机可以是 3.10+，但**语法必须保持 3.7 可解析**（见下方 ruff target-version）。
+requires-python = ">=3.7"
 
 [project.optional-dependencies]
 dev = [
@@ -13,7 +15,10 @@ dev = [
 ]
 
 [tool.ruff]
-target-version = "py310"
+# ⚠️ 必须保持 py37：真机是 Python 3.7.5。设成 py310 会让 3.8+ 独有语法
+# （如括号式上下文管理器 `with (a, b):`、海象运算符）在 CI 里"合法"通过，
+# 却在机器人上 SyntaxError。本项曾真实拦下测试文件里的 `with (...)` 写法。
+target-version = "py37"
 line-length = 120
 exclude = [
     ".git",
@@ -51,6 +56,9 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.mypy]
+# 注意：mypy 2.x 已不支持把目标设为 3.7（最低 3.10），所以 mypy **不能**作为
+# 3.7 兼容性门禁。3.7 约束由 ruff 的 target-version = "py37" 负责，
+# 外加 CI 里用真实 Python 3.7 跑一遍 compileall。
 python_version = "3.10"
 ignore_missing_imports = true
 check_untyped_defs = true

@@ -25,6 +25,8 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
+      # ruff 的 target-version = "py37"（见 pyproject.toml）会在这一步拦住
+      # 3.8+ 独有语法，例如括号式上下文管理器 `with (a, b):`
       - name: Ruff Lint
         run: ruff check --output-format=github .
 
@@ -36,3 +38,26 @@ jobs:
 
       - name: Pytest 测试
         run: pytest --tb=short
+
+  # 真机（Jetson Nano / L4T R32.7.5）只有 Python 3.7.5，而上面的 quality 任务
+  # 跑在 3.10 上。mypy 2.x 已不支持把目标设为 3.7，因此单独用**真实的 Python 3.7**
+  # 再编译一遍，确保部署到机器人上不会 SyntaxError。
+  py37-compat:
+    name: "Python 3.7 兼容性（真机运行时）"
+    runs-on: ubuntu-latest
+    container: python:3.7-slim
+
+    steps:
+      # python:3.7-slim 不含 git，而 actions/checkout 需要它
+      - name: 安装 git
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git
+
+      - uses: actions/checkout@v4
+
+      - name: 用真实 Python 3.7 编译 src 与 tests
+        run: |
+          python --version
+          python -m compileall -q src tests
+          echo "Python 3.7 语法兼容性检查通过"
