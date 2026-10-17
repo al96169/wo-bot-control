@@ -51,6 +51,12 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["core", "modules", "utils"]
 
+[tool.ruff.lint.per-file-ignores]
+# scripts/spike/ 是**一次性验证脚本**（真机可行性验证、上机冒烟），不是产品代码：
+# 它们只在本机/机器人上手工运行、结果记入 wiki，不参与发布。
+# 这里只豁免"格式化风格"两类规则，其余检查（未定义名、未使用导入等真实缺陷）仍然生效。
+"scripts/spike/*" = ["UP031", "SIM115"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

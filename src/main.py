@@ -36,6 +36,14 @@ except (ImportError, AttributeError) as e:
     WEBRTC_AVAILABLE = False
     print(f"Warning: WebRTC not available: {e}")
 from modules.motion.controller import MotionController
+from modules.navigation.cruise import CruiseController
+from modules.navigation.mode_manager import ModeManager
+from modules.navigation.odometry import Odometry
+from modules.navigation.patrol import PatrolController
+from modules.navigation.perception.active_scan import ActiveScanner
+from modules.navigation.perception.capabilities import apply_strategy, probe
+from modules.navigation.perception.looming import LoomingPerception
+from modules.navigation.safety import SafetySupervisor
 from modules.system.audio_output import AudioOutput
 from modules.system.collector import SystemCollector
 from modules.system.power_policy import PowerPolicy
@@ -82,6 +90,16 @@ class WoBotControl:
         self.motion_controller = None
         self.camera_manager = None
         self.gimbal_controller = None
+        # 导航（S0）：运行模式状态机 + 里程计；（S1）：安全底座
+        self.mode_manager = None
+        self.odometry = None
+        self.safety = None
+        self.perception = None  # S2 纯视觉感知（V1 光流/TTC）
+        self.cruise = None  # S3-lite 最简自主行进
+        self.scanner = None  # V3 云台主动扫视
+        self.patrol = None  # 视觉避障巡逻（走一段→观察→再走）
+        self.capability_report = None
+        self.avoidance_strategy: dict | None = None
         self.http_server = None
         self.webrtc_service = None
         self.dance_controller = None
@@ -216,6 +234,13 @@ class WoBotControl:
             camera_manager=self.camera_manager,
             config=self.config,
             logger=self.logger,
+            mode_manager=self.mode_manager,
+            odometry=self.odometry,
+            safety=self.safety,
+            perception=self.perception,
+            cruise=self.cruise,
+            scanner=self.scanner,
+            patrol=self.patrol,
         )
 
         # 注入云台控制器到消息处理器
@@ -494,6 +519,34 @@ class WoBotControl:
             self.motion_controller = MotionController(motion_config, self.logger)
         self.logger.info("Motion controller initialized")
 
+        # ---- 导航 S0：运行模式状态机 + 里程计 ----
+        # 说明：里程计**必须复用 shared_bot**（服务独占 /dev/ttyUSB0，
+        #       另开串口会与运动/云台冲突）；shared_bot 为空时里程计降级为不可用，
+        #       但模式状态机仍然可用（它不依赖硬件）。
+        nav_config = self.config.get("navigation", {}) or {}
+        mode_config = nav_config.get("mode", {}) or {}
+        odo_config = nav_config.get("odometry", {}) or {}
+        safety_config = nav_config.get("safety", {}) or {}
+
+        self.mode_manager = ModeManager(mode_config, self.logger)
+        self.odometry = Odometry(odo_config, self.logger, bot=shared_bot)
+        self.safety = SafetySupervisor(safety_config, self.logger, mode_manager=self.mode_manager)
+
+        self.logger.info(
+            f"Navigation S0 initialized: mode=manual (allow_semi={self.mode_manager.allow_semi}, "
+            f"allow_auto={self.mode_manager.allow_auto}), "
+            f"odometry_available={self.odometry.available}, calibrated={self.odometry.calibrated}"
+        )
+        self.logger.info(
+            f"Safety S1 initialized: watchdog={self.safety.watchdog_timeout_s}s, "
+            f"low_battery={self.safety.low_battery_v}V, tilt_limit={self.safety.tilt_limit_deg}°"
+        )
+        if not self.odometry.calibrated:
+            self.logger.warning(
+                "Odometry 未标定（navigation.odometry.counts_per_meter 为 0）："
+                "航向可用但无法给出位移，需在真机标定后定位才可信"
+            )
+
         # 摄像头管理（可选）
         camera_config = self.config.get("camera", {})
         if camera_config.get("enabled", True) and CAMERA_AVAILABLE and CameraManager:
@@ -503,6 +556,39 @@ class WoBotControl:
             self.camera_manager = None
             if not CAMERA_AVAILABLE:
                 self.logger.warning("Camera manager disabled (opencv not available)")
+
+        # S2：纯视觉感知（V1）。注意：它消费的是**应用自己的帧源**
+        # （camera_manager.get_frame），不额外打开摄像头 —— 摄像头被服务独占。
+        perception_config = nav_config.get("perception", {}) or {}
+        self.perception = LoomingPerception(perception_config, self.logger) if self.camera_manager else None
+        if self.perception is not None:
+            self.logger.info(f"Perception S2 initialized: {self.perception.get_status()}")
+            self.cruise = CruiseController(nav_config.get("cruise", {}) or {}, self.logger)
+            self.logger.info(f"Cruise S3-lite initialized: {self.cruise.get_status()}")
+            # 视觉避障巡逻：走一段 → 停下观察 → 再走（默认启用）
+            patrol_cfg = nav_config.get("patrol", {}) or {}
+            if patrol_cfg.get("enabled", True):
+                self.patrol = PatrolController(patrol_cfg, self.logger)
+                self.logger.info(f"Patrol initialized: {self.patrol.get_status()}")
+            # V3 云台主动扫视：需要云台控制器；没有云台时降级为"只用固定摄像头"
+            if self.gimbal_controller is not None:
+                self.scanner = ActiveScanner(nav_config.get("active_scan", {}) or {}, self.logger)
+                self.logger.info(f"ActiveScan V3 initialized: {self.scanner.get_status()}")
+            else:
+                self.logger.warning("ActiveScan V3 未启用（无云台控制器），只用固定摄像头")
+
+            # 硬件能力探测 + 避障方案自动选择（不擅自安装任何东西）
+            report = probe(
+                camera_manager=self.camera_manager,
+                gimbal_controller=self.gimbal_controller,
+                odometry=self.odometry,
+                config=nav_config.get("capabilities", {}) or {},
+            )
+            self.capability_report = report
+            self.avoidance_strategy = apply_strategy(report, nav_config.get("capabilities", {}) or {}, self.logger)
+            self.logger.info(f"Capabilities: {report.to_dict()}")
+        else:
+            self.logger.warning("Perception S2 未启用（摄像头管理器不可用）")
 
         # 舞蹈控制（始终可用，依赖运动控制器）
         try:

@@ -100,6 +100,12 @@ class WebSocketServer:
         if self.logger:
             self.logger.info("WebSocket signaling server stopped")
 
+    @property
+    def client_count(self) -> int:
+        """当前已连接的客户端数（S1 用它判断通信是否失联）"""
+        clients = getattr(self, "_ws_clients", None)
+        return len(clients) if clients is not None else len(getattr(self, "_clients", ()) or ())
+
     async def broadcast_message(self, message: dict) -> None:
         """向所有已连接客户端广播消息"""
         dead = []

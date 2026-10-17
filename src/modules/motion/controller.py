@@ -9,6 +9,20 @@ import math
 
 from .hardware import HardwareInterface, create_hardware
 
+# 驱动类型 → 期望的轮子（逻辑名）。**不要在任何地方写死四轮。**
+# 说明：这是"该驱动类型应有的轮子"，与硬件实际提供的编码器**分别判断** ——
+# 两者不一致本身就是一条值得报告的诊断信息。
+DRIVE_TYPE_WHEELS: dict = {
+    "mecanum": ("front_left", "front_right", "rear_left", "rear_right"),
+    "differential": ("left", "right"),
+    "ackermann": ("rear_left", "rear_right"),  # 转向轮不参与差速推算
+}
+
+
+def wheel_names_for_drive_type(drive_type: str) -> tuple:
+    """返回该驱动类型的逻辑轮名；未知类型返回空元组（不猜）。"""
+    return tuple(DRIVE_TYPE_WHEELS.get((drive_type or "").lower(), ()))
+
 
 class MotionController:
     """运动控制器"""
@@ -22,6 +36,9 @@ class MotionController:
 
         # 驱动类型
         self.drive_type = self.config.get("drive_type", "mecanum")
+        # 底盘几何：不同机型差异很大，**不能写死**（曾固定 L=0.5/W=0.4）
+        self.wheel_base = float(self.config.get("wheel_base", 0.16))  # 轴距
+        self.track_width = float(self.config.get("track_width", 0.16))  # 轮距
 
         # 速度限制
         self.max_linear_speed = self.config.get("max_linear_speed", 1.0)
@@ -32,6 +49,11 @@ class MotionController:
         self.current_angular = 0.0
         self.current_mode = self.config.get("default_mode", "manual")
         self.emergency_stopped = False
+
+    @property
+    def wheel_names(self) -> tuple:
+        """该驱动类型应有的轮名（由 drive_type 推导，不写死）"""
+        return wheel_names_for_drive_type(self.drive_type)
 
     def set_drive_type(self, drive_type: str):
         """设置驱动类型"""
@@ -86,9 +108,8 @@ class MotionController:
         """根据驱动类型计算轮速"""
         if self.drive_type == "mecanum":
             # 麦轮驱动：全向移动
-            # 假设轮距和轴距
-            L = 0.5  # 轴距
-            W = 0.4  # 轮距
+            L = self.wheel_base  # 轴距（来自配置）
+            W = self.track_width  # 轮距（来自配置）
 
             # 麦轮运动学
             v1 = linear - angular * (L + W) / 2  # 前左

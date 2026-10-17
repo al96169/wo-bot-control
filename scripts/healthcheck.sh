@@ -27,6 +27,18 @@ run_sudo() {
     else return 127; fi
 }
 
+# 判断当前是否**真的**能拿到 root。
+# 为什么需要它：sudo 失败时返回 1（而非 127），若不加区分，
+# "sudo 不可用"会被当成"apt 元数据损坏"误报 FAIL —— 部署前置检查误报最危险。
+have_root() {
+    [ "$(id -u)" -eq 0 ] && return 0
+    if [ -n "${SUDO_PASS:-}" ]; then
+        echo "$SUDO_PASS" | sudo -S -p '' true >/dev/null 2>&1
+    else
+        sudo -n true >/dev/null 2>&1
+    fi
+}
+
 OK=0; WARN=0; FAIL=0
 ok()   { echo "  [ OK ] $*"; OK=$((OK+1)); }
 warn() { echo "  [WARN] $*"; WARN=$((WARN+1)); }
@@ -104,8 +116,8 @@ fi
 hdr "4. apt / dpkg 元数据完整性（磁盘写满会留下全 NUL 的元数据）"
 # apt-get check 要拿 dpkg 锁，必须 root —— 没有 sudo 时是"跳过"而不是"失败"
 APT_OUT=$(run_sudo apt-get check 2>&1); APT_RC=$?
-if [ "$APT_RC" -eq 127 ]; then
-    warn "跳过 apt-get check（需要 root；用 SUDO_PASS=... 运行可启用）"
+if [ "$APT_RC" -eq 127 ] || ! have_root; then
+    warn "跳过 apt-get check（当前拿不到 root；用 SUDO_PASS=... 运行可启用）"
 elif [ "$APT_RC" -eq 0 ]; then
     ok "apt-get check 通过"
 else

@@ -80,6 +80,30 @@ echo ""
 # ============================================================
 echo "[1/5] 打包项目文件..."
 
+# ============================================================
+# 前置：本地 CI 校验（不通过就**拒绝部署**）
+# ============================================================
+# 为什么加这道：曾多次带着 lint/mypy 错误或运行时 NameError 部署，
+# 错误只能由用户在界面上撞见。用工具卡住，而不是靠自觉。
+if [[ "${SKIP_CI:-0}" != "1" ]]; then
+    echo "[前置] 本地 CI 校验（SKIP_CI=1 可跳过）..."
+    if [[ -x ".venv/bin/ruff" ]]; then
+        if ! .venv/bin/ruff check . >/tmp/deploy_ci.log 2>&1; then
+            echo "  [拒绝部署] ruff 未通过："; tail -5 /tmp/deploy_ci.log | sed 's/^/     /'; exit 1
+        fi
+        # mypy 也必须在门禁里 —— 曾因只查 ruff+pytest 而漏过 6 个 mypy 错误并部署
+        if ! .venv/bin/mypy src >>/tmp/deploy_ci.log 2>&1; then
+            echo "  [拒绝部署] mypy 未通过："; tail -10 /tmp/deploy_ci.log | sed 's/^/     /'; exit 1
+        fi
+        if ! .venv/bin/pytest -q >>/tmp/deploy_ci.log 2>&1; then
+            echo "  [拒绝部署] 单测未通过："; tail -10 /tmp/deploy_ci.log | sed 's/^/     /'; exit 1
+        fi
+        echo "  [OK] ruff + mypy + pytest 通过"
+    else
+        echo "  [跳过] 未找到 .venv（如需强制校验请先安装开发依赖）"
+    fi
+fi
+
 tar -czf "$PACKAGE_PATH" \
     --exclude='venv' \
     --exclude='.venv' \
@@ -332,6 +356,26 @@ fi
 echo "  -> 启动服务..."
 eval "${SUDO} systemctl reset-failed ${SERVICE_NAME}" 2>/dev/null || true
 eval "${SUDO} systemctl start ${SERVICE_NAME}"
+
+# ============================================================
+# 诊断子服务：独立 systemd 单元，部署脚本不会自动重启它
+# （曾因此让诊断服务继续跑旧代码，面板显示旧数据）
+# ============================================================
+if eval "${SUDO} systemctl list-unit-files wobot-diagnostics.service" >/dev/null 2>&1; then
+    eval "${SUDO} systemctl restart wobot-diagnostics" >/dev/null 2>&1 || true
+    echo "  -> 已重启 wobot-diagnostics（独立诊断子服务）"
+fi
+
+# 部署后冒烟：最近 2 分钟日志里是否有 Traceback / NameError（运行时错误）
+SMOKE=$(eval "${SUDO} journalctl -u ${SERVICE_NAME} --since '2 min ago' --no-pager" 2>/dev/null \
+    | grep -acE 'Traceback|NameError|UnboundLocalError' || true)
+if [[ "${SMOKE:-0}" -gt 0 ]]; then
+    echo "  [警告] 部署后日志出现 ${SMOKE} 条运行时异常，请检查："
+    eval "${SUDO} journalctl -u ${SERVICE_NAME} --since '2 min ago' --no-pager" 2>/dev/null \
+        | grep -aE -A3 'Traceback|NameError|UnboundLocalError' | tail -12 | sed 's/^/     /'
+else
+    echo "  [OK] 部署后无运行时异常"
+fi
 
 echo "  -> 清理临时文件..."
 rm -f /tmp/${PACKAGE_NAME}

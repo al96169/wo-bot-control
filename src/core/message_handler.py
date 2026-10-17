@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import pty
 import re
@@ -15,9 +16,11 @@ import select
 import subprocess
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from core.service_manager import SERVICE_DEFINITIONS
+from modules.navigation.perception.base import PerceptionResult
 
 
 class MessageHandler:
@@ -31,6 +34,13 @@ class MessageHandler:
         config: dict | None = None,
         logger=None,
         service_manager=None,
+        mode_manager=None,
+        odometry=None,
+        safety=None,
+        perception=None,
+        cruise=None,
+        scanner=None,
+        patrol=None,
     ):
         self.system_collector = system_collector
         self.motion_controller = motion_controller
@@ -38,6 +48,35 @@ class MessageHandler:
         self.config = config or {}
         self.logger = logger or logging.getLogger(__name__)
         self.service_manager = service_manager
+        # 导航 S0：运行模式状态机 + 里程计
+        self.mode_manager = mode_manager
+        self.odometry = odometry
+        # 安全底座 S1
+        self.safety = safety
+        # 纯视觉感知 S2（V1 光流/TTC）
+        self.perception = perception
+        self.cruise = cruise
+        self.scanner = scanner
+        self.patrol = patrol
+        self._last_cruise: dict | None = None
+        # 感知用的摄像头：自主模式下由导航层**自行启动**，不依赖用户打开遥控界面
+        nav_cfg = (self.config or {}).get("navigation", {}) or {}
+        self._perception_camera_id = int((nav_cfg.get("perception", {}) or {}).get("camera_id", 0))
+        self._cam_start_ts = 0.0
+        self._cam_start_warned = False
+        self._nav_dbg_ts = 0.0
+        self._nav_err_ts = 0.0
+        self._last_perception: dict | None = None
+        self._nav_task: asyncio.Task | None = None
+        self._diag_task: asyncio.Task | None = None
+        self._wheel_monitor = None
+        self._debug_mode_file = "/tmp/wobot_mode"
+        self._probe_file = "/tmp/wobot_motion_probe"
+        self._probe_active = False
+        self._probe_enc0: dict | None = None
+        self._probe_t0 = 0.0
+        self._probe_last_log = 0.0
+        self._last_sent_cmd: tuple | None = None
         # 持久 Shell 会话工作目录（初始为进程当前目录）
         self._shell_cwd = os.getcwd()
         # 云台速度控制：客户端发速度(-1.0~+1.0)，服务端持续循环移动
@@ -58,6 +97,10 @@ class MessageHandler:
         """启动定期任务（由 main.py 在系统就绪后调用）"""
         if self._update_check_task is None or self._update_check_task.done():
             self._update_check_task = asyncio.create_task(self._periodic_update_check())
+        if self._nav_task is None or self._nav_task.done():
+            self._nav_task = asyncio.create_task(self._periodic_navigation())
+        if self._diag_task is None or self._diag_task.done():
+            self._diag_task = asyncio.create_task(self._periodic_diagnostics())
 
     async def _periodic_update_check(self, interval: int = 1800) -> None:
         """定期检查软件更新（默认每 30 分钟），广播给所有在线客户端"""
@@ -193,6 +236,19 @@ class MessageHandler:
             return self._feature_disabled_response("motion")
         if not self.motion_controller:
             return {"type": "error", "data": {"code": 503, "message": "Motion controller not available"}}
+
+        # 安全门禁（S1）：安全停车生效期间**拒绝任何运动指令**，
+        # 否则用户摇杆可以让被安全停下的机器人重新动起来。
+        if self.safety is not None and self.safety.tripped:
+            ev = self.safety.active_event
+            return {
+                "type": "motion_ack",
+                "data": {
+                    "blocked": True,
+                    "reason": ev.reason if ev else "安全停车生效中",
+                    "safety": self.safety.get_status(),
+                },
+            }
 
         try:
             # 三轴麦轮协议: {v_x, v_y, v_z}（平移摇杆+偏航摇杆合并后发送）
@@ -1128,6 +1184,981 @@ class MessageHandler:
         """广播静音状态给所有客户端"""
         if hasattr(self, "ws_server") and self.ws_server:
             await self.ws_server.broadcast_message({"type": "audio_mute_status", "data": state})
+
+    # ---------- 导航 S0：运行模式与里程计 ----------
+
+    async def _broadcast_control_mode(self) -> None:
+        """广播运行模式状态（含安全降级原因 —— 降级绝不允许静默）"""
+        if self.mode_manager is None:
+            return
+        if hasattr(self, "ws_server") and self.ws_server:
+            await self.ws_server.broadcast_message(
+                {"type": "control_mode_status", "data": self.mode_manager.get_status()}
+            )
+
+    async def _handle_control_mode_set(self, data: dict) -> dict:
+        """切换运行模式：manual / semi / auto
+
+        安全要点：
+          - 未绑定的客户端在 websocket_server 层已被拦下（AUTH_ALLOWED_TYPES 默认拒绝）
+          - semi/auto 需配置允许 + 二次确认，防止误触让机器人自主运动
+          - **切回 manual 必须立即停车**（让权即停），这是 S0 的硬性验收项
+        """
+        if self.mode_manager is None:
+            return {"type": "control_mode_ack", "data": {"ok": False, "message": "模式管理未启用"}}
+
+        payload = data or {}
+        result = self.mode_manager.request(
+            payload.get("mode"),
+            confirmed=bool(payload.get("confirmed", False)),
+            reason=payload.get("reason"),
+        )
+
+        if result.get("ok"):
+            # 让权即停：回到手动后不再保持之前的运动指令
+            if self.mode_manager.is_manual() and self.motion_controller:
+                try:
+                    await self.motion_controller.stop()
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f"切回 manual 时停车失败: {e}")
+            await self._broadcast_control_mode()
+
+        return {"type": "control_mode_ack", "data": result}
+
+    async def _handle_control_mode_get(self, data: dict) -> dict:
+        """查询当前运行模式与降级状态"""
+        if self.mode_manager is None:
+            return {"type": "control_mode_status", "data": {"mode": "manual", "available": False}}
+        status = dict(self.mode_manager.get_status())
+        status["available"] = True
+        return {"type": "control_mode_status", "data": status}
+
+    async def _handle_odometry_get(self, data: dict) -> dict:
+        """查询位姿与 IMU（单次）"""
+        if self.odometry is None:
+            return {"type": "odometry_status", "data": {"available": False}}
+        return {
+            "type": "odometry_status",
+            "data": {
+                "available": self.odometry.available,
+                "pose": self.odometry.get_pose(),
+                "imu": self.odometry.get_imu(),
+                "status": self.odometry.get_status(),
+            },
+        }
+
+    async def _handle_odometry_reset(self, data: dict) -> dict:
+        """重置位姿原点（标定与调试用）"""
+        if self.odometry is None:
+            return {"type": "odometry_reset_ack", "data": {"ok": False, "message": "里程计不可用"}}
+        payload = data or {}
+        self.odometry.reset(
+            float(payload.get("x", 0.0) or 0.0),
+            float(payload.get("y", 0.0) or 0.0),
+            float(payload.get("theta", 0.0) or 0.0),
+        )
+        return {"type": "odometry_reset_ack", "data": {"ok": True, "pose": self.odometry.get_pose()}}
+
+    async def _ensure_perception_camera(self) -> bool:
+        """确保感知摄像头有帧 —— 需要时由导航层自己启动流。
+
+        为什么必须自己启动：自主巡航不应依赖"用户打开了遥控界面"。
+        原先感知直接读 camera_manager.get_frame()，而流只有 UI 订阅才会启动，
+        于是无人开界面时感知永远拿不到帧，巡航根本无法工作。
+        """
+        if self.camera_manager is None:
+            return False
+        if self.camera_manager.get_frame(self._perception_camera_id) is not None:
+            return True
+
+        now = time.monotonic()
+        if now - self._cam_start_ts < 5.0:  # 失败重试冷却，避免刷屏
+            return False
+        self._cam_start_ts = now
+        try:
+            await self.camera_manager.start_stream(self._perception_camera_id)
+            if self.logger:
+                self.logger.info("[Nav] 自主模式：已自动启动摄像头 %s 供感知使用", self._perception_camera_id)
+            return True
+        except Exception as e:
+            if self.logger and not self._cam_start_warned:
+                self._cam_start_warned = True
+                self.logger.warning("[Nav] 自动启动摄像头失败（将重试）: %s", e)
+            return False
+
+    def _update_perception(self) -> PerceptionResult | None:
+        """跑一次视觉感知并把可信度上报给安全层（S2）。
+
+        fail-safe 语义：拿不到帧 → 上报不可信（原因"摄像头未开启"），
+        由安全层在**自主模式**下按"有障碍"处理，而不是闷头往前开。
+        """
+        src = self.perception
+        if src is None:
+            return None
+        try:
+            frame = self.camera_manager.get_frame(self._perception_camera_id) if self.camera_manager else None
+        except Exception:
+            frame = None
+
+        if frame is None:
+            src.reset()
+            if self.safety is not None:
+                self.safety.report_perception(False, "无视频帧（摄像头未开启或流未启动）")
+            self._last_perception = {"ok": False, "reason": "无视频帧", "source": src.name}
+            return None
+
+        gyro = None
+        if self.odometry is not None:
+            g = (self.odometry.get_imu() or {}).get("gyro") or {}
+            if g:
+                gyro = (float(g.get("x", 0.0)), float(g.get("y", 0.0)), float(g.get("z", 0.0)))
+
+        res = src.process(frame, gyro=gyro, now=time.monotonic())
+        if self.safety is not None:
+            self.safety.report_perception(res.ok, res.reason)
+        self._last_perception = res.to_dict()
+        return res
+
+    async def _motion_probe(self) -> bool:
+        """调试用运动探针：文件存在时强制持续直行，并记录编码器增量。
+
+        为什么需要：验证"自主模式能否真的驱动轮子"时，若受感知/暗光影响会一直停车，
+        永远发不出前进指令。探针绕过感知，直接发固定速度，用编码器增量给出铁证。
+        用法：echo 0.4 > /tmp/wobot_motion_probe   （内容为速度）
+        """
+        if self.motion_controller is None:
+            return False
+        try:
+            if not os.path.exists(self._probe_file):
+                if self._probe_active:
+                    self._probe_active = False
+                    self.logger.warning("[Probe] 运动探针结束")
+                return False
+            with open(self._probe_file, encoding="utf-8") as fp:
+                raw = (fp.read() or "0.3").strip()
+        except Exception:
+            return False
+        # 支持 "vx" 或 "vx,vy,vz"（用逗号分隔），便于逐个方向探测轮子响应
+        parts = [x.strip() for x in raw.split(",")]
+        try:
+            vx = float(parts[0]) if parts and parts[0] else 0.0
+            vy = float(parts[1]) if len(parts) > 1 and parts[1] else 0.0
+            vz = float(parts[2]) if len(parts) > 2 and parts[2] else 0.0
+        except ValueError:
+            return False
+        vx = max(-1.0, min(1.0, vx))
+        vy = max(-1.0, min(1.0, vy))
+        vz = max(-5.0, min(5.0, vz))
+        speed = vx
+        # 单轮直驱模式：文件内容 "wheel:<名称>,<速度>"，用于逐个轮子排查硬件
+        single_wheel = None
+        if raw.startswith("wheel:"):
+            spec = raw.split(":", 1)[1]
+            nm, _, sp = spec.partition(",")
+            single_wheel = nm.strip()
+            try:
+                speed = max(-1.0, min(1.0, float(sp or "0.5")))
+            except ValueError:
+                speed = 0.5
+        # ⚠️ 必须自己采样一次：探针走的是 `continue` 分支，会跳过主循环的 odometry.sample()，
+        # 否则 get_raw_encoders() 读到的是**陈旧值**，看起来"没动"（曾因此得出错误结论）。
+        if self.odometry is not None:
+            try:
+                self.odometry.sample()
+            except Exception:
+                pass
+        # 四轮直驱模式（绕过麦轮分解，用于单轮排障）：
+        # 文件内容 "motors:50,0,0,0" → 底层 Rosmaster.set_motor(s1,s2,s3,s4)
+        # 注意：硬件抽象层不支持单轮（会打印 warning 后忽略），必须走底层 bot。
+        motors = None
+        if raw.startswith("motors:"):
+            try:
+                vals = [float(x) for x in raw.split(":", 1)[1].split(",")[:4]]
+                while len(vals) < 4:
+                    vals.append(0.0)
+                motors = vals
+            except ValueError:
+                motors = None
+
+        if not self._probe_active:
+            self._probe_active = True
+            self._probe_enc0 = self.odometry.get_raw_encoders() if self.odometry else None
+            self._probe_t0 = time.monotonic()
+            if motors is not None:
+                self.logger.warning("[Probe] 四轮直驱：%s", motors)
+            elif single_wheel:
+                self.logger.warning("[Probe] 单轮驱动：%s speed=%.2f", single_wheel, speed)
+            else:
+                self.logger.warning("[Probe] 运动探针开始：vx=%.2f vy=%.2f vz=%.2f", vx, vy, vz)
+        try:
+            if motors is not None:
+                bot = getattr(self.motion_controller.hardware, "_bot", None)
+                if bot is not None and hasattr(bot, "set_motor"):
+                    bot.set_motor(motors[0], motors[1], motors[2], motors[3])
+                elif self.logger:
+                    self.logger.warning("[Probe] 底层 bot 不可用，无法四轮直驱")
+            elif single_wheel:
+                await self.motion_controller.hardware.set_motor(single_wheel, speed)
+            else:
+                await self.motion_controller.set_mecanum_velocity(vx, vy, vz, "manual")
+        except Exception as e:
+            self.logger.warning(f"[Probe] 发送失败: {e}")
+        # 每 2 秒报一次编码器增量
+        now = time.monotonic()
+        if now - getattr(self, "_probe_last_log", 0.0) >= 2.0:
+            self._probe_last_log = now
+            enc = self.odometry.get_raw_encoders() if self.odometry else None
+            if enc and self._probe_enc0:
+                d = [enc[k] - self._probe_enc0[k] for k in ("m1", "m2", "m3", "m4")]
+                self.logger.warning("[Probe] t=%.1fs 编码器增量=%s", now - self._probe_t0, d)
+        return True
+
+    def _check_debug_mode_override(self) -> None:
+        """调试用：通过文件切换运行模式。
+
+        为什么需要：验证自主模式要反复切换，不该每次都让人点界面。
+        安全性：只读**本机文件**，不新增任何网络接口；文件不存在则完全不生效。
+        用法：echo semi > /tmp/wobot_mode
+        """
+        if self.mode_manager is None:
+            return
+        try:
+            if not os.path.exists(self._debug_mode_file):
+                return
+            with open(self._debug_mode_file, encoding="utf-8") as fp:
+                want = (fp.read() or "").strip().lower()
+        except Exception:
+            return
+        if want not in ("manual", "semi", "auto") or want == self.mode_manager.mode:
+            return
+        res = self.mode_manager.request(want, confirmed=True, reason="调试覆盖文件")
+        if self.logger:
+            self.logger.info("[Debug] 模式覆盖文件 → %s（%s）", want, res.get("message"))
+
+    def _hw_checks(self) -> list:
+        """主服务独占的硬件检查（串口/摄像头/云台/IMU）。
+
+        为什么放在主服务：这些设备只有主服务能读（串口与摄像头被独占），
+        诊断子服务读不到。由主服务算好后**合并进诊断报告**再广播，
+        避免两个服务互相轮询形成循环依赖。
+        """
+        checks: list[dict] = []
+        # 配置在函数开头取一次（曾在 odometry 分支内定义，导致无 odometry 时 NameError）
+        nav_cfg = (self.config or {}).get("navigation", {}) or {}
+        # ---- 四轮（编码器反馈）----
+        # 逐轮输出：只坏一个轮子时，面板应只标那一轮，而不是整项报异常。
+        # ⚠️ 采样节奏：本方法每 2 秒调用一次，因此判定窗口必须 > 2 秒，
+        # 否则窗口内永远只有 1 个样本 → 状态停在 unknown → 误报"全部异常"。
+        if self.odometry is not None:
+            try:
+                enc = self.odometry.get_raw_encoders()
+                from modules.navigation.wheel_health import WheelHealthMonitor
+
+                # 通用性：该驱动类型"应有"的轮子 vs 实际读到的编码器 —— 不一致本身就是诊断信息
+                expected = getattr(self.motion_controller, "wheel_names", ()) or ()
+                enc_keys = [k for k in enc if k != "changed"]
+                if expected and len(enc_keys) != len(expected):
+                    checks.append(
+                        {
+                            "name": "轮子配置",
+                            "kind": "chassis",
+                            "status": "warn",
+                            "failure_class": "cfg",
+                            "detail": (
+                                f"驱动类型 {getattr(self.motion_controller, 'drive_type', '?')} "
+                                f"应有 {len(expected)} 个轮子，实际读到 {len(enc_keys)} 个编码器"
+                            ),
+                            "data": {"expected": list(expected), "encoders": enc_keys},
+                        }
+                    )
+                # 逻辑轮名（与编码器数量一致时用于展示，否则退回编码器键名）
+                if expected and len(expected) == len(enc_keys):
+                    display = [f"{expected[i]}（{enc_keys[i]}）" for i in range(len(enc_keys))]
+                else:
+                    display = list(enc_keys)
+
+                # ⚠️ 轮子列表必须**每次**都算出来（曾在"首次创建"分支里算，
+                # 导致后续调用 NameError: wheel_names referenced before assignment）
+                wheel_names = list(
+                    (nav_cfg.get("odometry", {}) or {}).get("wheels")
+                    or getattr(self.odometry, "wheel_names", None)
+                    or enc.keys()
+                )
+                if self._wheel_monitor is None:
+                    self._wheel_monitor = WheelHealthMonitor(
+                        {"window_s": 3.0, "cmd_threshold": 0.05, "move_threshold": 30, "wheels": wheel_names},
+                        self.logger,
+                    )
+                cmd = (
+                    getattr(self.motion_controller, "current_linear", 0.0) or 0.0,
+                    0.0,
+                    getattr(self.motion_controller, "current_angular", 0.0) or 0.0,
+                )
+                st = self._wheel_monitor.update(cmd, enc)
+                for idx, w in enumerate(wheel_names, start=1):
+                    label = display[idx - 1] if idx - 1 < len(display) else f"轮子 {idx}（{w}）"
+                    state = st["states"].get(w, "unknown")
+                    delta = st["deltas"].get(w, 0)
+                    if state == "ok":
+                        c_status, c_class = "ok", None
+                        c_detail = f"正常（Δ{delta}）"
+                    elif state in ("stall", "frozen", "erratic"):
+                        c_status = "fail"
+                        c_class = "link" if state == "frozen" else "hw"
+                        reason = {
+                            "stall": "有指令但无位移（卡滞/电机/驱动）",
+                            "frozen": "数据冻结（上报链路）",
+                            "erratic": "计数跳变（编码器信号）",
+                        }.get(state, state)
+                        c_detail = f"{reason}，Δ{delta}"
+                    else:
+                        # 数据不足（如刚启动、或长时间静止）—— 不能判为故障
+                        c_status, c_class = "warn", None
+                        c_detail = f"数据不足（Δ{delta}），无运动指令时属正常"
+                    checks.append(
+                        {
+                            "name": label,
+                            "kind": "motor",
+                            "status": c_status,
+                            "failure_class": c_class,
+                            "detail": c_detail,
+                            "data": {"delta": delta, "state": state},
+                        }
+                    )
+            except Exception as e:
+                checks.append(
+                    {
+                        "name": "轮子/编码器",
+                        "kind": "motor",
+                        "status": "fail",
+                        "failure_class": "link",
+                        "detail": f"检查失败: {e}",
+                        "data": {},
+                    }
+                )
+        else:
+            checks.append(
+                {
+                    "name": "轮子/编码器",
+                    "kind": "motor",
+                    "status": "fail",
+                    "failure_class": "link",
+                    "detail": "无里程计来源",
+                    "data": {},
+                }
+            )
+
+        # ---- 摄像头（支持多路：camera_ids 可配置；默认只查感知用的那一路）----
+        # 通用性：不同机型摄像头数量不同，不能假定只有一路
+        cam_ids = (nav_cfg.get("perception", {}) or {}).get("camera_ids") or [self._perception_camera_id]
+        cam_reported = 0
+        for cid in cam_ids:
+            if self.camera_manager is None:
+                checks.append(
+                    {
+                        "name": f"摄像头 {cid}",
+                        "kind": "camera",
+                        "status": "fail",
+                        "failure_class": "cfg",
+                        "detail": "无摄像头管理器",
+                        "data": {"camera_id": cid},
+                    }
+                )
+                continue
+            try:
+                frame = self.camera_manager.get_frame(cid)
+                if frame is not None:
+                    cw, ch = (frame.shape[1], frame.shape[0]) if hasattr(frame, "shape") else (0, 0)
+                    checks.append(
+                        {
+                            "name": f"摄像头 {cid}",
+                            "kind": "camera",
+                            "status": "ok",
+                            "failure_class": None,
+                            "detail": f"有帧 {cw}x{ch}",
+                            "data": {"camera_id": cid},
+                        }
+                    )
+                    cam_reported += 1
+                else:
+                    checks.append(
+                        {
+                            "name": f"摄像头 {cid}",
+                            "kind": "camera",
+                            "status": "fail",
+                            "failure_class": "cfg",
+                            "detail": "无帧（未启动/设备被占用/已掉线）",
+                            "data": {"camera_id": cid},
+                        }
+                    )
+            except Exception as e:
+                checks.append(
+                    {
+                        "name": f"摄像头 {cid}",
+                        "kind": "camera",
+                        "status": "fail",
+                        "failure_class": "link",
+                        "detail": f"检查失败: {e}",
+                        "data": {"camera_id": cid},
+                    }
+                )
+        if cam_reported == 0 and cam_ids:
+            pass  # 已在上面逐路记录失败，不再重复报
+
+        # ---- 云台 ----
+        if self.gimbal_controller is not None and hasattr(self.gimbal_controller, "set_pan"):
+            checks.append(
+                {
+                    "name": "云台",
+                    "kind": "gimbal",
+                    "status": "ok",
+                    "failure_class": None,
+                    "detail": "set_pan 可用",
+                    "data": {},
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "name": "云台",
+                    "kind": "gimbal",
+                    "status": "fail",
+                    "failure_class": "cfg",
+                    "detail": "无云台控制器或缺少 set_pan",
+                    "data": {},
+                }
+            )
+
+        # ---- IMU（读数全 0 = 无该硬件）----
+        imu_detail = "无里程计来源"
+        imu_status: str = "fail"
+        imu_class: str | None = "link"
+        if self.odometry is not None:
+            try:
+                imu = self.odometry.get_imu() or {}
+                g, acc = imu.get("gyro") or {}, imu.get("accel") or {}
+                mag = sum(abs(float(g.get(k, 0.0) or 0.0)) for k in ("x", "y", "z"))
+                mag += sum(abs(float(acc.get(k, 0.0) or 0.0)) for k in ("x", "y", "z"))
+                if mag <= 1e-9:
+                    imu_detail, imu_class = "读数为全 0（疑似无陀螺仪硬件）", "hw"
+                else:
+                    imu_status, imu_class, imu_detail = "ok", None, f"读数合计 {mag:.4f}"
+            except Exception as e:
+                imu_detail = f"检查失败: {e}"
+        checks.append(
+            {
+                "name": "IMU",
+                "kind": "imu",
+                "status": imu_status,
+                "failure_class": imu_class,
+                "detail": imu_detail,
+                "data": {},
+            }
+        )
+
+        # ---- 电池（读数可信性）----
+        # 阈值来自配置：不同机型电芯数不同，不能写死 10.5V
+        batt_cfg = (self.config or {}).get("battery", {}) or {}
+        _batt_min = float(batt_cfg.get("min_voltage", 10.5))
+        if not batt_cfg.get("enabled", True):
+            checks.append(
+                {
+                    "name": "电池",
+                    "kind": "battery",
+                    "status": "ok",
+                    "failure_class": None,
+                    "detail": "该机型未配置电池检测（不适用）",
+                    "data": {},
+                }
+            )
+            return checks
+        v = self._read_battery_voltage()
+        if v is None:
+            checks.append(
+                {
+                    "name": "电池",
+                    "kind": "battery",
+                    "status": "warn",
+                    "failure_class": "link",
+                    "detail": "读不到电压（传感器/上报链路）",
+                    "data": {},
+                }
+            )
+        elif v < _batt_min:
+            # 关键启发式：电压读数偏低但系统仍在正常运行 → 读数本身可疑
+            checks.append(
+                {
+                    "name": "电池",
+                    "kind": "battery",
+                    "status": "warn",
+                    "failure_class": "link",
+                    "detail": f"读数 {v:.2f}V 偏低，但系统正常运行 → 读数可能不可信（若充电器常连更可疑）",
+                    "data": {"voltage": round(v, 2)},
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "name": "电池",
+                    "kind": "battery",
+                    "status": "ok",
+                    "failure_class": None,
+                    "detail": f"{v:.2f}V",
+                    "data": {"voltage": round(v, 2)},
+                }
+            )
+        # ---- 外设（从 PeripheralRegistry **动态枚举**）----
+        # 通用性：不同机型外设完全不同。这里"有什么查什么"：
+        #   provider == "none" → 该机型没配这个外设（不适用，不是故障）
+        #   已配置 → 检查是否真的拿到数据
+        reg = None
+        if self.system_collector is not None:
+            reg = getattr(self.system_collector, "_peripheral_registry", None)
+        if reg is None:
+            checks.append(
+                {
+                    "name": "外设",
+                    "kind": "peripheral",
+                    "status": "ok",
+                    "failure_class": None,
+                    "detail": "未启用外设注册表（该机型无扩展外设）",
+                    "data": {},
+                }
+            )
+        else:
+            try:
+                slots = dict(getattr(reg, "slots", {}) or {})
+                configured = {n: c for n, c in slots.items() if (c or {}).get("provider", "none") != "none"}
+                if not configured:
+                    checks.append(
+                        {
+                            "name": "外设",
+                            "kind": "peripheral",
+                            "status": "ok",
+                            "failure_class": None,
+                            "detail": f"共 {len(slots)} 个槽位均未配置（该机型无扩展外设）",
+                            "data": {"slots": list(slots)},
+                        }
+                    )
+                else:
+                    status = {}
+                    try:
+                        status = dict(reg.get_status() or {})
+                    except Exception:
+                        status = {}
+                    for nm, cfgv in configured.items():
+                        st = status.get(nm) or {}
+                        has_data = bool(st) and any(k in st for k in ("value", "data", "raw"))
+                        checks.append(
+                            {
+                                "name": f"外设 {nm}",
+                                "kind": "peripheral",
+                                "status": "ok" if has_data else "warn",
+                                "failure_class": None if has_data else "link",
+                                "detail": (
+                                    f"provider={cfgv.get('provider')}，有数据"
+                                    if has_data
+                                    else f"provider={cfgv.get('provider')}，暂无数据（可能未采样）"
+                                ),
+                                "data": {"provider": cfgv.get("provider")},
+                            }
+                        )
+            except Exception as e:
+                checks.append(
+                    {
+                        "name": "外设",
+                        "kind": "peripheral",
+                        "status": "fail",
+                        "failure_class": "link",
+                        "detail": f"枚举失败: {e}",
+                        "data": {},
+                    }
+                )
+        return checks
+
+    async def _periodic_diagnostics(self, interval: float = 2.0) -> None:
+        """定期把**独立诊断子服务**的报告通过 WS 广播出去。
+
+        为什么在服务端取、用 WS 推：
+          1. 本项目的约定是 WebSocket 消息（前端不做 REST 轮询）
+          2. 从服务端取可避免浏览器跨源/CORS 问题
+          3. 诊断服务独立运行，主服务只是"转发"它的结论
+        """
+
+        def _fetch() -> dict | None:
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:8090/diagnostics", timeout=3) as resp:
+                    return json.loads(resp.read().decode("utf-8", "ignore") or "{}")
+            except Exception:
+                return None
+
+        loop = asyncio.get_event_loop()
+        while True:
+            try:
+                rep = await loop.run_in_executor(None, _fetch)
+                # 把主服务独占的硬件检查合并进去（诊断服务读不到这些设备）
+                try:
+                    hw = self._hw_checks()
+                except Exception:
+                    hw = []
+                if rep is None:
+                    rep = {"overall": "warn", "counts": {}, "checks": []}
+                if isinstance(rep, dict):
+                    checks = list(rep.get("checks") or []) + hw
+                    rep["checks"] = checks
+                    st = [c.get("status") for c in checks]
+                    rep["counts"] = {
+                        "ok": st.count("ok"),
+                        "warn": st.count("warn"),
+                        "fail": st.count("fail"),
+                    }
+                    rep["overall"] = "fail" if "fail" in st else ("warn" if "warn" in st else "ok")
+                if hasattr(self, "ws_server") and self.ws_server:
+                    await self.ws_server.broadcast_message(
+                        {
+                            "type": "hw_diagnostics",
+                            "data": rep if rep is not None else {"overall": "fail", "error": "诊断服务不可达"},
+                        }
+                    )
+            except Exception as e:
+                if self.logger:
+                    self.logger.debug(f"[Diag] 广播失败: {e}")
+            await asyncio.sleep(interval)
+
+    def _read_battery_voltage(self) -> float | None:
+        """尽力读取电池电压（读不到返回 None，安全检查会跳过该项）"""
+        c = self.system_collector
+        if c is None:
+            return None
+        for name in ("get_latest_battery_voltage", "latest_battery_voltage"):
+            fn = getattr(c, name, None)
+            if callable(fn):
+                try:
+                    v = float(fn())
+                    if v > 0:
+                        return v
+                except Exception:
+                    pass
+        fn = getattr(c, "_read_rosmaster_battery_voltage", None)
+        if callable(fn):
+            try:
+                v = float(fn())
+                if v > 0:
+                    return v
+            except Exception:
+                pass
+        return None
+
+    async def _periodic_navigation(self) -> None:
+        """S0/S1 周期任务：~25Hz 采样里程计并做安全检查，~5Hz 广播位姿。
+
+        为什么采样与广播分开：编码器是**累计计数**，dt 直接参与积分，
+        采样必须保持稳定节奏；而前端展示 5Hz 足够，避免把 WebSocket 刷爆。
+        安全检查每轮都跑（安全不能等 200ms 的广播周期）。
+        """
+        if self.odometry is None or not self.odometry.available:
+            if self.logger:
+                self.logger.info("[Nav] 里程计不可用（未共享到 Rosmaster bot），跳过后台采样")
+            return
+
+        sample_interval = 0.04  # ~25Hz，与扩展板自动上报刷新率一致
+        push_every = 5  # 每 5 次采样推送一次 → ~5Hz
+        n = 0
+        degraded_reported = False
+        if self.logger:
+            self.logger.info("[Nav] 里程计采样任务启动（~25Hz，广播 ~5Hz；安全监管已启用）")
+
+        while True:
+            try:
+                # 0) 调试：允许通过文件切换模式（我用于自主验证，不需要人工点界面）
+                self._check_debug_mode_override()
+
+                # 0.5) 调试：运动探针优先，绕过感知直接验证运动链路
+                if await self._motion_probe():
+                    await asyncio.sleep(0.04)
+                    continue
+
+                # 1) 心跳：证明导航/决策链还活着（看门狗判据）
+                if self.safety is not None:
+                    self.safety.heartbeat()
+
+                # 2) 采样
+                self.odometry.sample()
+
+                # 3) S2 感知：**仅在自主模式下**运行。
+                #    manual 时避障层只保留急停（用户自己看路），不跑视觉，
+                #    既省算力，也避免"暗光就锁死手动驾驶"。
+                if self.perception is not None and self.mode_manager is not None and self.mode_manager.is_autonomous():
+                    await self._ensure_perception_camera()
+                    perc = self._update_perception()
+
+                    # V3 云台主动扫视：转云台 → 停稳 → 测量 → 记录方位图
+                    scan_hint = None
+                    if self.scanner is not None and (
+                        self.patrol is None or self.patrol.get_status()["state"] in ("observe", "stop")
+                    ):
+                        act = self.scanner.tick(time.monotonic())
+                        if act is not None:
+                            if act.get("action") == "measure":
+                                # 停稳后测一次该方向（转动中 TTC 被判据门控暂停，必须停稳再测）
+                                self.scanner.record(self._update_perception())
+                            elif self.gimbal_controller is not None:
+                                # 注意方法名：GimbalController 是 set_pan/set_tilt
+                                # （set_angles 只存在于硬件后端类，曾因此云台完全不动）
+                                try:
+                                    await self.gimbal_controller.set_pan(act["pan"])
+                                except Exception as e:
+                                    if self.logger:
+                                        self.logger.warning(f"[Scan] 云台指令失败: {e}")
+                        scan_hint = self.scanner.best_offset()
+
+                    # 感知 → 决策 → 运动
+                    # 优先用巡逻控制器（走一段→停下观察→再走）；没有则退回连续行进
+                    if self.patrol is not None and self.motion_controller is not None:
+                        pstate = self.patrol.get_status()["state"]
+                        # 只在停下观察/停车时才扫视（行进中扫视既无用也浪费）
+                        if self.scanner is not None and pstate in ("observe", "stop"):
+                            scan_hint = self.scanner.best_offset()
+                        cmd = self.patrol.step(
+                            perc,
+                            heading=(self.odometry.get_pose().get("theta") if self.odometry else None),
+                            openness=(self.scanner.openness() if self.scanner else None),
+                            scan_rounds=(self.scanner.rounds if self.scanner else None),
+                        )
+                        cmd["action"] = cmd.get("state", "-")
+                        self._last_cruise = cmd
+                    elif self.cruise is not None and self.motion_controller is not None:
+                        cmd = self.cruise.step(perc, hint_offset=scan_hint)
+                        self._last_cruise = cmd
+                        try:
+                            # 记录"实际发出的指令"：之前只有状态机意图，
+                            # 排查"不动"时看不到真正发出去的值与频率。
+                            sent = (cmd["vx"], cmd["wz"])
+                            if sent != self._last_sent_cmd:
+                                self._last_sent_cmd = sent
+                                if self.logger:
+                                    self.logger.info(
+                                        "[Nav] 实际发送 vx=%.2f wz=%.2f（%s）",
+                                        cmd["vx"],
+                                        cmd["wz"],
+                                        (cmd.get("reason") or "")[:30],
+                                    )
+                            await self.motion_controller.set_mecanum_velocity(cmd["vx"], 0.0, cmd["wz"], "auto")
+                        except Exception as e:
+                            if self.logger:
+                                self.logger.warning(f"[Cruise] 运动指令失败: {e}")
+
+                    # 周期性诊断（~2s 一条）：自主行为不能"静默"——
+                    # 曾因缺少这条日志，排查"不运动"时完全看不到感知与决策输出。
+                    now_dbg = time.monotonic()
+                    if now_dbg - self._nav_dbg_ts >= 2.0:
+                        self._nav_dbg_ts = now_dbg
+                        _enc_vals = "-"
+                        if self.odometry is not None:
+                            try:
+                                _e = self.odometry.get_raw_encoders()
+                                _enc_vals = f"({_e['m1']},{_e['m2']},{_e['m3']},{_e['m4']})"
+                            except Exception:
+                                pass
+                        frame_now = (
+                            self.camera_manager.get_frame(self._perception_camera_id) if self.camera_manager else None
+                        )
+                        if self.logger:
+                            self.logger.info(
+                                "[Nav] mode=%s cam%d有帧=%s 航向=%.1f° 编码器=%s 光流=%.2fpx/帧 感知ok=%s(%s) 决策=%s(%s)",
+                                self.mode_manager.mode,
+                                self._perception_camera_id,
+                                frame_now is not None,
+                                math.degrees(self.odometry.get_pose().get("theta", 0.0) if self.odometry else 0.0),
+                                _enc_vals,
+                                float(getattr(perc, "flow_px", 0.0) or 0.0),
+                                bool(getattr(perc, "ok", False)),
+                                (getattr(perc, "reason", "") or "")[:40],
+                                (self._last_cruise or {}).get("action", "-"),
+                                (self._last_cruise or {}).get("reason", "")[:30],
+                            )
+                            if self.scanner is not None and self.scanner.openness():
+                                self.logger.info("[Scan] 方位图: %s", self.scanner.get_status()["openness"])
+
+                # 4) 安全判定（用最新位姿/IMU/电压/指令）
+                if self.safety is not None:
+                    if hasattr(self, "ws_server") and self.ws_server:
+                        self.safety.set_link(getattr(self.ws_server, "client_count", 1) > 0)
+
+                    pose = self.odometry.get_pose()
+                    cmd_linear = (
+                        getattr(self.motion_controller, "current_linear", 0.0) if self.motion_controller else 0.0
+                    )
+                    ev = self.safety.check(
+                        pose=pose,
+                        imu=self.odometry.get_imu(),
+                        battery_v=self._read_battery_voltage(),
+                        command_linear=cmd_linear,
+                    )
+
+                    if ev is not None:
+                        # 持续压住硬件（安全停车不是"发一次就完"，要能对抗后续指令）
+                        if self.motion_controller:
+                            try:
+                                await self.motion_controller.stop()
+                            except Exception:
+                                pass
+                        if self.mode_manager is not None and not self.mode_manager.is_manual():
+                            self.mode_manager.force_manual(ev.reason)
+                            await self._broadcast_control_mode()
+                        if not degraded_reported:
+                            degraded_reported = True
+                            await self._broadcast_safety()
+                            if self.logger:
+                                self.logger.warning(f"[Safety] 已停车并降级：{ev.reason}")
+                    else:
+                        degraded_reported = False
+            except Exception as e:
+                # ⚠️ 必须是 WARNING（限频）：曾记在 DEBUG，导致自主分支静默失败时
+                # 日志一片空白，"机器人不动"完全无法排查。
+                now_err = time.monotonic()
+                if self.logger and now_err - self._nav_err_ts >= 5.0:
+                    self._nav_err_ts = now_err
+                    self.logger.warning(f"[Nav] 导航循环异常: {type(e).__name__}: {e}", exc_info=True)
+
+            n += 1
+            if n % push_every == 0 and hasattr(self, "ws_server") and self.ws_server:
+                try:
+                    await self.ws_server.broadcast_message(
+                        {
+                            "type": "odometry_status",
+                            "data": {
+                                "available": True,
+                                "pose": self.odometry.get_pose(),
+                                "imu": self.odometry.get_imu(),
+                                "perception": self._last_perception,
+                            },
+                        }
+                    )
+                except Exception:
+                    pass  # 广播失败不应影响采样
+            await asyncio.sleep(sample_interval)
+
+    # ---------- 安全底座（S1）----------
+
+    async def _broadcast_safety(self) -> None:
+        """广播安全状态（含触发原因）"""
+        if self.safety is None or not (hasattr(self, "ws_server") and self.ws_server):
+            return
+        await self.ws_server.broadcast_message({"type": "safety_status", "data": self.safety.get_status()})
+
+    async def _handle_emergency_stop(self, data: dict) -> dict:
+        """一键急停（UI → 服务端 → 硬件 全链路）。
+
+        ⚠️ 历史缺陷：前端一直发送 `emergency_stop`，但服务端从来没有对应处理器，
+        日志里长期是 `Unknown message type: emergency_stop`（返回 404）——
+        也就是说**这个按钮过去从未生效**。本处理器把它接通：
+            安全层置位 → 硬件急停 → 降级到 manual（带原因）→ 广播
+        """
+        reason = str((data or {}).get("reason") or "用户一键急停")
+        stopped = False
+        if self.motion_controller:
+            try:
+                await self.motion_controller.emergency_stop()
+                stopped = True
+            except Exception as e:
+                if self.logger:
+                    self.logger.error(f"急停执行失败: {e}")
+
+        if self.safety is not None:
+            self.safety.trip("external", reason)
+            if self.mode_manager is not None and not self.mode_manager.is_manual():
+                self.mode_manager.force_manual(reason)
+            await self._broadcast_safety()
+            await self._broadcast_control_mode()
+
+        if self.logger:
+            self.logger.warning(f"收到一键急停请求：{reason}（硬件已停: {stopped}）")
+        return {"type": "emergency_stop_ack", "data": {"ok": True, "reason": reason, "stopped": stopped}}
+
+    async def _handle_emergency_release(self, data: dict) -> dict:
+        """解除急停（需用户显式操作，安全层不自动恢复）"""
+        if self.safety is None:
+            return {"type": "emergency_release_ack", "data": {"ok": False, "message": "安全模块未启用"}}
+        cleared = self.safety.clear(str((data or {}).get("reason") or "用户解除急停"))
+        # 解除后允许再次运动（清掉控制器的急停标志）
+        if self.motion_controller:
+            try:
+                await self.motion_controller.stop()
+            except Exception:
+                pass
+        await self._broadcast_safety()
+        return {"type": "emergency_release_ack", "data": {"ok": cleared}}
+
+    async def _handle_wheel_selftest(self, data: dict) -> dict:
+        """轮子自检：短暂驱动一次，用编码器增量判断**哪个轮子不转**。
+
+        ⚠️ 这是**主动**自检 —— 会让机器人真的移动：
+          · 必须显式触发（面板按钮 / 手动命令），不在开机时自动跑
+          · 默认 1.2 秒、速度 0.2，位移约 24cm
+          · 要求机器人着地、前方有空间
+        判定：某轮增量明显小于"最大增量"的 30% → 判该轮不动。
+        """
+        if self.logger:
+            # 入口就记一条：用于区分"消息没送到"与"送到了但没执行"
+            self.logger.warning(
+                "[Selftest] 收到自检请求 data=%s motion=%s odometry=%s",
+                data,
+                self.motion_controller is not None,
+                self.odometry is not None,
+            )
+        if self.motion_controller is None or self.odometry is None:
+            return {"type": "wheel_selftest_result", "data": {"ok": False, "error": "运动/里程计不可用"}}
+
+        payload = data or {}
+        dur = max(0.5, min(3.0, float(payload.get("duration", 1.2))))
+        speed = max(0.05, min(0.5, float(payload.get("speed", 0.2))))
+
+        try:
+            self.odometry.sample()
+            enc0 = self.odometry.get_raw_encoders()
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < dur:
+                self.odometry.sample()
+                await self.motion_controller.set_mecanum_velocity(speed, 0.0, 0.0, "manual")
+                await asyncio.sleep(0.04)
+        finally:
+            try:
+                await self.motion_controller.stop()
+            except Exception:
+                pass
+
+        self.odometry.sample()
+        enc1 = self.odometry.get_raw_encoders()
+        deltas = {k: int(enc1.get(k, 0)) - int(enc0.get(k, 0)) for k in enc0 if k != "changed"}
+        mx = max([abs(v) for v in deltas.values()] or [0])
+        rows = []
+        for w, v in deltas.items():
+            ok = mx > 0 and abs(v) >= 0.3 * mx
+            rows.append({"wheel": w, "delta": v, "ok": ok})
+        bad = [r["wheel"] for r in rows if not r["ok"]]
+        result = {
+            "ok": not bad,
+            "tested_s": round(dur, 2),
+            "speed": round(speed, 2),
+            "rows": rows,
+            "bad_wheels": bad,
+            "note": "全轮无位移可能是上报链路或驱动未生效" if mx == 0 else "",
+        }
+        if self.logger:
+            self.logger.warning("[Selftest] 轮子自检结果: %s", result)
+        if hasattr(self, "ws_server") and self.ws_server:
+            await self.ws_server.broadcast_message({"type": "wheel_selftest_result", "data": result})
+        return {"type": "wheel_selftest_result", "data": result}
+
+    async def _handle_safety_status(self, data: dict) -> dict:
+        """查询安全状态"""
+        if self.safety is None:
+            return {"type": "safety_status", "data": {"available": False}}
+        status = dict(self.safety.get_status())
+        status["available"] = True
+        return {"type": "safety_status", "data": status}
 
     # ---------- 红外遥控 (IR Remote, R00020) ----------
 

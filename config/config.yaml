@@ -58,6 +58,49 @@ motion:
     rear_left:   {pwm: 40, dir1: 41, dir2: 43}
     rear_right:  {pwm: 12, dir1: 13, dir2: 15}
 
+# 导航（S0：运行模式状态机 + 里程计）
+# 设计依据见 wo-bot-wiki/方案/自主巡航与避障方案.md
+navigation:
+  mode:
+    # ⚠️ 自主模式**默认禁用**。开启后机器人在 semi/auto 下会自行介入控制
+    # （限速/横移/急停/按航线行驶），请确认场地安全后再开启。
+    # 即使开启，切换时仍要求前端二次确认（confirmed=true）。
+    allow_semi: false
+    allow_auto: false
+  odometry:
+    # ⚠️ 必须真机标定后才能给出可信位移。
+    # counts_per_meter = 0 时：**航向可用（陀螺），但不产生位移**，属降级状态。
+    # 标定方法：让机器人直行已知距离 D，读取四轮编码器增量之和/4 除以 D。
+    counts_per_meter: 0.0
+    # 麦轮几何（米）：影响原地旋转角度的解算
+    wheel_base: 0.16
+    track_width: 0.16
+    # 航向优先使用陀螺（麦克纳姆轮横向打滑会让纯编码器航向快速漂移）
+    use_gyro_heading: true
+    # 启动时用于估计陀螺零偏的静止样本数（此时机器人不应在动）
+    gyro_bias_samples: 50
+  # 安全底座（S1）：任何一项触发都会立即停车 + 降级到 manual（并广播原因）
+  # 触发后**不会自动恢复**，需用户显式解除（emergency_release）
+  safety:
+    watchdog_timeout_s: 0.5    # 导航心跳超时（秒）——超过则判定决策层已死
+    low_battery_v: 10.5        # 低压阈值（12V 锂电池；读不到电压时跳过该项）
+    tilt_limit_deg: 35.0       # 机身倾角上限，超过判定跌落/被搬动
+    stall_timeout_s: 1.5       # 有运动指令但持续无位移超过此时长 → 判堵转
+    stall_cmd_threshold: 0.15  # 判定"有指令"的速度阈值（m/s）
+    stall_move_threshold: 0.01 # 判定"没在动"的速度阈值（m/s）
+    perception_blocks_autonomy: true  # 感知不可用时按"有障碍"处理（S2 接入）
+  # 纯视觉感知（S2 / V1 光流发散 → TTC）。算法已在真机验证，见方案 §3.6
+  perception:
+    width: 320                 # 处理分辨率：实测精度与算力的平衡点（单核约 9% @10Hz）
+    height: 240
+    fps: 30.0                  # 无时间戳时的帧率兜底（τ 的单位换算依赖它，不能省）
+    max_corners: 150
+    min_features: 8            # 可用特征少于此值 → 判定感知不可信（遮挡/无纹理）
+    min_brightness: 20.0       # 亮度低于此值 → 判定"暗光失效"（视觉原理性失效）
+    rotation_gate_dps: 90.0    # 转速超过此值 → 暂停 TTC 判据（实测 CSI 场景 180°/s 会误报）
+    block_ttc: 3.0             # TTC 低于此值 → 该扇区判为"有障碍阻挡"
+    half_fov_deg: 30.0         # 相机水平半视场角（用于旋转补偿的焦距估计）
+
 # Camera
 camera:
   enabled: true
