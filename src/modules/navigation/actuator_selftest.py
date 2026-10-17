@@ -118,68 +118,110 @@ class WheelSelfTest(ActuatorSelfTest):
 
 
 class GimbalSelfTest(ActuatorSelfTest):
-    """云台自检：优先用角度回读；没有回读时用**相机图像位移**验证。"""
+    """云台自检：**全角度**扫描（pan 正反 + tilt），优先角度回读，否则用相机位移验证。
+
+    设计目标（不是"动一下就算过"）：
+      · 覆盖两个轴（pan / tilt）
+      · 覆盖两个方向（正 / 反）—— 只测单方向发现不了"只能往一边转"
+      · 每步都留"指令 vs 实测"
+      · 无论成败都回中（finally）
+    """
 
     name = "云台"
     risk = "low"
     requires = ("gimbal",)
 
-    def __init__(self, pan_delta: float = 20.0, settle_s: float = 0.5, min_shift_px: float = 8.0):
+    def __init__(
+        self,
+        pan_delta: float = 20.0,
+        tilt_delta: float = 15.0,
+        settle_s: float = 0.5,
+        min_shift_px: float = 8.0,
+        tol_deg: float = 5.0,
+    ):
         self.pan_delta = pan_delta
+        self.tilt_delta = tilt_delta
         self.settle_s = settle_s
         self.min_shift_px = min_shift_px
+        self.tol_deg = tol_deg
 
     async def run(self, env) -> SelfTestResult:
         res = SelfTestResult(self.name, ok=False)
         gimbal = env.gimbal
-        try:
-            # 1) 回中
-            await gimbal.set_pan(90.0)
-            await asyncio.sleep(self.settle_s)
+        grab = getattr(env, "grab_frame", None)
+        has_rb = hasattr(gimbal, "get_state")
 
-            # 2) 有角度回读 → 直接断言
-            if hasattr(gimbal, "get_state"):
-                target = 90.0 + self.pan_delta
-                await gimbal.set_pan(target)
+        # 计划：pan + / pan - / tilt + / tilt -
+        plan = [
+            ("pan", +self.pan_delta),
+            ("pan", -self.pan_delta),
+            ("tilt", +self.tilt_delta),
+            ("tilt", -self.tilt_delta),
+        ]
+        prev_frame = None
+        try:
+            await self._command(gimbal, "pan", 90.0)
+            await self._command(gimbal, "tilt", 90.0)
+            await asyncio.sleep(self.settle_s)
+            if not has_rb and grab is not None:
+                prev_frame = grab()
+
+            for axis, delta in plan:
+                target = 90.0 + delta
+                await self._command(gimbal, axis, target)
                 await asyncio.sleep(self.settle_s)
-                state = gimbal.get_state() or {}
-                got = _extract_pan(state)
-                if got is None:
-                    res.detail = "角度回读不可解析，改用视觉验证"
+
+                if has_rb:
+                    got = _extract_axis(gimbal.get_state() or {}, axis)
+                    if got is None:
+                        res.status = STATUS_SKIP
+                        res.detail = "角度回读不可解析，且无相机可用"
+                        return res
+                    ok = abs(float(got) - target) <= self.tol_deg
+                    res.step(f"{axis} → {target:.0f}°（回读）", got, ok)
+                elif grab is not None:
+                    cur = grab()
+                    dx, dy = _image_shift(prev_frame, cur)
+                    prev_frame = cur
+                    if dx is None:
+                        res.step(f"{axis} {delta:+.0f}°", "无法计算位移", False, "纹理不足/无帧")
+                        continue
+                    moved = abs(dx) if axis == "pan" else abs(dy)
+                    ok = moved >= self.min_shift_px
+                    # pan 影响水平位移、tilt 影响垂直位移 —— 若串轴说明映射/装配有问题
+                    cross = abs(dy) if axis == "pan" else abs(dx)
+                    res.step(
+                        f"{axis} {delta:+.0f}°（期望{'水平' if axis == 'pan' else '垂直'}位移 ≥{self.min_shift_px:.0f}px）",
+                        f"dx={dx:.1f}, dy={dy:.1f}",
+                        ok and cross < moved,
+                        "" if cross < moved else "位移出现在错误的轴上（轴映射/装配异常）",
+                    )
                 else:
-                    ok = abs(float(got) - target) <= 5.0
-                    res.step(f"pan→{target:.0f}°（回读）", got, ok)
-                    res.ok = ok
-                    res.detail = "角度回读正常" if ok else f"回读 {got} 与指令 {target} 不符"
+                    res.status = STATUS_SKIP
+                    res.detail = "无角度回读且无相机，无法验证（该机型不支持）"
                     return res
 
-            # 3) 无回读 / 回读不可用 → 用相机图像位移验证
-            if getattr(env, "grab_frame", None) is None:
-                res.status = STATUS_SKIP
-                res.detail = "无角度回读且无相机，无法验证（该机型不支持）"
-                return res
-
-            before = env.grab_frame()
-            await gimbal.set_pan(90.0 + self.pan_delta)
-            await asyncio.sleep(self.settle_s)
-            after = env.grab_frame()
-            dx, dy = _image_shift(before, after)
-            if dx is None:
-                res.status = STATUS_SKIP
-                res.detail = "图像不足以计算位移（纹理不足/无帧）"
-                return res
-
-            ok = abs(dx) >= self.min_shift_px
-            # 约定：pan 增大 → 画面内容右移（dx>0）；方向相反说明接线/舵机反了
-            res.step(f"pan +{self.pan_delta:.0f}° → 期望水平位移 >{self.min_shift_px}px", round(dx, 1), ok)
-            res.ok = ok
-            res.detail = f"云台动作有效（水平位移 {dx:.1f}px）" if ok else "指令已发但画面几乎没动：舵机/接线/机械问题"
+            bad = [st for st in res.steps if not st["ok"]]
+            res.ok = not bad and len(res.steps) == len(plan)
+            res.detail = (
+                f"{len(res.steps)}/{len(plan)} 步通过（pan ±{self.pan_delta:.0f}°, tilt ±{self.tilt_delta:.0f}°）"
+                if res.ok
+                else f"{len(bad)}/{len(plan)} 步失败，详见各步"
+            )
             return res
         finally:
-            try:
-                await gimbal.set_pan(90.0)  # 无论如何回中
-            except Exception:
-                res.restored = False
+            for axis in ("pan", "tilt"):
+                try:
+                    await self._command(gimbal, axis, 90.0)  # 无论如何回中
+                except Exception:
+                    res.restored = False
+
+    @staticmethod
+    async def _command(gimbal, axis: str, angle: float) -> None:
+        if axis == "pan":
+            await gimbal.set_pan(angle)
+        else:
+            await gimbal.set_tilt(angle)
 
 
 # 注册表：新增执行器 = 加一条，不改框架
@@ -193,18 +235,19 @@ def list_tests() -> list:
     return [{"id": k, "name": v.name, "risk": v.risk, "requires": list(v.requires)} for k, v in SELF_TESTS.items()]
 
 
-def _extract_pan(state: dict):
-    """从云台状态里尽力取 pan 角度（不同实现字段名可能不同）"""
-    for key in ("pan", "pan_angle", "channel4", "servo4"):
+def _extract_axis(state: dict, axis: str):
+    """从云台状态里尽力取某轴角度（不同实现字段名可能不同）"""
+    keys = ("pan", "pan_angle", "channel4", "servo4") if axis == "pan" else ("tilt", "tilt_angle", "channel3", "servo3")
+    for key in keys:
         if key in state:
             try:
                 return float(state[key])
             except (TypeError, ValueError):
                 return None
-    # 形如 {"angles": {4: 110}}
     angles = state.get("angles")
     if isinstance(angles, dict):
-        for k in (4, "4"):
+        ch = 4 if axis == "pan" else 3
+        for k in (ch, str(ch)):
             if k in angles:
                 try:
                     return float(angles[k])
