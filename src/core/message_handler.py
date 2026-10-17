@@ -2091,6 +2091,67 @@ class MessageHandler:
         await self._broadcast_safety()
         return {"type": "emergency_release_ack", "data": {"ok": cleared}}
 
+    def _selftest_env(self):
+        """给执行器自检框架准备环境（缺什么就不传，由框架判定"该机型不支持"）"""
+
+        class _Env:
+            pass
+
+        env = _Env()
+        env.motion = self.motion_controller
+        env.odometry = self.odometry
+        env.gimbal = self.gimbal_controller
+        if self.camera_manager is not None:
+            env.grab_frame = lambda: self.camera_manager.get_frame(self._perception_camera_id)
+        return env
+
+    async def _handle_actuator_selftest_list(self, data: dict) -> dict:
+        """列出可用的执行器自检项（供面板生成按钮）"""
+        from modules.navigation.actuator_selftest import list_tests
+
+        env = self._selftest_env()
+        from modules.navigation.actuator_selftest import SELF_TESTS
+
+        out = []
+        for item in list_tests():
+            inst = SELF_TESTS[item["id"]]()
+            ok, why = inst.available(env)
+            out.append({**item, "available": ok, "reason": why})
+        return {"type": "actuator_selftest_list", "data": {"tests": out}}
+
+    async def _handle_actuator_selftest(self, data: dict) -> dict:
+        """执行器自检（通用）。
+
+        与旧 wheel_selftest 的区别：走统一框架，云台/轮子/将来的其它执行器共用同一套
+        "保存-指令-测量-恢复"流程与同一份结果结构。
+        ⚠️ 会动（云台微动 / 轮子短距离移动），必须显式触发。
+        """
+        from modules.navigation.actuator_selftest import SELF_TESTS
+
+        payload = data or {}
+        test_id = str(payload.get("test") or "gimbal")
+        cls = SELF_TESTS.get(test_id)
+        if cls is None:
+            return {"type": "actuator_selftest_result", "data": {"ok": False, "error": f"未知自检项: {test_id}"}}
+
+        inst = cls()
+        env = self._selftest_env()
+        avail, why = inst.available(env)
+        if not avail:
+            result = {"name": inst.name, "ok": False, "status": "skip", "detail": why, "steps": []}
+        else:
+            try:
+                res = await inst.run(env)
+                result = res.to_dict()
+            except Exception as e:
+                result = {"name": inst.name, "ok": False, "status": "fail", "detail": f"执行失败: {e}", "steps": []}
+
+        if self.logger:
+            self.logger.warning("[Selftest] %s", result)
+        if hasattr(self, "ws_server") and self.ws_server:
+            await self.ws_server.broadcast_message({"type": "actuator_selftest_result", "data": result})
+        return {"type": "actuator_selftest_result", "data": result}
+
     async def _handle_wheel_selftest(self, data: dict) -> dict:
         """轮子自检：短暂驱动一次，用编码器增量判断**哪个轮子不转**。
 
