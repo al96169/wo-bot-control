@@ -106,8 +106,6 @@ class GroundPlanePerception(PerceptionSource):
             res.reason = f"画面过暗（亮度 {res.brightness:.0f}/255），地面检测不可用"
             return res
 
-        f = self.focal_px(h)
-        cy = h / 2.0
         # 搜索区间：最近距离行（靠下）到最远距离行（靠上）
         row_near = int(round(self.row_for_distance(self.min_dist_m, h)))
         row_far = int(round(self.row_for_distance(self.max_dist_m, h)))
