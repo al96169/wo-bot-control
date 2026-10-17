@@ -108,7 +108,6 @@ class GroundPlanePerception(PerceptionSource):
 
         f = self.focal_px(h)
         cy = h / 2.0
-        horizon = cy - f * math.tan(math.radians(self.pitch_deg))
         # 搜索区间：最近距离行（靠下）到最远距离行（靠上）
         row_near = int(round(self.row_for_distance(self.min_dist_m, h)))
         row_far = int(round(self.row_for_distance(self.max_dist_m, h)))
