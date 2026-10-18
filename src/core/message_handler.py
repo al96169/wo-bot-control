@@ -237,6 +237,23 @@ class MessageHandler:
         if not self.motion_controller:
             return {"type": "error", "data": {"code": 503, "message": "Motion controller not available"}}
 
+        # 控制权仲裁：自主模式下，**手动指令不能覆盖自主决策**。
+        # 真实故障：遥控界面即使摇杆不动也会持续发 motion(0,0,0)（约 20Hz），
+        # 把自主控制器的直行指令每秒覆盖几十次 → 机器人看起来"完全不动"。
+        # 规则：自主模式下
+        #   · 零值手动指令 → 忽略（不覆盖自主决策）
+        #   · 非零手动输入 → 视为"人接管"：先切回 manual，再执行该指令
+        if self.mode_manager is not None and self.mode_manager.is_autonomous():
+            try:
+                _mv = max(abs(float(data.get(k, 0) or 0)) for k in ("v_x", "v_y", "v_z", "linear", "angular"))
+            except (TypeError, ValueError):
+                _mv = 0.0
+            if _mv < 0.01:
+                return {"type": "motion_ack", "data": {"ignored": True, "reason": "自主模式下忽略零值手动指令"}}
+            self.mode_manager.force_manual("检测到手动操作，交还控制权")
+            if self.logger:
+                self.logger.warning("[Arbitration] 自主模式下收到手动输入 → 已切回 manual（接管）")
+
         # 安全门禁（S1）：安全停车生效期间**拒绝任何运动指令**，
         # 否则用户摇杆可以让被安全停下的机器人重新动起来。
         if self.safety is not None and self.safety.tripped:
