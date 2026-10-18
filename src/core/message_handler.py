@@ -1983,11 +1983,12 @@ class MessageHandler:
                         )
                         if self.logger:
                             self.logger.info(
-                                "[Nav] mode=%s cam%d有帧=%s 航向=%.1f° 编码器=%s 光流=%.2fpx/帧 感知ok=%s(%s) 决策=%s(%s)",
+                                "[Nav] mode=%s cam%d有帧=%s 航向=%.1f° ttc_min=%.2f 编码器=%s 光流=%.2fpx/帧 感知ok=%s(%s) 决策=%s(%s)",
                                 self.mode_manager.mode,
                                 self._perception_camera_id,
                                 frame_now is not None,
                                 math.degrees(self.odometry.get_pose().get("theta", 0.0) if self.odometry else 0.0),
+                                float(getattr(perc, "ttc_min", 0.0) or 0.0),
                                 _enc_vals,
                                 float(getattr(perc, "flow_px", 0.0) or 0.0),
                                 bool(getattr(perc, "ok", False)),

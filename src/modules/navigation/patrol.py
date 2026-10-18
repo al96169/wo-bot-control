@@ -43,6 +43,8 @@ class PatrolController:
         # ---- 行进 ----
         self.forward_speed = float(self.config.get("forward_speed", 0.12))  # m/s
         self.leg_s = float(self.config.get("leg_s", 1.2))  # 每段直行时长
+        # 最短前进时间：防止 TTC 噪声导致刚起步就停（视觉上像完全不动）
+        self.min_forward_s = float(self.config.get("min_forward_s", 0.6))
         self.stop_ttc = float(self.config.get("stop_ttc", 1.5))  # 前方 TTC 低于此值 → 提前停下观察
 
         # ---- 观察 ----
@@ -112,8 +114,9 @@ class PatrolController:
 
     def _forward(self, perception, now: float) -> dict:
         center_ttc = _center_ttc(perception)
-        # 前方快撞上 → 立刻停下观察（不等走完这一段）
-        if center_ttc is not None and center_ttc < self.stop_ttc:
+        # 起步后先走够 min_forward_s，避免噪声让它在原地抖
+        warm = (now - self._state_since) < self.min_forward_s
+        if not warm and center_ttc is not None and center_ttc < self.stop_ttc:
             self._enter(STATE_OBSERVE, now, f"前方 {center_ttc:.1f}s，停下观察")
             return self._result(STATE_OBSERVE, reason=self._last_reason)
 
