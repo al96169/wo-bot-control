@@ -153,3 +153,15 @@ def test_clear_perception_keeps_driving():
     c.step(_perc(None), now=2.0, openness={0.0: 1.0, -30.0: 1.0, 30.0: 1.0}, scan_rounds=1)
     r = c.step(_perc(None, ok=True), now=2.5)
     assert r["state"] == STATE_FORWARD and r["vx"] > 0
+
+
+def test_low_flow_ttc_is_ignored():
+    """光流低于测量下限时 TTC 不可信 —— 曾导致静止时报 ttc=0.44 把巡逻永久锁死"""
+    from modules.navigation.patrol import _center_ttc
+
+    p = _perc(None)
+    p.sectors["center"].ttc = 0.44
+    p.flow_px = 0.02
+    assert _center_ttc(p) is None, "零光流下不应给出 TTC 结论"
+    p.flow_px = 5.0
+    assert _center_ttc(p) == 0.44, "光流足够时应照常采用 TTC"

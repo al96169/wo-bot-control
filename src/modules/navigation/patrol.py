@@ -246,8 +246,18 @@ class PatrolController:
 
 
 def _center_ttc(perception) -> float | None:
+    """中心扇区的 TTC。
+
+    ⚠️ 光流低于**测量下限**时 TTC 不可信：LK 光流在 0.5~1 px/帧 以下基本是噪声，
+    此时算出的 TTC 会毫无意义地"很小"（真实踩坑：机器人静止、光流 0.00，
+    却报 ttc=0.44s → 巡逻被永久锁死在 observe）。所以低于下限直接返回 None。
+    """
     if perception is None or not getattr(perception, "ok", False):
         return None
+    flow = getattr(perception, "flow_px", None)
+    min_flow = float(getattr(perception, "min_flow_px", 0.3) or 0.3)
+    if flow is not None and abs(float(flow)) < min_flow:
+        return None  # 无结论（不等于"要撞了"）
     center = (getattr(perception, "sectors", None) or {}).get(SECTOR_CENTER)
     return None if center is None else center.ttc
 

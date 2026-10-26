@@ -45,7 +45,10 @@ class IPMPerception:
         self.bev_res = float(self.config.get("bev_res_m", 0.02))  # 每像素多少米
         self.bev_w_m = float(self.config.get("bev_w_m", 0.8))  # 鸟瞰宽度（米）
         self.bev_h_m = float(self.config.get("bev_h_m", 2.0))  # 鸟瞰纵深（米）
-        self.occupied_threshold = float(self.config.get("occupied_threshold", 18.0))
+        # 地板砖接缝会产生强边缘 → 阈值太低会把地面当障碍（真机踩坑：默认 18 太敏感）
+        self.occupied_threshold = float(self.config.get("occupied_threshold", 32.0))
+        # 近处地面（机器人脚下到该距离）是已知可通行的，不参与占用判定
+        self.min_occ_dist_m = float(self.config.get("min_occ_dist_m", 0.45))
         self.min_gap_m = float(self.config.get("min_gap_m", 0.35))  # 可通行最小宽度
         self.paper_m = (
             float(self.config.get("paper_w_m", A4_W_M)),
@@ -71,15 +74,22 @@ class IPMPerception:
         if points is None or len(points) != 4:
             return False
         pw, ph = paper_size or self.paper_m
-        # 目标矩形（鸟瞰坐标系，以纸张左下为原点，x 向右、y 向前）
-        dst = [
-            [0.0, 0.0],
-            [pw / self.bev_res, 0.0],
-            [pw / self.bev_res, ph / self.bev_res],
-            [0.0, ph / self.bev_res],
-        ]
+        # 输入点顺序：[左上, 右上, 右下, 左下]（"上"= 离机器人更远的那条边）
+        # ⚠️ 鸟瞰坐标系必须让 y **朝前**（远离机器人），否则鸟瞰图会朝机器人身后延伸
+        #    —— 那里没有画面 → 整幅黑（真实踩坑）。
+        #    纸张"近边"（左下/右下）→ y=0；"远边"（左上/右上）→ y=ph
+        src = np.array([points[3], points[2], points[1], points[0]], dtype=np.float32)  # 近左,近右,远右,远左
+        dst = np.array(
+            [
+                [0.0, 0.0],
+                [pw / self.bev_res, 0.0],
+                [pw / self.bev_res, ph / self.bev_res],
+                [0.0, ph / self.bev_res],
+            ],
+            dtype=np.float32,
+        )
         try:
-            H, _ = cv2.findHomography(np.array(points, dtype=np.float32), np.array(dst, dtype=np.float32))
+            H, _ = cv2.findHomography(src, dst)
         except Exception as e:
             if self.logger:
                 self.logger.warning("[IPM] 解单应失败: %s", e)
@@ -264,9 +274,11 @@ class IPMPerception:
             row_resp = np.convolve(row_resp, k, mode="same")
         peak = float(row_resp.max()) if len(row_resp) else 0.0
         blocked_rows = row_resp > self.occupied_threshold
+        # 近处地面不判占用（行号 < 该距离）
+        near_rows = int(round(self.min_occ_dist_m / self.bev_res))
         mask = np.zeros_like(bev, dtype=bool)
         for i, is_blocked in enumerate(blocked_rows):
-            if is_blocked:
+            if is_blocked and i >= near_rows:
                 mask[i, :] = True
         return mask, peak
 
