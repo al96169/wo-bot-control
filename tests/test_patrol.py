@@ -134,3 +134,22 @@ def test_turn_gives_up_when_heading_never_changes():
     assert r1["state"] == STATE_TURN
     r2 = c.step(_perc(None), now=3.0, heading=0.0)  # 0.9s 后航向仍为 0
     assert r2["state"] == STATE_FORWARD
+
+
+def test_blind_perception_stops_instead_of_driving():
+    """感知不可用（暗光/无纹理）时必须停 —— 曾真实发生"闭眼全速前进"事故"""
+    c = _p(min_forward_s=0.2, no_data_grace_s=0.1)
+    c.step(_perc(None), now=0.0)
+    c.step(_perc(None), now=2.0, openness={0.0: 1.0, -30.0: 1.0, 30.0: 1.0}, scan_rounds=1)  # → forward
+    r = c.step(_perc(None, ok=False), now=2.5)
+    assert r["state"] == STATE_OBSERVE, "感知不可用时必须停下观察，不能继续前进"
+    assert r["vx"] == 0.0
+
+
+def test_clear_perception_keeps_driving():
+    """感知正常且没测到障碍 → 应继续前进（不要把"没障碍"误判成"没数据"）"""
+    c = _p(min_forward_s=0.1)
+    c.step(_perc(None), now=0.0)
+    c.step(_perc(None), now=2.0, openness={0.0: 1.0, -30.0: 1.0, 30.0: 1.0}, scan_rounds=1)
+    r = c.step(_perc(None, ok=True), now=2.5)
+    assert r["state"] == STATE_FORWARD and r["vx"] > 0

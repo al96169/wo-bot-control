@@ -44,8 +44,11 @@ class PatrolController:
         self.forward_speed = float(self.config.get("forward_speed", 0.12))  # m/s
         self.leg_s = float(self.config.get("leg_s", 1.2))  # 每段直行时长
         # 最短前进时间：防止 TTC 噪声导致刚起步就停（视觉上像完全不动）
-        self.min_forward_s = float(self.config.get("min_forward_s", 0.6))
+        self.min_forward_s = float(self.config.get("min_forward_s", 0.15))
         self.stop_ttc = float(self.config.get("stop_ttc", 1.5))  # 前方 TTC 低于此值 → 提前停下观察
+        # 失明保护（fail-safe）：感知不可用时**不能继续前进**，否则会"闭眼全速开"。
+        # 曾真实发生：暗光/无纹理 → 感知 ok=False → 老逻辑永不满足 TTC 条件 → 一直全速。
+        self.no_data_grace_s = float(self.config.get("no_data_grace_s", 0.4))
 
         # ---- 观察 ----
         self.observe_s = float(self.config.get("observe_s", 6.0))  # 观察阶段最长时长
@@ -116,6 +119,14 @@ class PatrolController:
         center_ttc = _center_ttc(perception)
         # 起步后先走够 min_forward_s，避免噪声让它在原地抖
         warm = (now - self._state_since) < self.min_forward_s
+
+        # ---- 失明保护：感知不可用 ≠ 前方畅通 ----
+        # perception.ok=False（暗光/无纹理/无帧）时**必须停**，而不是继续开。
+        perception_ok = perception is not None and bool(getattr(perception, "ok", False))
+        if not perception_ok and not warm and (now - self._state_since) >= self.no_data_grace_s:
+            self._enter(STATE_OBSERVE, now, "感知不可用（看不见 ≠ 畅通），停下观察")
+            return self._result(STATE_OBSERVE, reason=self._last_reason)
+
         if not warm and center_ttc is not None and center_ttc < self.stop_ttc:
             self._enter(STATE_OBSERVE, now, f"前方 {center_ttc:.1f}s，停下观察")
             return self._result(STATE_OBSERVE, reason=self._last_reason)

@@ -70,6 +70,10 @@ class MessageHandler:
         self._nav_task: asyncio.Task | None = None
         self._diag_task: asyncio.Task | None = None
         self._wheel_monitor = None
+        self._ground_plane = None  # V2 地面平面感知（懒创建）
+        self._ipm = None  # IPM 鸟瞰（懒创建）
+        self._ipm_h_path: str | None = None
+        self._last_ipm: dict | None = None
         self._debug_mode_file = "/tmp/wobot_mode"
         self._probe_file = "/tmp/wobot_motion_probe"
         self._probe_active = False
@@ -287,9 +291,16 @@ class MessageHandler:
             return {"type": "error", "data": {"code": 500, "message": str(e)}}
 
     async def _handle_motion_stop(self, data: dict) -> dict:
-        """处理停止运动"""
+        """处理停止运动
+
+        ⚠️ 控制权仲裁（与 _handle_motion 一致）：自主模式下，**手动停止不能覆盖自主决策**。
+        真实故障：遥控界面的摇杆在未操作时会持续发 motion_stop，把自主前进指令
+        立刻抵消 → 用界面切半自动"完全不动"，而用调试文件切就正常。
+        """
         if not self._is_feature_enabled("motion"):
             return self._feature_disabled_response("motion")
+        if self.mode_manager is not None and self.mode_manager.is_autonomous():
+            return {"type": "motion_ack", "data": {"ignored": True, "reason": "自主模式下忽略手动停止"}}
         if self.motion_controller:
             await self.motion_controller.stop()
         return {"type": "motion_ack", "data": {"linear": 0, "angular": 0}}
@@ -1265,6 +1276,160 @@ class MessageHandler:
             },
         }
 
+    def _get_ipm(self):
+        """懒创建 IPM，并从 data/ipm_h.json 恢复上次的标定结果。"""
+        if self._ipm is None:
+            try:
+                from modules.navigation.perception.ipm import IPMPerception
+
+                _cfg = ((self.config or {}).get("navigation", {}) or {}).get("perception", {}) or {}
+                self._ipm = IPMPerception(_cfg.get("ipm", {}) or {}, self.logger)
+                path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "ipm_h.json")
+                self._ipm_h_path = path
+                if os.path.exists(path):
+                    import numpy as _np
+
+                    with open(path, encoding="utf-8") as fp:
+                        _d = json.load(fp)
+                    self._ipm.H = _np.array(_d["H"], dtype=_np.float64)
+                    self._ipm._H_inv = _np.linalg.inv(self._ipm.H)
+                    if self.logger:
+                        self.logger.info("[IPM] 已恢复标定（%s）", path)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning("[IPM] 初始化失败: %s", e)
+                self._ipm = None
+        return self._ipm
+
+    async def _handle_ipm_calibrate(self, data: dict) -> dict:
+        """A4 纸标定：抓一帧 → 自动检测白纸四角 → 解 H → 存盘。
+
+        用法（WS）：{"corners": [[x,y],...]} 可选手工指定四角；
+                    不给则自动检测（把 A4 纸平放在前方地面）。
+        """
+        ipm = self._get_ipm()
+        if ipm is None:
+            return {"type": "ipm_calibrate_result", "data": {"ok": False, "error": "IPM 不可用"}}
+        if self.camera_manager is None:
+            return {"type": "ipm_calibrate_result", "data": {"ok": False, "error": "无摄像头"}}
+
+        # 摄像头流可能没启动（只有自主模式才会自动拉流）——标定前先确保有帧
+        await self._ensure_perception_camera()
+        # 拉流后帧不会立刻可用（约 1~2 秒），最多等 3 秒
+        frame = None
+        for _ in range(30):
+            frame = self.camera_manager.get_frame(self._perception_camera_id)
+            if frame is not None:
+                break
+            await asyncio.sleep(0.1)
+        if frame is None:
+            return {"type": "ipm_calibrate_result", "data": {"ok": False, "error": "无视频帧"}}
+
+        # 调试：把标定用的帧存下来，便于离线分析为什么检测失败
+        try:
+            import cv2 as _cv2
+
+            _cv2.imwrite("/tmp/ipm_calib_frame.jpg", frame)
+        except Exception:
+            pass
+
+        # 把鸟瞰图也存下来 —— 调阈值必须"看得见"才能调
+        try:
+            _bev = ipm.to_bev(frame)
+            if _bev is not None:
+                import cv2 as _cv2
+
+                _cv2.imwrite("/tmp/ipm_bev.jpg", _bev)
+        except Exception:
+            pass
+
+        corners = (data or {}).get("corners")
+        if not corners:
+            corners = ipm.detect_paper_corners(frame)
+        if not corners:
+            return {
+                "type": "ipm_calibrate_result",
+                "data": {"ok": False, "error": "未检测到 A4 纸（请把纸平放在前方地面、光照充足）"},
+            }
+        if not ipm.calibrate_from_points(corners):
+            return {"type": "ipm_calibrate_result", "data": {"ok": False, "error": "单应矩阵求解失败"}}
+
+        # 持久化，重启后自动恢复
+        try:
+            _hp = getattr(self, "_ipm_h_path", None)
+            if isinstance(_hp, str) and _hp:
+                os.makedirs(os.path.dirname(_hp), exist_ok=True)
+                with open(_hp, "w", encoding="utf-8") as fp:
+                    json.dump({"H": ipm.H.tolist()}, fp)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning("[IPM] 保存标定失败: %s", e)
+
+        result = {"ok": True, "corners": corners}
+        if self.logger:
+            self.logger.warning("[IPM] 标定完成 corners=%s", corners)
+        if hasattr(self, "ws_server") and self.ws_server:
+            await self.ws_server.broadcast_message({"type": "ipm_calibrate_result", "data": result})
+        return {"type": "ipm_calibrate_result", "data": result}
+
+    async def _handle_odometry_calibrate(self, data: dict) -> dict:
+        """编码器标定：走一段 → 用**用户实测的距离**反算 counts_per_meter。
+
+        用法（WS）：{"distance_m": 1.0, "duration": 2.5, "speed": 0.3}
+        必须以 distance_m 为准 —— 控制量到底对应多少 m/s 是未知的，
+        不能假设，所以让距离由人用卷尺量。
+        """
+        if self.odometry is None or self.motion_controller is None:
+            return {"type": "odometry_calibrate_result", "data": {"ok": False, "error": "里程计/运动不可用"}}
+
+        payload = data or {}
+        dist_m = float(payload.get("distance_m") or 0.0)
+        dur = max(0.5, min(5.0, float(payload.get("duration") or 2.5)))
+        speed = max(0.05, min(0.5, float(payload.get("speed") or 0.3)))
+        if dist_m <= 0.05:
+            return {"type": "odometry_calibrate_result", "data": {"ok": False, "error": "需要 distance_m（实测距离）"}}
+
+        try:
+            self.odometry.sample()
+            enc0 = self.odometry.get_raw_encoders()
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < dur:
+                self.odometry.sample()
+                await self.motion_controller.set_mecanum_velocity(speed, 0.0, 0.0, "manual")
+                await asyncio.sleep(0.04)
+        finally:
+            try:
+                await self.motion_controller.stop()
+            except Exception:
+                pass
+
+        self.odometry.sample()
+        enc1 = self.odometry.get_raw_encoders()
+        deltas = {k: int(enc1.get(k, 0)) - int(enc0.get(k, 0)) for k in enc0 if k != "changed"}
+        # 只用"确实在动"的轮子求平均（编码器坏/拆掉的轮子会恒为 0，不能拉进平均）
+        moving = [abs(v) for v in deltas.values() if abs(v) > 50]
+        if not moving:
+            return {
+                "type": "odometry_calibrate_result",
+                "data": {"ok": False, "error": "四轮无位移，标定无效", "deltas": deltas},
+            }
+        avg = sum(moving) / len(moving)
+        cpm = avg / dist_m
+        result = {
+            "ok": True,
+            "distance_m": round(dist_m, 3),
+            "duration_s": round(dur, 2),
+            "speed_cmd": round(speed, 2),
+            "deltas": deltas,
+            "counts_per_meter": round(cpm, 1),
+            "note": "把 counts_per_meter 写入 navigation.odometry.counts_per_meter 并重启服务生效",
+        }
+        if self.logger:
+            self.logger.warning("[Calib] %s", result)
+        if hasattr(self, "ws_server") and self.ws_server:
+            await self.ws_server.broadcast_message({"type": "odometry_calibrate_result", "data": result})
+        return {"type": "odometry_calibrate_result", "data": result}
+
     async def _handle_odometry_reset(self, data: dict) -> dict:
         """重置位姿原点（标定与调试用）"""
         if self.odometry is None:
@@ -1313,6 +1478,14 @@ class MessageHandler:
         src = self.perception
         if src is None:
             return None
+        if self._ground_plane is None:
+            try:
+                from modules.navigation.perception.ground_plane import GroundPlanePerception
+
+                _cfg = ((self.config or {}).get("navigation", {}) or {}).get("perception", {}) or {}
+                self._ground_plane = GroundPlanePerception(_cfg.get("ground_plane", {}) or {}, self.logger)
+            except Exception:
+                self._ground_plane = None
         try:
             frame = self.camera_manager.get_frame(self._perception_camera_id) if self.camera_manager else None
         except Exception:
@@ -1332,6 +1505,20 @@ class MessageHandler:
                 gyro = (float(g.get("x", 0.0)), float(g.get("y", 0.0)), float(g.get("z", 0.0)))
 
         res = src.process(frame, gyro=gyro, now=time.monotonic())
+
+        # 第二路感知：地面平面（近距离静止障碍的正解）
+        gp_res = None
+        if self._ground_plane is not None:
+            try:
+                gp_res = self._ground_plane.process(frame, now=time.monotonic())
+            except Exception:
+                gp_res = None
+
+        if gp_res is not None:
+            from modules.navigation.perception.base import fuse
+
+            res = fuse([res, gp_res])
+
         if self.safety is not None:
             self.safety.report_perception(res.ok, res.reason)
         self._last_perception = res.to_dict()
@@ -1430,6 +1617,56 @@ class MessageHandler:
                 d = [enc[k] - self._probe_enc0[k] for k in ("m1", "m2", "m3", "m4")]
                 self.logger.warning("[Probe] t=%.1fs 编码器增量=%s", now - self._probe_t0, d)
         return True
+
+    async def _check_gimbal_tilt_trigger(self) -> None:
+        """调试触发：/tmp/wobot_gimbal_tilt 内容为角度（如 60）→ 设置云台俯仰。
+
+        用途：地面标定需要相机能看到地面，而当前是平视 —— 需要压低镜头。
+        """
+        path = "/tmp/wobot_gimbal_tilt"
+        if not os.path.exists(path) or self.gimbal_controller is None:
+            return
+        try:
+            with open(path, encoding="utf-8") as fp:
+                angle = float((fp.read() or "90").strip())
+            os.remove(path)
+        except Exception:
+            return
+        try:
+            await self.gimbal_controller.set_tilt(angle)
+            if self.logger:
+                self.logger.warning("[Gimbal] 俯仰已设为 %.0f°", angle)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning("[Gimbal] 设置俯仰失败: %s", e)
+
+    async def _check_ipm_calibrate_trigger(self) -> None:
+        """调试触发：存在 /tmp/wobot_ipm_calibrate 时执行一次 A4 标定并删掉文件。
+
+        与模式覆盖/运动探针同一套路 —— 让我能自己触发标定，不用麻烦用户点界面。
+        """
+        path = "/tmp/wobot_ipm_calibrate"
+        if not os.path.exists(path):
+            return
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        # 支持从 /tmp/wobot_ipm_corners 读显式四角（JSON 数组），
+        # 自动检测在复杂场景下不稳时用它（我已能从画面里读出纸张四角）
+        payload = {}
+        cpath = "/tmp/wobot_ipm_corners"
+        if os.path.exists(cpath):
+            try:
+                with open(cpath, encoding="utf-8") as fp:
+                    payload["corners"] = json.load(fp)
+                os.remove(cpath)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning("[IPM] 读取显式四角失败: %s", e)
+        res = await self._handle_ipm_calibrate(payload)
+        if self.logger:
+            self.logger.warning("[IPM] 触发标定结果: %s", res.get("data"))
 
     def _check_debug_mode_override(self) -> None:
         """调试用：通过文件切换运行模式。
@@ -1891,6 +2128,12 @@ class MessageHandler:
                 # 0) 调试：允许通过文件切换模式（我用于自主验证，不需要人工点界面）
                 self._check_debug_mode_override()
 
+                # 0.3) 调试：云台俯仰角度触发
+                await self._check_gimbal_tilt_trigger()
+
+                # 0.4) 调试：A4 标定触发（文件驱动）
+                await self._check_ipm_calibrate_trigger()
+
                 # 0.5) 调试：运动探针优先，绕过感知直接验证运动链路
                 if await self._motion_probe():
                     await asyncio.sleep(0.04)
@@ -1945,6 +2188,25 @@ class MessageHandler:
                         )
                         cmd["action"] = cmd.get("state", "-")
                         self._last_cruise = cmd
+                        # ⚠️ 必须真的把指令发给电机！
+                        # 这里曾经只有"算 cmd + 记日志"，没有 set_mecanum_velocity ——
+                        # 于是巡逻永远只是在"想"，从不驱动轮子（排查了很久）。
+                        try:
+                            sent = (cmd["vx"], cmd["wz"])
+                            if sent != self._last_sent_cmd:
+                                self._last_sent_cmd = sent
+                                if self.logger:
+                                    self.logger.warning(
+                                        "[Nav] 巡逻发送 vx=%.2f wz=%.2f 状态=%s（%s）",
+                                        cmd["vx"],
+                                        cmd["wz"],
+                                        cmd.get("state"),
+                                        (cmd.get("reason") or "")[:30],
+                                    )
+                            await self.motion_controller.set_mecanum_velocity(cmd["vx"], 0.0, cmd["wz"], "auto")
+                        except Exception as e:
+                            if self.logger:
+                                self.logger.warning(f"[Cruise] 运动指令失败: {e}")
                     elif self.cruise is not None and self.motion_controller is not None:
                         cmd = self.cruise.step(perc, hint_offset=scan_hint)
                         self._last_cruise = cmd
@@ -1966,6 +2228,19 @@ class MessageHandler:
                             if self.logger:
                                 self.logger.warning(f"[Cruise] 运动指令失败: {e}")
 
+                    # IPM 鸟瞰分析（已标定才跑）：先只做诊断，转向接线下一步做
+                    try:
+                        _ipm = self._get_ipm()
+                        if _ipm is not None and _ipm.calibrated:
+                            _f = (
+                                self.camera_manager.get_frame(self._perception_camera_id)
+                                if self.camera_manager
+                                else None
+                            )
+                            self._last_ipm = _ipm.analyze(_f)
+                    except Exception:
+                        pass
+
                     # 周期性诊断（~2s 一条）：自主行为不能"静默"——
                     # 曾因缺少这条日志，排查"不运动"时完全看不到感知与决策输出。
                     now_dbg = time.monotonic()
@@ -1983,12 +2258,13 @@ class MessageHandler:
                         )
                         if self.logger:
                             self.logger.info(
-                                "[Nav] mode=%s cam%d有帧=%s 航向=%.1f° ttc_min=%.2f 编码器=%s 光流=%.2fpx/帧 感知ok=%s(%s) 决策=%s(%s)",
+                                "[Nav] mode=%s cam%d有帧=%s 航向=%.1f° ttc_min=%.2f ipm=%s 编码器=%s 光流=%.2fpx/帧 感知ok=%s(%s) 决策=%s(%s)",
                                 self.mode_manager.mode,
                                 self._perception_camera_id,
                                 frame_now is not None,
                                 math.degrees(self.odometry.get_pose().get("theta", 0.0) if self.odometry else 0.0),
                                 float(getattr(perc, "ttc_min", 0.0) or 0.0),
+                                (self._last_ipm or {}).get("reason", "-"),
                                 _enc_vals,
                                 float(getattr(perc, "flow_px", 0.0) or 0.0),
                                 bool(getattr(perc, "ok", False)),

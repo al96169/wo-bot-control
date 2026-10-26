@@ -96,3 +96,29 @@ def test_invalid_geometry_is_reported():
 def test_status_exposes_calibration():
     st = _gp().get_status()
     assert set(["height_m", "pitch_deg", "vfov_deg", "range_m"]).issubset(st.keys())
+
+
+def test_solve_geometry_recovers_known_parameters():
+    """两位置标定：用已知 (z,row) 反解出原始的高度/俯仰角"""
+    gp = _gp(height_m=0.18, pitch_deg=22.0, vfov_deg=45.0)
+    samples = [(0.6, gp.row_for_distance(0.6, H)), (1.2, gp.row_for_distance(1.2, H))]
+    h, pitch = GroundPlanePerception.solve_geometry(samples, vfov_deg=45.0, img_h=H)
+    assert h is not None and pitch is not None
+    assert abs(h - 0.18) < 0.02
+    assert abs(pitch - 22.0) < 2.0
+
+
+def test_solve_geometry_needs_two_samples():
+    assert GroundPlanePerception.solve_geometry([(1.0, 300)]) == (None, None)
+
+
+def test_distance_becomes_pseudo_ttc():
+    """距离÷假定速度 → 伪 TTC，使巡逻的 stop_ttc 能直接复用"""
+    img, _ = _floor_with_box(0.9)
+    r = _gp(assumed_speed_mps=0.6).process(img)
+    assert r.ok is True
+    sector = r.sectors["center"]
+    ttc = sector.ttc
+    assert ttc is not None, f"未触发障碍检测：{r.reason}"
+    # 检测距离有行量化误差，区间放宽；重点验证"距离已被折算成秒"
+    assert 0.8 < ttc < 3.0, f"伪 TTC 应为 距离/速度 量级，实际 {ttc:.2f}s（{r.reason}）"

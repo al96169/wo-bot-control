@@ -53,6 +53,8 @@ class GroundPlanePerception(PerceptionSource):
         self.max_dist_m = float(self.config.get("max_dist_m", 1.50))
         self.edge_threshold = float(self.config.get("edge_threshold", 12.0))  # 水平边缘响应阈值
         self.center_ratio = float(self.config.get("center_ratio", 0.5))  # 取中间多少列
+        # 用"当前速度"把距离折算成伪 TTC，好让上层（巡逻的 stop_ttc）直接复用
+        self.assumed_speed_mps = float(self.config.get("assumed_speed_mps", 0.6))
 
         self._last_dist: float | None = None
 
@@ -138,17 +140,61 @@ class GroundPlanePerception(PerceptionSource):
         if peak >= self.edge_threshold and 0 < dist <= self.max_dist_m:
             self._last_dist = dist
             sector.blocked = True
-            # 用距离折算一个"伪 TTC"（速度为 0 时为 None，仅供面板展示距离）
-            res.reason = f"检测到地面之上的障碍，距离约 {dist:.2f}m（边缘强度 {peak:.1f}）"
+            # 距离 ÷ 假定速度 = 伪 TTC：这样"前方 0.9m、速度 0.6m/s → TTC 1.5s"
+            # 能与 V1 的 TTC 在同一维度融合，巡逻的 stop_ttc 直接生效
+            if self.assumed_speed_mps > 0.01:
+                sector.ttc = dist / self.assumed_speed_mps
+            res.reason = f"检测到地面之上的障碍，距离约 {dist:.2f}m（伪 TTC {sector.ttc:.1f}s，边缘强度 {peak:.1f}）"
             res.passable = {SECTOR_CENTER: False}
         else:
             self._last_dist = None
             res.reason = "前方地面通畅" if peak < self.edge_threshold else "边缘过强但距离超范围"
             res.passable = {SECTOR_CENTER: True}
 
-        sector.ttc = None
         res.sectors[SECTOR_CENTER] = sector
         return res
+
+    @staticmethod
+    def solve_geometry(samples, vfov_deg: float = 45.0, img_h: int = 480):
+        """用两组「已知地面距离 ↔ 观测到的行号」反解 相机高度 与 俯仰角。
+
+        samples: [(z_m, row), (z_m, row), ...]（至少两组，越分散越准）
+        返回 (height_m, pitch_deg)；求解失败返回 (None, None)。
+
+        原理：row = cy + f·tan(atan(h/z) − θ)
+             两组方程 → 用数值搜索 θ，h 由每组反算后取平均。
+        """
+        import math
+
+        if not samples or len(samples) < 2:
+            return None, None
+        f = (img_h / 2.0) / max(1e-6, math.tan(math.radians(vfov_deg) / 2.0))
+        cy = img_h / 2.0
+
+        best = None
+        # 俯仰角搜索区间：0°（平视）~ 60°（明显俯视）
+        for i in range(0, 601):
+            theta = math.radians(i / 10.0)
+            hs = []
+            ok = True
+            for z, row in samples:
+                beta = math.atan((row - cy) / max(1e-6, f)) + theta
+                if beta <= 1e-6:
+                    ok = False
+                    break
+                hs.append(z * math.tan(beta))
+            if not ok or not hs:
+                continue
+            h_mean = sum(hs) / len(hs)
+            # 解的"一致性"：各样本反算高度越接近越好
+            err = sum(abs(x - h_mean) for x in hs)
+            if h_mean <= 0 or h_mean > 2.0:
+                continue
+            if best is None or err < best[0]:
+                best = (err, h_mean, math.degrees(theta))
+        if best is None:
+            return None, None
+        return round(best[1], 4), round(best[2], 2)
 
     # ------------------------------------------------------------------ 状态
 

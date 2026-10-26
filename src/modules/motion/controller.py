@@ -99,6 +99,13 @@ class MotionController:
         if mode:
             self.current_mode = mode
 
+        # 观测点：记录**真正下发到硬件**的值（仅在变化时打印）。
+        # 用于定位"自主指令被谁覆盖"——之前只能看到状态机意图，看不到真实调用序列。
+        _cur = (round(v_x, 3), round(v_y, 3), round(v_z, 3))
+        if getattr(self, "_last_logged_mv", None) != _cur:
+            self._last_logged_mv = _cur
+            if self.logger:
+                self.logger.info("[Motion] set_mecanum vx=%.2f vy=%.2f vz=%.2f", v_x, v_y, v_z)
         await self.hardware.set_mecanum(v_x, v_y, v_z)
 
         if self.logger:
