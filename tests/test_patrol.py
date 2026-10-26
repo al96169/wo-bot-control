@@ -165,3 +165,18 @@ def test_low_flow_ttc_is_ignored():
     assert _center_ttc(p) is None, "零光流下不应给出 TTC 结论"
     p.flow_px = 5.0
     assert _center_ttc(p) == 0.44, "光流足够时应照常采用 TTC"
+
+
+def test_uninformative_scan_goes_forward_instead_of_stop():
+    """扫视值全部接近 0（静止时光流≈0）应视为"测不出来"，而不是"全堵"
+
+    曾真实发生：机器人静止 → 5 个方向空旷度都≈0 → 巡逻永久停在 observe
+    """
+    c = _p(min_observe_s=0.0, observe_s=0.0, min_directions=1)
+    # 静止：光流 0.0（低于测量下限）→ 扫视结果无意义
+    still = _perc(None)
+    still.flow_px = 0.0
+    c.step(still, now=0.0)
+    r = c.step(still, now=1.0, openness={0.0: 0.05, 30.0: 0.03}, scan_rounds=1)
+    assert r["state"] == STATE_FORWARD, "扫视无信息时应前进，不能判全堵"
+    assert r["vx"] > 0

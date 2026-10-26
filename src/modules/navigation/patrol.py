@@ -98,6 +98,7 @@ class PatrolController:
             self._scan_rounds_seen = scan_rounds
         if openness:
             self._last_openness = dict(openness)
+        self._flow_px = getattr(perception, "flow_px", None)
 
         if self._state == STATE_STOP and self._state_since == 0.0:
             # 首次进入：先观察一轮再动（不要一上来就冲）
@@ -150,6 +151,20 @@ class PatrolController:
             return self._result(STATE_OBSERVE, reason="停下观察中")
 
         self._observations += 1
+        # ⚠️ 云台扫视是**用光流**测"哪个方向更空"，而机器人**静止时光流≈0** →
+        #    所有方向都会被判成"堵" → 巡逻永久停在 observe（真机踩坑）。
+        #    扫视值全部极小时视为"测不出来"，按前方前进，安全交给 IPM/TTC 兜底。
+        # 判据必须用"光流是否可信"，不能单看空旷度数值：
+        #   空旷度 < blocked_openness(0.15) 本来就表示"堵"，
+        #   若用数值阈值区分"测不出来"，会把真堵也当成无信息 → 危险。
+        #   静止时光流≈0 → 扫视结果无意义 → 才允许"按前方走"。
+        _vals = [v for v in (self._last_openness or {}).values() if v is not None]
+        _flow = getattr(self, "_flow_px", None)
+        _flow_unreliable = _flow is not None and abs(float(_flow)) < 0.3
+        if _vals and _flow_unreliable and max(_vals) < 0.5:
+            self._enter(STATE_FORWARD, now, "扫视无信息（静止时光流≈0），按前方前进")
+            return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
+
         best = self.best_direction()
         if best is None or best[1] < self.blocked_openness:
             self._enter(STATE_STOP, now, "所有方向都堵，停车等待")
