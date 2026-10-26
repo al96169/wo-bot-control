@@ -1517,7 +1517,12 @@ class MessageHandler:
         if gp_res is not None:
             from modules.navigation.perception.base import fuse
 
+            _looming_flow = res.flow_px  # 融合前先记住主感知的光流
             res = fuse([res, gp_res])
+            # fuse() 只保留第一个非空值；若主感知的光流没被带过来，
+            # 巡逻侧"光流下限保护"就会失效（真实踩坑：静止时仍报 TTC）
+            if res.flow_px is None:
+                res.flow_px = _looming_flow
 
         if self.safety is not None:
             self.safety.report_perception(res.ok, res.reason)
