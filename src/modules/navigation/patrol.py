@@ -81,7 +81,7 @@ class PatrolController:
     def step(
         self,
         perception,
-        now: float,
+        now: float | None = None,
         heading: float | None = None,
         openness: dict | None = None,
         scan_rounds: int | None = None,
