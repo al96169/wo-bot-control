@@ -86,6 +86,7 @@ class PatrolController:
         openness: dict | None = None,
         scan_rounds: int | None = None,
         ipm_hint: float | None = None,
+        ipm_clear: bool | None = None,
     ) -> dict:
         """推进一个控制周期，返回运动指令。
 
@@ -101,6 +102,7 @@ class PatrolController:
             self._last_openness = dict(openness)
         self._flow_px = getattr(perception, "flow_px", None)
         self._ipm_hint = ipm_hint
+        self._ipm_clear = ipm_clear
 
         if self._state == STATE_STOP and self._state_since == 0.0:
             # 首次进入：先观察一轮再动（不要一上来就冲）
@@ -130,6 +132,10 @@ class PatrolController:
             self._enter(STATE_OBSERVE, now, "感知不可用（看不见 ≠ 畅通），停下观察")
             return self._result(STATE_OBSERVE, reason=self._last_reason)
 
+        # 几何权威：IPM 明确说"前方通畅"时，不因光流 TTC 停车。
+        # 光流在云台转动/噪声下会造出假 TTC（真机踩坑：静止时一直报 0.5s）。
+        if self._ipm_clear is True:
+            center_ttc = None
         if not warm and center_ttc is not None and center_ttc < self.stop_ttc:
             self._enter(STATE_OBSERVE, now, f"前方 {center_ttc:.1f}s，停下观察")
             return self._result(STATE_OBSERVE, reason=self._last_reason)

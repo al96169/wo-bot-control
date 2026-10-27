@@ -2201,6 +2201,11 @@ class MessageHandler:
                             openness=(self.scanner.openness() if self.scanner else None),
                             scan_rounds=(self.scanner.rounds if self.scanner else None),
                             ipm_hint=_ipm_hint,
+                            ipm_clear=(
+                                True
+                                if (self._last_ipm or {}).get("ok") and (self._last_ipm or {}).get("best")
+                                else (False if (self._last_ipm or {}).get("ok") else None)
+                            ),
                         )
                         cmd["action"] = cmd.get("state", "-")
                         self._last_cruise = cmd
