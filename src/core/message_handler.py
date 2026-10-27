@@ -2201,9 +2201,12 @@ class MessageHandler:
                             openness=(self.scanner.openness() if self.scanner else None),
                             scan_rounds=(self.scanner.rounds if self.scanner else None),
                             ipm_hint=_ipm_hint,
+                            # ⚠️ 只有 IPM **明确说"前方通畅"** 才允许抑制光流 TTC。
+                            # 之前写成"有 best 就算通畅" → "需要绕行"时也抑制 →
+                            # TTC 报 0.99s（真有障碍）却不停车，是安全回退。
                             ipm_clear=(
                                 True
-                                if (self._last_ipm or {}).get("ok") and (self._last_ipm or {}).get("best")
+                                if (self._last_ipm or {}).get("reason") == "前方通畅"
                                 else (False if (self._last_ipm or {}).get("ok") else None)
                             ),
                         )
