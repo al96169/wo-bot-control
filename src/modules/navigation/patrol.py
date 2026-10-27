@@ -61,6 +61,9 @@ class PatrolController:
 
         # ---- 转向 ----
         self.turn_speed = float(self.config.get("turn_speed", 0.5))  # rad/s
+        # 弧线转弯：原地转时麦轮辊子要横滑，地面光滑会严重打滑（实测轮转 1.8 倍、
+        # 车身只转 4°/57°）。给一点前进速度形成弧线，牵引力足够，滑移大幅减少。
+        self.turn_arc_speed = float(self.config.get("turn_arc_speed", 0.12))
         self.turn_tol_deg = float(self.config.get("turn_tol_deg", 8.0))
         self.max_turn_s = float(self.config.get("max_turn_s", 8.0))  # 转向超时保护
         self.stall_check_s = float(self.config.get("stall_check_s", 1.5))  # 多久没转动就判定转向无效
@@ -239,7 +242,10 @@ class PatrolController:
                 self._enter(STATE_FORWARD, now, "转向完成（无航向反馈）")
                 return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
             return self._result(
-                STATE_TURN, wz=self.turn_speed if offset_rad > 0 else -self.turn_speed, reason="转向中（无航向反馈）"
+                STATE_TURN,
+                vx=self.turn_arc_speed,
+                wz=self.turn_speed if offset_rad > 0 else -self.turn_speed,
+                reason="转向中（无航向反馈）",
             )
 
         if self._target_heading is None:
@@ -250,6 +256,7 @@ class PatrolController:
             return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
         return self._result(
             STATE_TURN,
+            vx=self.turn_arc_speed,
             wz=self.turn_speed if err > 0 else -self.turn_speed,
             reason=f"转向中（误差 {math.degrees(err):+.1f}°）",
         )
