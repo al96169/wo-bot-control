@@ -180,3 +180,33 @@ def test_uninformative_scan_goes_forward_instead_of_stop():
     r = c.step(still, now=1.0, openness={0.0: 0.05, 30.0: 0.03}, scan_rounds=1)
     assert r["state"] == STATE_FORWARD, "扫视无信息时应前进，不能判全堵"
     assert r["vx"] > 0
+
+
+# ---------------------------------------------------------------- IPM 决策
+
+
+def test_ipm_clear_goes_forward():
+    """IPM 说前方通畅 → 直行"""
+    c = _p(min_observe_s=0.0, observe_s=0.0, min_directions=1)
+    c.step(_perc(None), now=0.0)
+    r = c.step(_perc(None), now=1.0, openness={0.0: 0.9}, scan_rounds=1, ipm_hint=2.0, ipm_clear=True)
+    assert r["state"] == STATE_FORWARD and r["vx"] > 0
+
+
+def test_ipm_detour_forces_minimum_turn():
+    """IPM 说需要绕行 → 即使偏移很小也必须至少转 35°（否则直撞）"""
+    c = _p(min_observe_s=0.0, observe_s=0.0, min_directions=1, ipm_min_turn_deg=35.0)
+    c.step(_perc(None), now=0.0)
+    r = c.step(_perc(None), now=1.0, openness={0.0: 0.9}, scan_rounds=1, ipm_hint=-5.0, ipm_clear=False)
+    assert r["state"] == STATE_TURN, f"应转向，实际 {r['state']}"
+    assert abs(c._pending_offset) >= 35.0, f"转角应 ≥35°，实际 {c._pending_offset}"
+
+
+def test_ipm_takes_priority_over_uninformative_scan():
+    """关键顺序：IPM 有结论时不能被"扫视无信息→前进"抢先（真机踩坑：一直顶障碍）"""
+    c = _p(min_observe_s=0.0, observe_s=0.0, min_directions=1)
+    still = _perc(None)
+    still.flow_px = 0.0  # 静止：扫视结果无意义
+    c.step(still, now=0.0)
+    r = c.step(still, now=1.0, openness={0.0: 0.05, 30.0: 0.03}, scan_rounds=1, ipm_hint=-40.0, ipm_clear=False)
+    assert r["state"] == STATE_TURN, "有 IPM 结论时应转向，而不是直行"
