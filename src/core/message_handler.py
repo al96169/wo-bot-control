@@ -2185,11 +2185,22 @@ class MessageHandler:
                         # 只在停下观察/停车时才扫视（行进中扫视既无用也浪费）
                         if self.scanner is not None and pstate in ("observe", "stop"):
                             scan_hint = self.scanner.best_offset()
+                        # IPM 最空方向 → 角度（横向偏移 ÷ 纵深 = 航向角）
+                        _ipm_hint = None
+                        try:
+                            _b = (self._last_ipm or {}).get("best")
+                            if isinstance(_b, dict) and _b.get("gap_m"):
+                                import math as _m
+
+                                _ipm_hint = _m.degrees(_m.atan2(float(_b["offset_m"]), float(_b["gap_m"])))
+                        except Exception:
+                            _ipm_hint = None
                         cmd = self.patrol.step(
                             perc,
                             heading=(self.odometry.get_pose().get("theta") if self.odometry else None),
                             openness=(self.scanner.openness() if self.scanner else None),
                             scan_rounds=(self.scanner.rounds if self.scanner else None),
+                            ipm_hint=_ipm_hint,
                         )
                         cmd["action"] = cmd.get("state", "-")
                         self._last_cruise = cmd

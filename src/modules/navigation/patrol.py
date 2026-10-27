@@ -81,10 +81,11 @@ class PatrolController:
     def step(
         self,
         perception,
-        now: float | None = None,
-        openness: dict | None = None,
+        now: float,
         heading: float | None = None,
+        openness: dict | None = None,
         scan_rounds: int | None = None,
+        ipm_hint: float | None = None,
     ) -> dict:
         """推进一个控制周期，返回运动指令。
 
@@ -99,6 +100,7 @@ class PatrolController:
         if openness:
             self._last_openness = dict(openness)
         self._flow_px = getattr(perception, "flow_px", None)
+        self._ipm_hint = ipm_hint
 
         if self._state == STATE_STOP and self._state_since == 0.0:
             # 首次进入：先观察一轮再动（不要一上来就冲）
@@ -165,6 +167,18 @@ class PatrolController:
             self._enter(STATE_FORWARD, now, "扫视无信息（静止时光流≈0），按前方前进")
             return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
 
+        # ★ 优先用 IPM 的几何方向：它靠单应矩阵算"哪个方向有空隙"，
+        #   静止也有效；而云台扫视靠旋转光流，纯旋转没有深度视差 → 数值无意义。
+        if self._ipm_hint is not None:
+            off = float(self._ipm_hint)
+            if abs(off) <= self.straight_tol_deg:
+                self._enter(STATE_FORWARD, now, f"IPM 前方通畅（{off:+.0f}°），直行")
+                return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
+            self._target_heading = None
+            self._pending_offset = off
+            self._enter(STATE_TURN, now, f"IPM 最空方向 {off:+.0f}°，转向")
+            return self._result(STATE_TURN, wz=0.0, reason=self._last_reason)
+
         best = self.best_direction()
         if best is None or best[1] < self.blocked_openness:
             self._enter(STATE_STOP, now, "所有方向都堵，停车等待")
@@ -178,6 +192,17 @@ class PatrolController:
         self._pending_offset = best[0]
         self._enter(STATE_TURN, now, f"最空方向 {best[0]:+.0f}°（空旷度 {best[1]:.2f}），转向")
         return self._result(STATE_TURN, wz=0.0, reason=self._last_reason)
+
+    def _stop(self, now: float) -> dict:
+        """停车等待。
+
+        ⚠️ 必须有重试出口：曾经"所有方向都堵"进入 stop 后**永不退出** →
+        机器人永久停住（真机踩坑）。等待 retry_s 后重新观察一次。
+        """
+        if (now - self._state_since) >= float(self.config.get("stop_retry_s", 3.0)):
+            self._enter(STATE_OBSERVE, now, "停车等待后重新观察")
+            return self._result(STATE_OBSERVE, reason=self._last_reason)
+        return self._stop(now)
 
     def _turn(self, now: float, heading: float | None) -> dict:
         if now - self._state_since > self.max_turn_s:
