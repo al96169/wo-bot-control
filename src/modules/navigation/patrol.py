@@ -162,17 +162,6 @@ class PatrolController:
         # ⚠️ 云台扫视是**用光流**测"哪个方向更空"，而机器人**静止时光流≈0** →
         #    所有方向都会被判成"堵" → 巡逻永久停在 observe（真机踩坑）。
         #    扫视值全部极小时视为"测不出来"，按前方前进，安全交给 IPM/TTC 兜底。
-        # 判据必须用"光流是否可信"，不能单看空旷度数值：
-        #   空旷度 < blocked_openness(0.15) 本来就表示"堵"，
-        #   若用数值阈值区分"测不出来"，会把真堵也当成无信息 → 危险。
-        #   静止时光流≈0 → 扫视结果无意义 → 才允许"按前方走"。
-        _vals = [v for v in (self._last_openness or {}).values() if v is not None]
-        _flow = getattr(self, "_flow_px", None)
-        _flow_unreliable = _flow is not None and abs(float(_flow)) < 0.3
-        if _vals and _flow_unreliable and max(_vals) < 0.5:
-            self._enter(STATE_FORWARD, now, "扫视无信息（静止时光流≈0），按前方前进")
-            return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
-
         # ★ 优先用 IPM 的几何方向：它靠单应矩阵算"哪个方向有空隙"，
         #   静止也有效；而云台扫视靠旋转光流，纯旋转没有深度视差 → 数值无意义。
         if self._ipm_hint is not None:
@@ -189,6 +178,16 @@ class PatrolController:
             self._pending_offset = off
             self._enter(STATE_TURN, now, f"IPM 最空方向 {off:+.0f}°，转向")
             return self._result(STATE_TURN, wz=0.0, reason=self._last_reason)
+
+        # 只有在 IPM **没有结论**时，才允许用"扫视无信息 → 前进"兜底。
+        # （顺序很关键：曾把这段放在 IPM 之前 → 静止时永远直行，无视 IPM 的"需要绕行"，
+        #   结果一直往障碍物上顶 ← 真机踩坑）
+        _vals = [v for v in (self._last_openness or {}).values() if v is not None]
+        _flow = getattr(self, "_flow_px", None)
+        _flow_unreliable = _flow is not None and abs(float(_flow)) < 0.3
+        if _vals and _flow_unreliable and max(_vals) < 0.5:
+            self._enter(STATE_FORWARD, now, "扫视无信息（静止时光流≈0），按前方前进")
+            return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
 
         best = self.best_direction()
         if best is None or best[1] < self.blocked_openness:
