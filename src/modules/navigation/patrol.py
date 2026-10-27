@@ -177,6 +177,11 @@ class PatrolController:
         #   静止也有效；而云台扫视靠旋转光流，纯旋转没有深度视差 → 数值无意义。
         if self._ipm_hint is not None:
             off = float(self._ipm_hint)
+            # IPM 说"需要绕行"时，即使偏移量很小也**必须转向**（用最小转角），
+            # 否则会继续直撞上去（真机踩坑：TTC 1.2s 有障碍，却因偏移小而直行）。
+            if self._ipm_clear is False:
+                _min_turn = float(self.config.get("ipm_min_turn_deg", 35.0))
+                off = (1.0 if off >= 0 else -1.0) * max(abs(off), _min_turn)
             if abs(off) <= self.straight_tol_deg:
                 self._enter(STATE_FORWARD, now, f"IPM 前方通畅（{off:+.0f}°），直行")
                 return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
