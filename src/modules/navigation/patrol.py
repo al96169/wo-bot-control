@@ -30,6 +30,7 @@ from .perception.base import SECTOR_CENTER
 STATE_FORWARD = "forward"
 STATE_OBSERVE = "observe"
 STATE_TURN = "turn"
+STATE_BACK = "back"  # 后退（所有方向脚下都被挡时）
 STATE_STOP = "stop"
 
 
@@ -90,6 +91,7 @@ class PatrolController:
         scan_rounds: int | None = None,
         ipm_hint: float | None = None,
         ipm_clear: bool | None = None,
+        pano=None,  # 全景扫描结果（Panorama）
     ) -> dict:
         """推进一个控制周期，返回运动指令。
 
@@ -106,6 +108,7 @@ class PatrolController:
         self._flow_px = getattr(perception, "flow_px", None)
         self._ipm_hint = ipm_hint
         self._ipm_clear = ipm_clear
+        self._pano = pano
 
         if self._state == STATE_STOP and self._state_since == 0.0:
             # 首次进入：先观察一轮再动（不要一上来就冲）
@@ -115,6 +118,8 @@ class PatrolController:
             return self._forward(perception, now)
         if self._state == STATE_OBSERVE:
             return self._observe(now, scan_rounds)
+        if self._state == STATE_BACK:
+            return self._back(now)
         if self._state == STATE_TURN:
             return self._turn(now, heading)
 
@@ -165,6 +170,38 @@ class PatrolController:
         # ⚠️ 云台扫视是**用光流**测"哪个方向更空"，而机器人**静止时光流≈0** →
         #    所有方向都会被判成"堵" → 巡逻永久停在 observe（真机踩坑）。
         #    扫视值全部极小时视为"测不出来"，按前方前进，安全交给 IPM/TTC 兜底。
+        # ★★ 最高优先：全景扫描结果（每走一小段扫一次，覆盖左右）
+        #    这是应对"摄像头视场窄 + 装在最前面"的核心策略。
+        _pano = getattr(self, "_pano", None)
+        if _pano is not None and getattr(_pano, "ready", False):
+            from .perception.panorama import PanoramaDecision
+
+            cmd = PanoramaDecision(
+                {
+                    "near_limit": self.config.get("pano_near_limit", 0.55),
+                    "front_ok_near": self.config.get("pano_front_ok_near", 0.25),
+                    "gain": self.config.get("pano_gain", 0.2),
+                    "turn_deg": self.config.get("pano_turn_deg", 35.0),
+                }
+            ).decide(_pano)
+            act = cmd.get("action")
+            if act == "forward":
+                self._enter(STATE_FORWARD, now, f"全景：{cmd.get('reason')}")
+                return self._result(STATE_FORWARD, vx=self.forward_speed, reason=self._last_reason)
+            if act == "turn":
+                self._pending_offset = float(cmd.get("angle") or 0.0)
+                self._enter(STATE_TURN, now, f"全景：{cmd.get('reason')}")
+                return self._result(STATE_TURN, wz=0.0, reason=self._last_reason)
+            if act == "backward":
+                self._enter(STATE_BACK, now, f"全景：{cmd.get('reason')}")
+                return self._result(
+                    STATE_BACK, vx=-abs(float(self.config.get("back_speed", 0.12))), reason=self._last_reason
+                )
+            if act == "rotate":
+                self._pending_offset = float(cmd.get("angle") or 35.0)
+                self._enter(STATE_TURN, now, f"全景：{cmd.get('reason')}（原地转）")
+                return self._result(STATE_TURN, wz=0.0, reason=self._last_reason)
+
         # ★ 优先用 IPM 的几何方向：它靠单应矩阵算"哪个方向有空隙"，
         #   静止也有效；而云台扫视靠旋转光流，纯旋转没有深度视差 → 数值无意义。
         if self._ipm_hint is not None:
@@ -216,6 +253,14 @@ class PatrolController:
             self._enter(STATE_OBSERVE, now, "停车等待后重新观察")
             return self._result(STATE_OBSERVE, reason=self._last_reason)
         return self._stop(now)
+
+    def _back(self, now: float) -> dict:
+        """后退一小段（所有方向脚下都被挡时先退开再判断）。"""
+        dur = float(self.config.get("back_s", 0.8))
+        if (now - self._state_since) >= dur:
+            self._enter(STATE_OBSERVE, now, "后退完成，重新观察")
+            return self._result(STATE_OBSERVE, reason=self._last_reason)
+        return self._result(STATE_BACK, vx=-abs(float(self.config.get("back_speed", 0.12))), reason=self._last_reason)
 
     def _turn(self, now: float, heading: float | None) -> dict:
         if now - self._state_since > self.max_turn_s:

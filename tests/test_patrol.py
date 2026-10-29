@@ -7,6 +7,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from modules.navigation.patrol import (  # noqa: E402
+    STATE_BACK,
     STATE_FORWARD,
     STATE_OBSERVE,
     STATE_STOP,
@@ -210,3 +211,46 @@ def test_ipm_takes_priority_over_uninformative_scan():
     c.step(still, now=0.0)
     r = c.step(still, now=1.0, openness={0.0: 0.05, 30.0: 0.03}, scan_rounds=1, ipm_hint=-40.0, ipm_clear=False)
     assert r["state"] == STATE_TURN, "有 IPM 结论时应转向，而不是直行"
+
+
+# ---------------------------------------------------------------- 全景动作
+
+
+def test_panorama_all_blocked_backs_off():
+    """全景说所有方向脚下都被挡 → 必须后退（真机事故后的核心策略）"""
+    from modules.navigation.perception.panorama import Panorama
+
+    pano = Panorama()
+    for a in (0.0, -40.0, 40.0):
+        pano.add(a, 0.9, 0.3)
+    c = _p(min_observe_s=0.0, observe_s=0.0, min_directions=1)
+    c.step(_perc(None), now=0.0)
+    r = c.step(_perc(None), now=1.0, openness={0.0: 0.9}, scan_rounds=1, pano=pano)
+    assert r["state"] == STATE_BACK, f"应后退，实际 {r['state']}"
+    assert r["vx"] < 0
+
+
+def test_panorama_takes_priority_over_ipm():
+    """全景结论优先于 IPM（全景能看左右，IPM 只看单帧）"""
+    from modules.navigation.perception.panorama import Panorama
+
+    pano = Panorama()
+    pano.add(0.0, 0.8, 0.3)
+    pano.add(-40.0, 0.05, 0.2)
+    pano.add(40.0, 0.8, 0.3)
+    c = _p(min_observe_s=0.0, observe_s=0.0, min_directions=1)
+    c.step(_perc(None), now=0.0)
+    r = c.step(_perc(None), now=1.0, openness={0.0: 0.9}, scan_rounds=1, ipm_hint=2.0, ipm_clear=True, pano=pano)
+    assert r["state"] == STATE_TURN, f"应转向（左空），实际 {r['state']}"
+
+
+def test_back_state_times_out_to_observe():
+    """后退到时后自动回到观察"""
+    c = _p(min_observe_s=0.0, observe_s=0.0, min_directions=1, back_s=0.3)
+
+    c._state = STATE_BACK
+    c._state_since = 0.0
+    r = c.step(_perc(None), now=0.1)
+    assert r["state"] == STATE_BACK and r["vx"] < 0
+    r2 = c.step(_perc(None), now=1.0)
+    assert r2["state"] == STATE_OBSERVE, f"后退应结束，实际 {r2['state']}"
